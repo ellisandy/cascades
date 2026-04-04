@@ -1,1 +1,5 @@
 /target
+.beads/
+.claude/
+.runtime/
+CLAUDE.md
