@@ -1,0 +1,17 @@
+# ---------------------------------- WARNING ----------------------------------------
+# The following files are considered provisional and subject to revision.
+# They are released on the condition that neither the USGS nor the United States
+# Government may be held liable for any damages resulting from its authorized
+# or unauthorized use.
+# -------------------------------------------------------------------------------------
+#
+# This file is a FIXTURE for testing. It simulates a USGS NWIS site search
+# response for streams near Mount Vernon, WA (bBox=-122.84,48.17,-121.84,48.67).
+#
+agency_cd	site_no	station_nm	site_tp_cd	dec_lat_va	dec_long_va	coord_datum_cd	alt_va	alt_datum_cd	huc_cd	drain_area_va	tz_cd	local_time_fg
+5s	15s	50s	7s	16s	16s	10s	8s	10s	16s	8s	6s	1s
+USGS	12200500	SKAGIT RIVER NEAR MOUNT VERNON, WA	ST	48.4216667	-122.3377778	NAD83	9.11	NAVD88	17110005	11161	PST	Y
+USGS	12194000	SKAGIT RIVER AT SEDRO WOOLLEY, WA	ST	48.5094444	-122.2127778	NAD83	28.00	NAVD88	17110005	8990	PST	Y
+USGS	12201500	SAMISH RIVER NEAR BURLINGTON, WA	ST	48.4622222	-122.3427778	NAD83	3.87	NAVD88	17110019	187	PST	Y
+USGS	12204220	NOOKACHAMPS CREEK AT CLEAR LAKE, WA	ST	48.4547222	-122.2569444	NAD83	28.00	NAVD88	17110005	60.5	PST	Y
+USGS	12197500	SAUK RIVER NEAR SAUK, WA	ST	48.4133333	-121.5672222	NAD83	232.00	NAVD88	17110005	725	PST	Y

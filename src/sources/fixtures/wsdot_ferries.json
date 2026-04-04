@@ -1,0 +1,38 @@
+{
+  "ScheduleID": 2026,
+  "ScheduleName": "Current Schedule",
+  "TerminalCombos": [
+    {
+      "DepartingTerminalID": 1,
+      "DepartingTerminalName": "Anacortes",
+      "ArrivingTerminalID": 10,
+      "ArrivingTerminalName": "Friday Harbor",
+      "Times": [
+        {
+          "DepartingTime": "/Date(1711652400000-0700)/",
+          "ArrivingTime": "/Date(1711657800000-0700)/",
+          "VesselID": 68,
+          "VesselName": "MV Samish",
+          "LoadingRule": 1,
+          "AnnotationIndexes": []
+        },
+        {
+          "DepartingTime": "/Date(1711659600000-0700)/",
+          "ArrivingTime": "/Date(1711665000000-0700)/",
+          "VesselID": 68,
+          "VesselName": "MV Samish",
+          "LoadingRule": 1,
+          "AnnotationIndexes": []
+        },
+        {
+          "DepartingTime": "/Date(1711666800000-0700)/",
+          "ArrivingTime": "/Date(1711672200000-0700)/",
+          "VesselID": 75,
+          "VesselName": "MV Chelan",
+          "LoadingRule": 1,
+          "AnnotationIndexes": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+[
+  {
+    "AlertID": 401234,
+    "County": "Skagit",
+    "EndRoadwayLocation": {
+      "Description": "Diablo",
+      "Direction": "B",
+      "Latitude": 48.7134,
+      "Longitude": -121.0642,
+      "MilePost": 171.0,
+      "RoadName": "020"
+    },
+    "EndTime": "/Date(1748736000000-0700)/",
+    "EventCategory": "Closure",
+    "EventStatus": "Open",
+    "ExtendedDescription": "SR 20 North Cascades Highway is closed from milepost 134 (Ross Dam Trailhead) to milepost 171 (Rainy Pass) for the winter season. The highway typically reopens in mid to late May depending on snowpack and avalanche conditions.",
+    "HeadlineDescription": "SR 20 closed — winter season",
+    "LastUpdatedTime": "/Date(1711929600000-0700)/",
+    "Priority": "Highest",
+    "Region": "Northwest",
+    "StartRoadwayLocation": {
+      "Description": "Ross Dam Trailhead",
+      "Direction": "B",
+      "Latitude": 48.7279,
+      "Longitude": -121.2879,
+      "MilePost": 134.0,
+      "RoadName": "020"
+    },
+    "StartTime": "/Date(1700438400000-0700)/"
+  },
+  {
+    "AlertID": 401567,
+    "County": "Skagit",
+    "EndRoadwayLocation": {
+      "Description": "MP 62",
+      "Direction": "B",
+      "Latitude": 48.4521,
+      "Longitude": -122.3012,
+      "MilePost": 62.0,
+      "RoadName": "020"
+    },
+    "EndTime": "/Date(1712188800000-0700)/",
+    "EventCategory": "Construction",
+    "EventStatus": "Open",
+    "ExtendedDescription": "Utility work on SR 20 near Burlington. Expect single-lane alternating traffic between mileposts 60 and 62 weekdays 7 AM to 5 PM through April 4.",
+    "HeadlineDescription": "SR 20 utility work near Burlington",
+    "LastUpdatedTime": "/Date(1711843200000-0700)/",
+    "Priority": "Medium",
+    "Region": "Northwest",
+    "StartRoadwayLocation": {
+      "Description": "MP 60",
+      "Direction": "B",
+      "Latitude": 48.4489,
+      "Longitude": -122.3245,
+      "MilePost": 60.0,
+      "RoadName": "020"
+    },
+    "StartTime": "/Date(1711324800000-0700)/"
+  },
+  {
+    "AlertID": 398201,
+    "County": "King",
+    "EndRoadwayLocation": {
+      "Description": "MP 155",
+      "Direction": "N",
+      "Latitude": 47.6101,
+      "Longitude": -122.3421,
+      "MilePost": 155.0,
+      "RoadName": "005"
+    },
+    "EndTime": "/Date(1712275200000-0700)/",
+    "EventCategory": "Construction",
+    "EventStatus": "Open",
+    "ExtendedDescription": "I-5 lane reduction near Seattle for bridge maintenance. Right lane closed northbound between mileposts 153 and 155.",
+    "HeadlineDescription": "I-5 lane reduction near Seattle",
+    "LastUpdatedTime": "/Date(1711756800000-0700)/",
+    "Priority": "Low",
+    "Region": "Northwest",
+    "StartRoadwayLocation": {
+      "Description": "MP 153",
+      "Direction": "N",
+      "Latitude": 47.5989,
+      "Longitude": -122.3287,
+      "MilePost": 153.0,
+      "RoadName": "005"
+    },
+    "StartTime": "/Date(1710720000000-0700)/"
+  }
+]
