@@ -1,0 +1,25 @@
+{
+  "total": "3",
+  "data": [
+    {
+      "title": "Cascade River Road — Seasonal Closure",
+      "description": "Cascade River Road is closed at milepost 0.5 due to seasonal conditions. No vehicle access to Cascade Pass trailhead. Expect closure through late May depending on snowpack.",
+      "category": "Caution",
+      "url": "https://www.nps.gov/noca/planyourvisit/conditions.htm"
+    },
+    {
+      "title": "Newhalem Creek Campground — Limited Services",
+      "description": "Water systems are not yet operational for the season. Vault toilets available. No potable water on site.",
+      "category": "Information",
+      "url": "https://www.nps.gov/noca/planyourvisit/campgrounds.htm"
+    },
+    {
+      "title": "Thunder Creek Trail — Hazard Trees",
+      "description": "Multiple downed trees across Thunder Creek Trail between miles 2-4. Trail passable with caution. Crews scheduled for clearing in early April.",
+      "category": "Danger",
+      "url": "https://www.nps.gov/noca/planyourvisit/conditions.htm"
+    }
+  ],
+  "limit": "50",
+  "start": "0"
+}

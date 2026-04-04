@@ -1,0 +1,84 @@
+{
+    "value": {
+        "timeSeries": [
+            {
+                "sourceInfo": {
+                    "siteName": "SKAGIT RIVER NEAR MOUNT VERNON, WA",
+                    "siteCode": [
+                        {
+                            "value": "12200500",
+                            "agencyCode": "USGS"
+                        }
+                    ]
+                },
+                "variable": {
+                    "variableCode": [
+                        {
+                            "value": "00065",
+                            "variableID": 45807202
+                        }
+                    ],
+                    "variableName": "Gage height, ft",
+                    "unit": {
+                        "unitCode": "ft"
+                    }
+                },
+                "values": [
+                    {
+                        "value": [
+                            {
+                                "value": "11.83",
+                                "qualifiers": ["P"],
+                                "dateTime": "2026-03-28T12:30:00.000-07:00"
+                            },
+                            {
+                                "value": "11.87",
+                                "qualifiers": ["P"],
+                                "dateTime": "2026-03-28T12:45:00.000-07:00"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "sourceInfo": {
+                    "siteName": "SKAGIT RIVER NEAR MOUNT VERNON, WA",
+                    "siteCode": [
+                        {
+                            "value": "12200500",
+                            "agencyCode": "USGS"
+                        }
+                    ]
+                },
+                "variable": {
+                    "variableCode": [
+                        {
+                            "value": "00060",
+                            "variableID": 45807197
+                        }
+                    ],
+                    "variableName": "Streamflow, ft&#179;/s",
+                    "unit": {
+                        "unitCode": "ft3/s"
+                    }
+                },
+                "values": [
+                    {
+                        "value": [
+                            {
+                                "value": "8620",
+                                "qualifiers": ["P"],
+                                "dateTime": "2026-03-28T12:30:00.000-07:00"
+                            },
+                            {
+                                "value": "8750",
+                                "qualifiers": ["P"],
+                                "dateTime": "2026-03-28T12:45:00.000-07:00"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+}
