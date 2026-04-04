@@ -1,5 +1,16 @@
 /target
+
+# Gas Town overlay dirs
 .beads/
 .claude/
 .runtime/
+.logs/
+__pycache__/
+state.json
 CLAUDE.md
+CLAUDE.local.md
+
+# Beads / Dolt
+.dolt/
+*.db
+.beads-credential-key
