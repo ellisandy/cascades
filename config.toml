@@ -1,0 +1,4 @@
+[server]
+port = 8080
+image_width = 800
+image_height = 480
