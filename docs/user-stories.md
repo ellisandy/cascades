@@ -151,7 +151,21 @@ state is no older than `weather_interval_secs + a small buffer`.
 
 ---
 
-## 13. Webhook — external system pushes plugin data
+## 13. Health status — operator checks server and source state
+
+**As an operator**, when I send `GET /api/status`, I expect a JSON response
+showing the server version, uptime, sidecar URL, and per-source data freshness
+(last fetch time, data age, last error), so I can quickly diagnose whether a
+source is stale or erroring without grepping logs.
+
+**Acceptance:** `GET /api/status` returns HTTP 200, `Content-Type: application/json`,
+and a body with `version`, `uptime_secs`, `sidecar_url`, and `sources` fields.
+Each source entry includes `id`, `enabled`, `last_fetched_at`, `last_error`, and
+`data_age_secs`.
+
+---
+
+## 15. Webhook — external system pushes plugin data
 
 **As an integrator**, when I `POST` a JSON payload to
 `/api/webhook/:plugin_instance_id`, I expect the server to store that payload
@@ -164,7 +178,7 @@ rendered PNG.
 
 ---
 
-## 14. Display API — TRMNL device polls for image URL and refresh rate
+## 16. Display API — TRMNL device polls for image URL and refresh rate
 
 **As a TRMNL device**, when I send `GET /api/display` with a valid
 `Authorization: Bearer <api_key>` header, I expect a JSON response containing
@@ -177,7 +191,7 @@ so I know where to fetch the image and how often to refresh.
 
 ---
 
-## 15. Named display images
+## 17. Named display images
 
 **As a display client**, when I send `GET /api/image/:display_id` with a valid
 display name (e.g. `default`, `trip-planner`), I expect the latest rendered PNG
@@ -189,7 +203,7 @@ unknown, I expect `404 Not Found`.
 
 ---
 
-## 16. Multi-slot compositor — display layout with multiple plugins
+## 18. Multi-slot compositor — display layout with multiple plugins
 
 **As an operator**, when I configure a display with multiple slots (e.g.
 `trip-planner` with weather, river, and ferry slots), I expect the server to

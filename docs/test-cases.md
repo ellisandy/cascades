@@ -250,6 +250,19 @@ given fixture data. Tests in `tests/template_visual_tests.rs`.*
 
 ---
 
+## Status API tests
+
+*Verifies `GET /api/status` returns correct JSON health snapshot. Tests in `src/api.rs` (inline unit tests).*
+
+| Test name | Type | Status |
+|---|---|---|
+| `get_status_returns_200_json` | unit (in-process HTTP) | ✅ pass |
+| `get_status_body_has_required_top_level_fields` | unit (in-process HTTP) | ✅ pass |
+| `get_status_sources_include_weather_and_river` | unit (in-process HTTP) | ✅ pass |
+| `get_status_source_shape_is_correct` | unit (in-process HTTP) | ✅ pass |
+
+---
+
 ## Summary
 
 | Category | Pass | Ignored | Fail |
@@ -272,4 +285,5 @@ given fixture data. Tests in `tests/template_visual_tests.rs`.*
 | US15 — named display images | 6 | 0 | 0 |
 | US16 — compositor | 7 | 0 | 0 |
 | Template visual tests | 12 | 0 | 0 |
-| **Total** | **68** | **1** | **0** |
+| Status API | 4 | 0 | 0 |
+| **Total** | **72** | **1** | **0** |

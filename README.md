@@ -156,6 +156,37 @@ curl -H "Authorization: Bearer <api_key>" \
 
 ---
 
+### `GET /api/status`
+
+Returns a JSON health snapshot: server version, uptime, sidecar URL, and
+per-plugin-instance data freshness. No authentication required.
+
+```bash
+curl http://localhost:8080/api/status
+```
+
+**Response:**
+
+```json
+{
+  "version": "0.1.0",
+  "uptime_secs": 42,
+  "sidecar_url": "http://localhost:3001",
+  "sources": [
+    {
+      "id": "weather",
+      "name": "Weather",
+      "enabled": true,
+      "last_fetched_at": 1712345678,
+      "last_error": null,
+      "data_age_secs": 30
+    }
+  ]
+}
+```
+
+---
+
 ### `GET /api/image/:display_id`
 
 Returns the latest rendered PNG for a named display. Served from an in-memory

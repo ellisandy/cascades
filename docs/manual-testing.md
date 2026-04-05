@@ -186,7 +186,33 @@ or sidecar is required.
 
 ---
 
-## 4. Test the webhook endpoint
+## 4. Test the status endpoint
+
+`GET /api/status` returns a health snapshot. No auth required.
+
+```bash
+curl -s http://localhost:8080/api/status | python3 -m json.tool
+```
+
+Expected response shape:
+
+```json
+{
+  "version": "0.1.0",
+  "uptime_secs": 12,
+  "sidecar_url": "http://localhost:3001",
+  "sources": [
+    { "id": "weather", "enabled": true, "last_fetched_at": null, "last_error": null, "data_age_secs": null }
+  ]
+}
+```
+
+`last_fetched_at` and `data_age_secs` are `null` until the first successful
+fetch completes. `last_error` is non-null when the most recent fetch failed.
+
+---
+
+## 5. Test the webhook endpoint
 
 `POST /api/webhook/:plugin_instance_id` stores new data for a plugin instance
 and triggers a re-render of any display that uses it.
@@ -212,7 +238,7 @@ empty object and returns `204` in both cases.
 
 ---
 
-## 5. Test the display API endpoint
+## 6. Test the display API endpoint
 
 `GET /api/display` requires a Bearer token. Find your API key:
 
@@ -238,7 +264,7 @@ curl -s -H "Authorization: Bearer $API_KEY" http://localhost:8080/api/display
 
 ---
 
-## 6. Test named display images
+## 7. Test named display images
 
 ```bash
 # Default display
@@ -265,7 +291,7 @@ curl -sI http://localhost:8080/api/image/default | grep -i cache-control
 
 ---
 
-## 7. Trigger a re-render and observe changes
+## 8. Trigger a re-render and observe changes
 
 The image cache is invalidated by `POST /api/webhook/:id` for affected displays.
 To observe a render change driven by polling:
@@ -304,7 +330,7 @@ mode to observe real data updates.
 
 ---
 
-## 8. Point a SkagitFlats device at a local Cascades instance
+## 9. Point a SkagitFlats device at a local Cascades instance
 
 A SkagitFlats device is a thin client that periodically fetches the pre-rendered
 PNG from a Cascades server and pushes it to e-ink hardware. To point it at your
