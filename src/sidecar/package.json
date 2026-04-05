@@ -1,0 +1,18 @@
+{
+  "name": "cascades-render-sidecar",
+  "version": "1.0.0",
+  "description": "Bun HTTP sidecar: POST /render {html} → PNG via Puppeteer + Sharp",
+  "module": "server.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun server.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0",
+    "sharp": "^0.33.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}
