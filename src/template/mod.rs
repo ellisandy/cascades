@@ -9,7 +9,7 @@
 use minijinja::value::Rest;
 use minijinja::{Environment, Error, Value};
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -94,10 +94,13 @@ pub struct RenderContext {
 /// Liquid template engine backed by minijinja.
 ///
 /// Call [`TemplateEngine::new`] once at startup, then [`TemplateEngine::render`]
-/// for every display cycle.
+/// for every display cycle.  Templates are parsed once at construction time;
+/// renders are cheap (context serialisation + tree walk only).
 pub struct TemplateEngine {
-    /// Templates loaded at construction time, keyed by stem (filename without extension).
-    templates: HashMap<String, String>,
+    /// Pre-built environment with all templates loaded and filters registered.
+    env: Environment<'static>,
+    /// Set of loaded template names, for O(1) membership checks.
+    names: HashSet<String>,
 }
 
 impl TemplateEngine {
@@ -110,12 +113,12 @@ impl TemplateEngine {
             return Err(TemplateError::DirectoryNotFound(templates_dir.to_path_buf()));
         }
 
-        let mut templates = HashMap::new();
         let entries = std::fs::read_dir(templates_dir).map_err(|e| TemplateError::ReadError {
             name: templates_dir.display().to_string(),
             source: e,
         })?;
 
+        let mut raw: Vec<(String, String)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("liquid") {
@@ -132,32 +135,36 @@ impl TemplateEngine {
                             name: name.clone(),
                             source: e,
                         })?;
-                    templates.insert(name, src);
+                    raw.push((name, src));
                 }
             }
         }
 
-        Ok(TemplateEngine { templates })
+        let mut env = build_env();
+        let mut names = HashSet::new();
+        for (name, src) in raw {
+            env.add_template_owned(name.clone(), src)
+                .map_err(|e| TemplateError::RenderError {
+                    name: name.clone(),
+                    source: e,
+                })?;
+            names.insert(name);
+        }
+
+        Ok(TemplateEngine { env, names })
     }
 
     /// Render `template_name` (the stem, without `.html.liquid`) with `ctx`.
     ///
     /// Returns the rendered HTML string.
     pub fn render(&self, template_name: &str, ctx: &RenderContext) -> Result<String, TemplateError> {
-        let src = self.templates.get(template_name).ok_or_else(|| {
-            TemplateError::TemplateNotFound {
+        if !self.names.contains(template_name) {
+            return Err(TemplateError::TemplateNotFound {
                 name: template_name.to_owned(),
-            }
-        })?;
+            });
+        }
 
-        let mut env = build_env();
-        env.add_template("_tmpl", src)
-            .map_err(|e| TemplateError::RenderError {
-                name: template_name.to_owned(),
-                source: e,
-            })?;
-
-        let tmpl = env.get_template("_tmpl").map_err(|e| TemplateError::RenderError {
+        let tmpl = self.env.get_template(template_name).map_err(|e| TemplateError::RenderError {
             name: template_name.to_owned(),
             source: e,
         })?;
@@ -174,18 +181,18 @@ impl TemplateEngine {
 
     /// Number of templates loaded.
     pub fn template_count(&self) -> usize {
-        self.templates.len()
+        self.names.len()
     }
 
     /// Returns `true` if the named template was loaded.
     pub fn has_template(&self, name: &str) -> bool {
-        self.templates.contains_key(name)
+        self.names.contains(name)
     }
 }
 
 // ─── minijinja environment with custom filters ────────────────────────────────
 
-fn build_env<'a>() -> Environment<'a> {
+fn build_env() -> Environment<'static> {
     let mut env = Environment::new();
     env.add_filter("number_with_delimiter", filter_number_with_delimiter);
     env.add_filter("round", filter_round);
@@ -220,12 +227,16 @@ fn filter_number_with_delimiter(value: Value) -> Result<Value, Error> {
         Err(_) => return Ok(value), // non-numeric, pass through unchanged
     };
 
-    // Split into integer and fractional parts using Rust's own f64 Display, which
-    // omits trailing ".0" for whole numbers.
-    let n_str = format!("{n}");
-    let (int_part, frac_part) = match n_str.find('.') {
-        Some(pos) => (n_str[..pos].to_owned(), Some(n_str[pos..].to_owned())),
-        None => (n_str, None),
+    // Split into integer and fractional parts. Use explicit integer truncation
+    // for whole-number floats rather than relying on Display's ".0" behaviour.
+    let (int_part, frac_part) = if n.fract() == 0.0 {
+        (format!("{}", n as i64), None)
+    } else {
+        let s = format!("{n}");
+        match s.find('.') {
+            Some(pos) => (s[..pos].to_owned(), Some(s[pos..].to_owned())),
+            None => (s, None),
+        }
     };
 
     let negative = int_part.starts_with('-');
@@ -307,8 +318,13 @@ fn filter_default(value: Value, args: Rest<Value>) -> Result<Value, Error> {
 /// Two-arg form: `{{ count | pluralize("item", "items") }}` → full word returned.
 /// One-arg form: `{{ count | pluralize("s") }}` → "" for 1, "s" otherwise.
 fn filter_pluralize(value: Value, args: Rest<Value>) -> Result<Value, Error> {
-    let count = value.as_i64().unwrap_or(0);
-    let is_plural = count != 1;
+    // Support both integer counts (most common) and float counts like 1.0.
+    let count_f = value
+        .as_i64()
+        .map(|i| i as f64)
+        .or_else(|| value.to_string().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let is_plural = count_f != 1.0;
 
     let result = match (args.first(), args.get(1)) {
         (Some(singular), Some(plural)) => {
