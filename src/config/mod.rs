@@ -53,6 +53,31 @@ fn default_server_port() -> u16 {
     8080
 }
 
+/// Storage configuration for the SQLite database.
+///
+/// Add to `config.toml` to customise the database path:
+/// ```toml
+/// [storage]
+/// db_path = "data/cascades.db"
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    /// Path to the SQLite database file.
+    /// Relative paths are resolved from the working directory.
+    #[serde(default = "default_db_path")]
+    pub db_path: String,
+}
+
+fn default_db_path() -> String {
+    "data/cascades.db".to_string()
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        StorageConfig { db_path: default_db_path() }
+    }
+}
+
 /// Top-level runtime configuration loaded from config.toml.
 /// This file is never written at runtime; changes require a restart.
 #[derive(Debug, Deserialize, Clone)]
@@ -69,6 +94,9 @@ pub struct Config {
     /// Device display loop config. When set, the app runs as a thin HTTP client.
     #[serde(default)]
     pub device: Option<DeviceConfig>,
+    /// SQLite storage configuration. Defaults to `data/cascades.db`.
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]

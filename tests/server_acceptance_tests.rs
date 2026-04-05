@@ -19,6 +19,7 @@ use cascades::{
     build_sources,
     config::{
         load_config, Config, Destination, DisplayConfig, LocationConfig, SourceIntervals,
+        StorageConfig,
     },
     domain::{
         DataPoint, DomainState, RiverGauge, WeatherObservation,
@@ -68,6 +69,7 @@ fn minimal_config() -> Config {
         server: None,
         auth: None,
         device: None,
+        storage: StorageConfig::default(),
     }
 }
 

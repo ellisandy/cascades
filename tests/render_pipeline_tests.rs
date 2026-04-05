@@ -1,4 +1,4 @@
-use cascades::config::{Config, DisplayConfig, LocationConfig, SourceIntervals};
+use cascades::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
 use cascades::render_current_state;
 
 fn fixture_config() -> Config {
@@ -26,6 +26,7 @@ fn fixture_config() -> Config {
         server: None,
         auth: None,
         device: None,
+        storage: StorageConfig::default(),
     }
 }
 
