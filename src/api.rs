@@ -1,11 +1,12 @@
 //! HTTP API layer — request handlers and router construction.
 //!
 //! Implements the output-layer endpoints:
-//! - `POST /api/webhook/:plugin_instance_id` — store new data, re-render affected displays
-//! - `GET  /api/display`                      — bearer-authenticated; returns image URL + refresh rate
-//! - `GET  /api/image/:display_id`            — latest rendered PNG, `Cache-Control: no-store`
-//! - `GET  /image.png`                        — legacy alias for the default display
-//! - `GET  /api/status`                       — JSON health snapshot with per-source state
+//! - `GET  /`                                  — HTML landing page: endpoint catalog, setup guide, live status
+//! - `POST /api/webhook/:plugin_instance_id`   — store new data, re-render affected displays
+//! - `GET  /api/display`                       — bearer-authenticated; returns image URL + refresh rate
+//! - `GET  /api/image/:display_id`             — latest rendered PNG, `Cache-Control: no-store`
+//! - `GET  /image.png`                         — legacy alias for the default display
+//! - `GET  /api/status`                        — JSON health snapshot with per-source state
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -51,6 +52,7 @@ pub struct AppState {
 /// Build the axum `Router` with all routes wired up.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(get_landing))
         .route("/image.png", get(serve_image_legacy))
         .route("/api/webhook/{plugin_instance_id}", post(post_webhook))
         .route("/api/display", get(get_display))
@@ -60,6 +62,175 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
+
+/// `GET /` — developer landing page: endpoint catalog, setup guide, live status.
+///
+/// Returns a self-contained HTML page rendered from a Rust string template.
+/// No authentication required. Fetches `/api/status` client-side via JavaScript
+/// to populate the live source-state table on page load.
+async fn get_landing() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        LANDING_HTML,
+    )
+}
+
+/// Self-contained HTML landing page embedded at compile time.
+///
+/// Dark-background developer status page — no external dependencies, no files.
+const LANDING_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cascades</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0d1117;color:#c9d1d9;font-family:'Courier New',Courier,monospace;font-size:14px;line-height:1.6;padding:2rem;max-width:960px;margin:0 auto}
+    h1{color:#58a6ff;font-size:1.4rem;margin-bottom:.5rem}
+    h2{color:#79c0ff;font-size:1.05rem;margin:2rem 0 .6rem;border-bottom:1px solid #30363d;padding-bottom:.25rem}
+    p{margin-bottom:1rem;color:#8b949e}
+    a{color:#58a6ff;text-decoration:none}
+    a:hover{text-decoration:underline}
+    table{width:100%;border-collapse:collapse;margin-bottom:1rem;font-size:.9em}
+    th{text-align:left;color:#58a6ff;border-bottom:1px solid #30363d;padding:.4rem .75rem}
+    td{padding:.35rem .75rem;border-bottom:1px solid #21262d;vertical-align:top}
+    tr:last-child td{border-bottom:none}
+    code{background:#161b22;padding:.1em .35em;border-radius:3px;color:#e6edf3;font-size:.88em}
+    pre{background:#161b22;padding:.9rem 1rem;border-radius:6px;overflow-x:auto;margin-bottom:1rem;color:#e6edf3;font-size:.88em}
+    .auth-bearer{color:#f0883e}
+    .auth-open{color:#3fb950}
+    .ok{color:#3fb950}
+    .err{color:#f85149}
+    .muted{color:#484f58}
+    ol{padding-left:1.4rem;color:#8b949e}
+    ol li{margin-bottom:.5rem}
+    img#preview{max-width:100%;border:1px solid #30363d;border-radius:4px;margin-top:.4rem;display:block}
+    .section{margin-bottom:2.5rem}
+  </style>
+</head>
+<body>
+
+<div class="section">
+  <h1>Cascades</h1>
+  <p>
+    Cascades is a self-hosted display server for e-ink and TFT wall panels.
+    It aggregates real-time data from local sources — river gauges, ferry schedules,
+    weather observations, trail conditions, and road alerts — and renders an 800&times;480
+    pixel composite image that a wall-mounted device fetches on a configurable refresh cycle.
+    Designed for Raspberry Pi and other Linux single-board computers.
+  </p>
+</div>
+
+<div class="section">
+  <h2>Endpoints</h2>
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/</code></td><td><span class="auth-open">open</span></td><td>This page — catalog, setup guide, live status</td></tr>
+      <tr><td>GET</td><td><code>/image.png</code></td><td><span class="auth-open">open</span></td><td>Latest rendered PNG for the default display</td></tr>
+      <tr><td>GET</td><td><code>/api/display</code></td><td><span class="auth-bearer">Bearer</span></td><td>Returns <code>image_url</code> and <code>refresh_rate</code> (JSON) for device polling</td></tr>
+      <tr><td>GET</td><td><code>/api/image/{id}</code></td><td><span class="auth-open">open</span></td><td>Latest rendered PNG for a named display ID</td></tr>
+      <tr><td>POST</td><td><code>/api/webhook/{id}</code></td><td><span class="auth-open">open</span></td><td>Push new data for a plugin instance; triggers re-render of affected displays</td></tr>
+      <tr><td>GET</td><td><code>/api/status</code></td><td><span class="auth-open">open</span></td><td>JSON health snapshot: version, uptime, per-source fetch state</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>Setup Guide</h2>
+  <ol>
+    <li>
+      Install <a href="https://bun.sh" target="_blank">Bun</a> (JavaScript runtime for the render sidecar):
+      <pre>curl -fsSL https://bun.sh/install | bash</pre>
+    </li>
+    <li>
+      Start the render sidecar in a separate terminal:
+      <pre>RENDER_PORT=3001 bun run src/sidecar/server.ts</pre>
+    </li>
+    <li>
+      Start the Cascades server:
+      <pre>cargo run --release</pre>
+      <p style="margin-top:.4rem">Listens on <code>0.0.0.0:8080</code> by default. Set <code>[server] port</code> in <code>config.toml</code> to change.</p>
+    </li>
+    <li>Open <a href="/image.png"><code>/image.png</code></a> to verify the rendered output.</li>
+  </ol>
+
+  <h2>API Keys</h2>
+  <p>Add credentials to <code>config.toml</code> so the data sources can reach their upstream APIs:</p>
+  <pre>[sources]
+wsdot_access_code = "your-wsdot-key"   # ferry schedules + highway alerts
+nps_api_key       = "your-nps-key"     # trail conditions (National Park Service)</pre>
+  <p>Restart the server after editing <code>config.toml</code>.</p>
+
+  <h2>Adding a Plugin</h2>
+  <ol>
+    <li>Create a plugin instance config file (e.g. <code>config/plugins.d/my-plugin.toml</code>) with your plugin settings.</li>
+    <li>Add a Liquid template at <code>templates/my-plugin.html.liquid</code> — the compositor renders it to an image slot.</li>
+    <li>Restart the server — the plugin is auto-discovered and registered.</li>
+  </ol>
+</div>
+
+<div class="section">
+  <h2>Live Status</h2>
+  <table id="status-table">
+    <thead><tr><th>Source</th><th>Enabled</th><th>Last Fetch</th><th>Data Age</th><th>Last Error</th></tr></thead>
+    <tbody id="status-body">
+      <tr><td colspan="5" class="muted">Loading&#8230;</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>Preview</h2>
+  <img id="preview" src="/image.png" alt="Current display output">
+</div>
+
+<script>
+(function(){
+  function esc(s){return s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+  function fmtTs(ts){
+    if(ts==null)return '<span class="muted">\u2014</span>';
+    return new Date(ts*1000).toLocaleString();
+  }
+  function fmtAge(secs){
+    if(secs==null)return '<span class="muted">\u2014</span>';
+    if(secs<60)return secs+'s';
+    if(secs<3600)return Math.floor(secs/60)+'m';
+    return Math.floor(secs/3600)+'h '+Math.floor((secs%3600)/60)+'m';
+  }
+  function fmtErr(err){
+    if(!err)return '<span class="muted">\u2014</span>';
+    return '<span class="err">'+esc(err)+'</span>';
+  }
+  fetch('/api/status')
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var tbody=document.getElementById('status-body');
+      var sources=data.sources||[];
+      if(!sources.length){
+        tbody.innerHTML='<tr><td colspan="5" class="muted">No sources configured.</td></tr>';
+        return;
+      }
+      tbody.innerHTML=sources.map(function(s){
+        return '<tr>'+
+          '<td>'+esc(s.name)+'</td>'+
+          '<td>'+(s.enabled?'<span class="ok">yes</span>':'<span class="err">no</span>')+'</td>'+
+          '<td>'+fmtTs(s.last_fetched_at)+'</td>'+
+          '<td>'+fmtAge(s.data_age_secs)+'</td>'+
+          '<td>'+fmtErr(s.last_error)+'</td>'+
+          '</tr>';
+      }).join('');
+    })
+    .catch(function(e){
+      document.getElementById('status-body').innerHTML=
+        '<tr><td colspan="5" class="err">Failed to load status: '+esc(String(e))+'</td></tr>';
+    });
+})();
+</script>
+
+</body>
+</html>"#;
 
 /// `GET /image.png` — legacy endpoint, aliases to the default display.
 async fn serve_image_legacy(State(app): State<Arc<AppState>>) -> impl IntoResponse {
@@ -319,7 +490,7 @@ mod tests {
         instance_store::{seed_from_config, InstanceStore},
         template::TemplateEngine,
     };
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, routing::get, Router};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -378,6 +549,13 @@ mod tests {
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
         })
+    }
+
+    /// Minimal stateless router for testing the landing page.
+    ///
+    /// `get_landing` takes no State, so we don't need a full AppState here.
+    fn landing_router() -> Router {
+        Router::new().route("/", get(get_landing))
     }
 
     #[tokio::test]
@@ -454,12 +632,46 @@ mod tests {
             assert!(source["id"].is_string(), "source.id must be a string");
             assert!(source["name"].is_string(), "source.name must be a string");
             assert!(source["enabled"].is_boolean(), "source.enabled must be a boolean");
-            // last_fetched_at and last_error may be null (freshly seeded, never fetched)
-            // Verify the keys exist (Value::Null is fine; missing key returns Value::Null too,
-            // but we check the array length >= 1 earlier so at least a source exists)
             assert!(source.get("last_fetched_at").is_some(), "last_fetched_at key must exist");
             assert!(source.get("last_error").is_some(), "last_error key must exist");
             assert!(source.get("data_age_secs").is_some(), "data_age_secs key must exist");
         }
+    }
+
+    #[tokio::test]
+    async fn get_root_returns_200() {
+        let app = landing_router();
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_root_content_type_is_html() {
+        let app = landing_router();
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let ct = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
+    }
+
+    #[tokio::test]
+    async fn get_root_body_contains_expected_sections() {
+        let app = landing_router();
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+
+        assert!(body.contains("Endpoints"), "missing Endpoints section");
+        assert!(body.contains("Setup Guide"), "missing Setup Guide section");
+        assert!(body.contains("/api/status"), "missing /api/status in endpoint table");
+        assert!(body.contains("/image.png"), "missing /image.png in endpoint table");
+        assert!(body.contains("Live Status"), "missing Live Status section");
+        assert!(body.contains("fetch('/api/status')"), "missing JS status fetch");
     }
 }
