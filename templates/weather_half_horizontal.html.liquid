@@ -1,0 +1,17 @@
+<div class="layout--stretch flex--row">
+  <div class="flex--col layout--center-x" style="flex: 1; padding: 8px;">
+    <span class="value value--xlarge">{{ data.temperature_f | round(0) }}°F</span>
+    <span class="label">{{ data.sky_condition }}</span>
+    {% if error %}
+      <span class="label text--gray-50">stale</span>
+    {% endif %}
+  </div>
+
+  <div class="flex--col layout--center-x" style="flex: 1; padding: 8px;">
+    <span class="label">Wind {{ data.wind_direction }} {{ data.wind_speed_mph | round(0) }} mph</span>
+    {% if data.precip_chance_pct > 0 %}
+      <span class="label">{{ data.precip_chance_pct | round(0) }}% precip</span>
+    {% endif %}
+    <span class="label text--gray-50">{{ now.local }}</span>
+  </div>
+</div>

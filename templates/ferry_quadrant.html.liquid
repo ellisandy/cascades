@@ -1,0 +1,18 @@
+<div class="layout--stretch flex--col" style="padding: 6px;">
+  <div class="title_bar">
+    <span class="title">Ferry</span>
+    {% if error %}
+      <span class="label text--gray-50">stale</span>
+    {% endif %}
+  </div>
+  <div class="flex--col layout--center-x" style="flex: 1;">
+    <span class="value value--large">{{ data.vessel_name }}</span>
+    {% if data.estimated_departures %}
+      {% for dep in data.estimated_departures %}
+        {% if loop.index <= 2 %}
+          <span class="label">{{ dep | time_of_day }}</span>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+  </div>
+</div>
