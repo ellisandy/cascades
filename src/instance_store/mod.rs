@@ -225,12 +225,15 @@ impl InstanceStore {
 /// Deserialise a SQLite row into a [`PluginInstance`].
 ///
 /// JSON parse failures for nullable fields silently produce `None`; an
-/// unparseable `settings` column falls back to an empty JSON object rather
-/// than propagating as a `rusqlite::Error`.
+/// unparseable `settings` column falls back to an empty JSON object and logs
+/// a warning rather than propagating as a `rusqlite::Error`.
 fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginInstance> {
+    let id: String = row.get(0)?;
     let settings_str: String = row.get(2)?;
-    let settings: Value = serde_json::from_str(&settings_str)
-        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+    let settings: Value = serde_json::from_str(&settings_str).unwrap_or_else(|e| {
+        log::warn!("instance_store: failed to parse settings for instance '{}': {}", id, e);
+        Value::Object(serde_json::Map::new())
+    });
 
     let encrypted_settings: Option<Value> = row
         .get::<_, Option<String>>(3)?
@@ -241,7 +244,7 @@ fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginInstance> 
         .and_then(|s| serde_json::from_str(&s).ok());
 
     Ok(PluginInstance {
-        id: row.get(0)?,
+        id,
         plugin_id: row.get(1)?,
         settings,
         encrypted_settings,
@@ -258,15 +261,19 @@ fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginInstance> 
 /// Uses `INSERT OR IGNORE` on each instance, so it is safe to call on every
 /// startup without overwriting user-modified instance settings.
 ///
-/// Seeded instances (using defaults from `config.toml` where applicable):
+/// Seeded instances (using values from `config.toml` where present):
 ///
-/// | Instance ID | Plugin   | Key settings                          |
-/// |-------------|----------|---------------------------------------|
-/// | `weather`   | weather  | *(none required — uses lat/long)*     |
-/// | `river`     | river    | `site_id` (default `"12200500"`)      |
-/// | `ferry`     | ferry    | `route_id` (default `9`), description |
-/// | `trail`     | trail    | `park_code` (default `"noca"`)        |
-/// | `road`      | road     | `routes` (default `"020"`)            |
+/// | Instance ID | Plugin   | Key settings                                          |
+/// |-------------|----------|-------------------------------------------------------|
+/// | `weather`   | weather  | *(none required — uses lat/long)*                     |
+/// | `river`     | river    | `site_id` (default `"12200500"`)                      |
+/// | `ferry`     | ferry    | `route_id` (default `9`), description, access code    |
+/// | `trail`     | trail    | `park_code` (default `"noca"`), NPS API key           |
+/// | `road`      | road     | `routes` (default `"020"`), access code               |
+///
+/// Credential fields (`wsdot_access_code`, `nps_api_key`) are stored in plain
+/// `settings` here because encryption is not yet implemented. They will be moved
+/// to `encrypted_settings` when the encryption layer is added.
 pub fn seed_from_config(store: &InstanceStore, config: &Config) -> Result<(), StoreError> {
     // weather — no required settings; station selection uses lat/long from config
     store.create_instance(&PluginInstance {
@@ -296,8 +303,8 @@ pub fn seed_from_config(store: &InstanceStore, config: &Config) -> Result<(), St
         last_error: None,
     })?;
 
-    // ferry — route_id and route_description from config
-    let (route_id, route_description) = config
+    // ferry — route_id, route_description, and wsdot_access_code from config
+    let (route_id, route_description, ferry_access_code) = config
         .sources
         .ferry
         .as_ref()
@@ -307,15 +314,17 @@ pub fn seed_from_config(store: &InstanceStore, config: &Config) -> Result<(), St
                 f.route_description
                     .clone()
                     .unwrap_or_else(|| "Anacortes / Friday Harbor".to_string()),
+                f.wsdot_access_code.clone(),
             )
         })
-        .unwrap_or((9, "Anacortes / Friday Harbor".to_string()));
+        .unwrap_or((9, "Anacortes / Friday Harbor".to_string(), None));
     store.create_instance(&PluginInstance {
         id: "ferry".to_string(),
         plugin_id: "ferry".to_string(),
         settings: serde_json::json!({
             "route_id": route_id,
-            "route_description": route_description
+            "route_description": route_description,
+            "wsdot_access_code": ferry_access_code
         }),
         encrypted_settings: None,
         cached_data: None,
@@ -323,34 +332,40 @@ pub fn seed_from_config(store: &InstanceStore, config: &Config) -> Result<(), St
         last_error: None,
     })?;
 
-    // trail — park_code from config
-    let park_code = config
+    // trail — park_code and nps_api_key from config
+    let (park_code, nps_api_key) = config
         .sources
         .trail
         .as_ref()
-        .map(|t| t.park_code.as_str())
-        .unwrap_or("noca");
+        .map(|t| (t.park_code.as_str(), t.nps_api_key.clone()))
+        .unwrap_or(("noca", None));
     store.create_instance(&PluginInstance {
         id: "trail".to_string(),
         plugin_id: "trail".to_string(),
-        settings: serde_json::json!({ "park_code": park_code }),
+        settings: serde_json::json!({
+            "park_code": park_code,
+            "nps_api_key": nps_api_key
+        }),
         encrypted_settings: None,
         cached_data: None,
         last_fetched_at: None,
         last_error: None,
     })?;
 
-    // road — routes from config, joined as comma-separated string
-    let routes = config
+    // road — routes and wsdot_access_code from config
+    let (routes, road_access_code) = config
         .sources
         .road
         .as_ref()
-        .map(|r| r.routes.join(","))
-        .unwrap_or_else(|| "020".to_string());
+        .map(|r| (r.routes.join(","), r.wsdot_access_code.clone()))
+        .unwrap_or_else(|| ("020".to_string(), None));
     store.create_instance(&PluginInstance {
         id: "road".to_string(),
         plugin_id: "road".to_string(),
-        settings: serde_json::json!({ "routes": routes }),
+        settings: serde_json::json!({
+            "routes": routes,
+            "wsdot_access_code": road_access_code
+        }),
         encrypted_settings: None,
         cached_data: None,
         last_fetched_at: None,
@@ -568,12 +583,15 @@ mod tests {
         let ferry = store.get_instance("ferry").unwrap().unwrap();
         assert_eq!(ferry.settings["route_id"], 9);
         assert_eq!(ferry.settings["route_description"], "Anacortes / Friday Harbor");
+        assert!(ferry.settings["wsdot_access_code"].is_null());
 
         let trail = store.get_instance("trail").unwrap().unwrap();
         assert_eq!(trail.settings["park_code"], "noca");
+        assert!(trail.settings["nps_api_key"].is_null());
 
         let road = store.get_instance("road").unwrap().unwrap();
         assert_eq!(road.settings["routes"], "020");
+        assert!(road.settings["wsdot_access_code"].is_null());
     }
 
     #[test]
@@ -584,14 +602,14 @@ mod tests {
         config.sources.river = Some(RiverSourceConfig { usgs_site_id: "12150800".to_string() });
         config.sources.trail = Some(TrailSourceConfig {
             park_code: "mora".to_string(),
-            nps_api_key: None,
+            nps_api_key: Some("test-nps-key".to_string()),
         });
         config.sources.road = Some(RoadSourceConfig {
-            wsdot_access_code: None,
+            wsdot_access_code: Some("road-access-code".to_string()),
             routes: vec!["020".to_string(), "002".to_string()],
         });
         config.sources.ferry = Some(FerrySourceConfig {
-            wsdot_access_code: None,
+            wsdot_access_code: Some("ferry-access-code".to_string()),
             route_id: 14,
             route_description: Some("Edmonds / Kingston".to_string()),
         });
@@ -603,13 +621,16 @@ mod tests {
 
         let trail = store.get_instance("trail").unwrap().unwrap();
         assert_eq!(trail.settings["park_code"], "mora");
+        assert_eq!(trail.settings["nps_api_key"], "test-nps-key");
 
         let road = store.get_instance("road").unwrap().unwrap();
         assert_eq!(road.settings["routes"], "020,002");
+        assert_eq!(road.settings["wsdot_access_code"], "road-access-code");
 
         let ferry = store.get_instance("ferry").unwrap().unwrap();
         assert_eq!(ferry.settings["route_id"], 14);
         assert_eq!(ferry.settings["route_description"], "Edmonds / Kingston");
+        assert_eq!(ferry.settings["wsdot_access_code"], "ferry-access-code");
     }
 
     #[test]
