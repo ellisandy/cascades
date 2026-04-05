@@ -83,7 +83,7 @@ async fn main() {
     let compositor = Arc::new(Compositor::new(
         Arc::clone(&template_engine),
         Arc::clone(&instance_store),
-        sidecar_url,
+        sidecar_url.clone(),
     ));
 
     let refresh_rate_secs = config
@@ -136,6 +136,8 @@ async fn main() {
         image_cache: Arc::new(RwLock::new(HashMap::new())),
         api_key: secrets.api_key,
         refresh_rate_secs,
+        started_at: std::time::Instant::now(),
+        sidecar_url,
     });
 
     let app = build_router(app_state);
