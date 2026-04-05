@@ -41,6 +41,18 @@ fn default_device_refresh_secs() -> u64 {
     60
 }
 
+/// HTTP server configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServerConfig {
+    /// TCP port to listen on. Defaults to 8080.
+    #[serde(default = "default_server_port")]
+    pub port: u16,
+}
+
+fn default_server_port() -> u16 {
+    8080
+}
+
 /// Top-level runtime configuration loaded from config.toml.
 /// This file is never written at runtime; changes require a restart.
 #[derive(Debug, Deserialize, Clone)]
@@ -48,6 +60,9 @@ pub struct Config {
     pub display: DisplayConfig,
     pub location: LocationConfig,
     pub sources: SourceIntervals,
+    /// HTTP server settings. If absent, defaults to port 8080.
+    #[serde(default)]
+    pub server: Option<ServerConfig>,
     /// Optional web UI authentication. If absent, no login is required.
     #[serde(default)]
     pub auth: Option<AuthConfig>,

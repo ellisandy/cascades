@@ -23,6 +23,7 @@ fn fixture_config() -> Config {
             road: None,
             ferry: None,
         },
+        server: None,
         auth: None,
         device: None,
     }

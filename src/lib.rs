@@ -47,7 +47,7 @@ pub fn render_current_state_with_destinations(
     render::render_display(&layout)
 }
 
-fn build_sources(config: &Config, fixture_data: bool) -> Vec<Box<dyn Source>> {
+pub fn build_sources(config: &Config, fixture_data: bool) -> Vec<Box<dyn Source>> {
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
 
     sources.push(Box::new(sources::noaa::NoaaSource::new(
