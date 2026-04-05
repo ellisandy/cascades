@@ -4,6 +4,7 @@ pub mod evaluation;
 pub mod presentation;
 pub mod render;
 pub mod sources;
+pub mod template;
 
 use config::{Config, Destination};
 use domain::DomainState;
