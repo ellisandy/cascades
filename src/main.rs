@@ -1,8 +1,14 @@
-use axum::{extract::State, http::header, response::IntoResponse, routing::get, Router};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use cascades::{
     build_sources,
     compositor::{Compositor, DisplayConfiguration},
-    config::{load_config, load_destinations, load_display_layouts, Destination},
+    config::{load_config, load_display_layouts},
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
     template::TemplateEngine,
@@ -14,30 +20,16 @@ use std::{
 use tokio::net::TcpListener;
 
 struct AppState {
-    domain: Arc<RwLock<DomainState>>,
-    destinations: Vec<Destination>,
-    display_width: u32,
-    display_height: u32,
     compositor: Arc<Compositor>,
     active_display: DisplayConfiguration,
 }
 
-async fn serve_image(State(app): State<Arc<AppState>>) -> impl IntoResponse {
+async fn serve_image(State(app): State<Arc<AppState>>) -> Response {
     match app.compositor.compose(&app.active_display).await {
-        Ok(png) => ([(header::CONTENT_TYPE, "image/png")], png),
+        Ok(png) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
         Err(e) => {
             log::error!("compositor error: {}", e);
-            // Fall back to legacy render so the display always returns something.
-            use cascades::{presentation::build_display_layout, render::render_display};
-            let domain = app.domain.read().unwrap().clone();
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let layout = build_display_layout(&domain, &app.destinations, now_secs);
-            let buf = render_display(&layout, app.display_width, app.display_height);
-            let png = buf.to_png();
-            ([(header::CONTENT_TYPE, "image/png")], png)
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
@@ -47,9 +39,6 @@ async fn main() {
     env_logger::init();
 
     let config = load_config(Path::new("config.toml")).expect("failed to load config.toml");
-    let destinations: Vec<Destination> = load_destinations(Path::new("destinations.toml"))
-        .map(|d| d.destinations)
-        .unwrap_or_default();
 
     let display_layouts =
         load_display_layouts(Path::new("config/display.toml")).unwrap_or_else(|e| {
@@ -148,10 +137,6 @@ async fn main() {
 
     let port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
     let app_state = Arc::new(AppState {
-        domain,
-        destinations,
-        display_width: config.display.width,
-        display_height: config.display.height,
         compositor,
         active_display,
     });
