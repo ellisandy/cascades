@@ -65,9 +65,6 @@ in `docs/user-stories.md`.
 
 | Test name | Type | Status |
 |---|---|---|
-| `us5_fixture_mode_returns_valid_png` | unit (render pipeline) | ✅ pass |
-| `us5_fixture_mode_png_has_black_pixels` | unit (render pipeline) | ✅ pass |
-| `us5_fixture_mode_dimensions_are_correct` | unit (render pipeline) | ✅ pass |
 | `us5_fixture_mode_sources_build_without_network` | unit (source builder) | ✅ pass |
 
 ---
@@ -80,7 +77,6 @@ in `docs/user-stories.md`.
 |---|---|---|
 | `us6_no_source_data_still_returns_200` | integration (in-process HTTP) | ✅ pass |
 | `us6_partial_source_data_still_returns_200` | integration (in-process HTTP) | ✅ pass |
-| `us6_render_with_empty_state_does_not_panic` | unit (render pipeline) | ✅ pass |
 
 ---
 
@@ -92,7 +88,6 @@ in `docs/user-stories.md`.
 |---|---|---|
 | `us7_no_trail_config_sources_still_build` | unit (source builder) | ✅ pass |
 | `us7_missing_trail_key_server_still_serves_image` | integration (in-process HTTP) | ✅ pass |
-| `us7_render_without_trail_data_is_valid_png` | unit (render pipeline) | ✅ pass |
 
 ---
 
@@ -129,7 +124,6 @@ in `docs/user-stories.md`.
 |---|---|---|
 | `us10_no_destinations_returns_200` | integration (in-process HTTP) | ✅ pass |
 | `us10_no_destinations_returns_valid_png` | integration (in-process HTTP) | ✅ pass |
-| `us10_render_current_state_no_destinations_is_valid` | unit (render pipeline) | ✅ pass |
 | `us10_missing_destinations_toml_is_handled` | unit (config loader) | ✅ pass |
 
 ---
@@ -168,6 +162,107 @@ in `docs/user-stories.md`.
 
 ---
 
+## US13: Webhook — external system pushes plugin data
+
+*Acceptance: `POST /api/webhook/:id` stores JSON, returns 204, reflected in next render.*
+
+Tests in `tests/server_acceptance_tests.rs`:
+
+| Test name | Type | Status |
+|---|---|---|
+| `webhook_returns_204_with_valid_json` | integration (in-process HTTP) | ✅ pass |
+| `webhook_returns_204_with_empty_body` | integration (in-process HTTP) | ✅ pass |
+| `webhook_invalidates_image_cache_for_affected_display` | integration (in-process HTTP) | ✅ pass |
+
+---
+
+## US14: Display API — TRMNL device polls for image URL and refresh rate
+
+*Acceptance: `GET /api/display` with correct Bearer token returns 200 + JSON with `image_url` and `refresh_rate`. Without token: 401.*
+
+Tests in `tests/server_acceptance_tests.rs`:
+
+| Test name | Type | Status |
+|---|---|---|
+| `get_display_without_auth_returns_401` | integration (in-process HTTP) | ✅ pass |
+| `get_display_with_wrong_key_returns_401` | integration (in-process HTTP) | ✅ pass |
+| `get_display_with_correct_key_returns_200` | integration (in-process HTTP) | ✅ pass |
+| `get_display_returns_json_with_required_fields` | integration (in-process HTTP) | ✅ pass |
+| `get_display_image_url_points_to_api_image` | integration (in-process HTTP) | ✅ pass |
+| `get_display_refresh_rate_matches_config` | integration (in-process HTTP) | ✅ pass |
+
+---
+
+## US15: Named display images
+
+*Acceptance: `GET /api/image/:display_id` returns PNG with `Cache-Control: no-store`. Unknown display_id → 404.*
+
+Tests in `tests/server_acceptance_tests.rs`:
+
+| Test name | Type | Status |
+|---|---|---|
+| `get_image_known_display_returns_200` | integration (in-process HTTP) | ✅ pass |
+| `get_image_unknown_display_returns_404` | integration (in-process HTTP) | ✅ pass |
+| `get_image_content_type_is_png` | integration (in-process HTTP) | ✅ pass |
+| `get_image_has_no_store_cache_control` | integration (in-process HTTP) | ✅ pass |
+| `get_image_body_is_valid_png` | integration (in-process HTTP) | ✅ pass |
+| `legacy_image_endpoint_still_works_with_new_router` | integration (in-process HTTP) | ✅ pass |
+
+---
+
+## US16: Multi-slot compositor
+
+*Acceptance: Named display with multiple slots returns a valid 800×480 composite PNG.*
+
+Tests in `tests/compositor_tests.rs`:
+
+| Test name | Type | Status |
+|---|---|---|
+| `default_config_composite_returns_800x480_png` | integration (mock sidecar) | ✅ pass |
+| `trip_planner_config_composite_returns_800x480_png` | integration (mock sidecar) | ✅ pass |
+| `display_toml_contains_both_configs` | unit (config loader) | ✅ pass |
+| `default_config_has_one_full_slot` | unit (config loader) | ✅ pass |
+| `trip_planner_config_has_three_slots` | unit (config loader) | ✅ pass |
+| `compositor_runs_slots_concurrently_and_joins` | integration (mock sidecar) | ✅ pass |
+| `display_configuration_from_config_roundtrip` | unit (config parser) | ✅ pass |
+
+---
+
+## Template visual tests
+
+*Verifies that each plugin's Liquid template renders the expected content strings
+given fixture data. Tests in `tests/template_visual_tests.rs`.*
+
+| Test name | Type | Status |
+|---|---|---|
+| `river_full_renders_level_and_flow` | unit (template render) | ✅ pass |
+| `river_full_shows_go_decision` | unit (template render) | ✅ pass |
+| `river_full_shows_stale_error` | unit (template render) | ✅ pass |
+| `weather_full_renders_temperature_and_conditions` | unit (template render) | ✅ pass |
+| `weather_full_omits_precip_when_zero` | unit (template render) | ✅ pass |
+| `ferry_full_renders_vessel_and_route` | unit (template render) | ✅ pass |
+| `ferry_full_limits_to_three_departures` | unit (template render) | ✅ pass |
+| `trail_full_renders_name_and_condition` | unit (template render) | ✅ pass |
+| `trail_full_no_active_alerts` | unit (template render) | ✅ pass |
+| `road_full_renders_closure` | unit (template render) | ✅ pass |
+| `road_full_renders_open_road` | unit (template render) | ✅ pass |
+| `engine_loads_base_templates` | unit (template engine) | ✅ pass |
+
+---
+
+## Status API tests
+
+*Verifies `GET /api/status` returns correct JSON health snapshot. Tests in `src/api.rs` (inline unit tests).*
+
+| Test name | Type | Status |
+|---|---|---|
+| `get_status_returns_200_json` | unit (in-process HTTP) | ✅ pass |
+| `get_status_body_has_required_top_level_fields` | unit (in-process HTTP) | ✅ pass |
+| `get_status_sources_include_weather_and_river` | unit (in-process HTTP) | ✅ pass |
+| `get_status_source_shape_is_correct` | unit (in-process HTTP) | ✅ pass |
+
+---
+
 ## Summary
 
 | Category | Pass | Ignored | Fail |
@@ -176,13 +271,19 @@ in `docs/user-stories.md`.
 | US2 — config error | 3 | 0 | 0 |
 | US3 — display image | 4 | 1 | 0 |
 | US4 — stale data | 3 | 0 | 0 |
-| US5 — fixture mode | 4 | 0 | 0 |
-| US6 — source failure | 3 | 0 | 0 |
-| US7 — optional source | 3 | 0 | 0 |
+| US5 — fixture mode | 1 | 0 | 0 |
+| US6 — source failure | 2 | 0 | 0 |
+| US7 — optional source | 2 | 0 | 0 |
 | US8 — multi-destination | 3 | 0 | 0 |
 | US9 — caution threshold | 4 | 0 | 0 |
-| US10 — no destinations | 4 | 0 | 0 |
+| US10 — no destinations | 3 | 0 | 0 |
 | US11 — device client | 3 | 0 | 0 |
 | US12 — source polling | 2 | 0 | 0 |
 | Concurrent safety | 2 | 0 | 0 |
-| **Total** | **40** | **1** | **0** |
+| US13 — webhook | 3 | 0 | 0 |
+| US14 — display API | 6 | 0 | 0 |
+| US15 — named display images | 6 | 0 | 0 |
+| US16 — compositor | 7 | 0 | 0 |
+| Template visual tests | 12 | 0 | 0 |
+| Status API | 4 | 0 | 0 |
+| **Total** | **72** | **1** | **0** |

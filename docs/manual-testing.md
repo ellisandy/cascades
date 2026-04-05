@@ -10,6 +10,7 @@ in under 5 minutes by following this guide.
 
 - Rust toolchain installed (`rustup`, stable channel)
 - `cargo` on your `PATH`
+- [Bun](https://bun.sh/) ≥ 1.0 (for the render sidecar)
 - A terminal and `curl`
 
 No live API keys are needed for fixture mode (see [Fixture mode](#fixture-mode)).
@@ -18,7 +19,23 @@ No live API keys are needed for fixture mode (see [Fixture mode](#fixture-mode))
 
 ## 1. Start the server locally
 
-### Quick start (fixture mode — no API keys required)
+Cascades is a two-process system: the render sidecar must be running before the
+server can produce PNG images. Start them in separate terminals.
+
+### Step 1: Start the render sidecar
+
+```bash
+cd src/sidecar
+bun install   # only needed on first run
+bun server.ts
+# Render sidecar listening on port 3001
+```
+
+Leave this terminal open. The sidecar must stay running while you test.
+
+### Step 2: Start the server
+
+#### Quick start (fixture mode — no API keys required)
 
 ```bash
 ./scripts/dev-server.sh
@@ -35,7 +52,7 @@ Fixture mode enabled: sources return canned data (no live API calls)
 Listening on http://0.0.0.0:8080
 ```
 
-### Manual start (live data)
+#### Manual start (live data)
 
 ```bash
 cargo run
@@ -164,15 +181,120 @@ SKAGIT_FIXTURE_DATA=1 RUST_LOG=info cargo run
 cargo test
 ```
 
-This runs the render pipeline tests (`tests/render_pipeline_tests.rs`) against
-fixture data and verifies the PNG output is 800×480 and contains non-empty pixels.
+This runs the full test suite. All tests are self-contained — no running server
+or sidecar is required.
 
 ---
 
-## 4. Trigger a re-render and observe changes
+## 4. Test the status endpoint
 
-There is no explicit re-render endpoint. The image is rendered on demand from
-the most recently cached data. To observe a re-render:
+`GET /api/status` returns a health snapshot. No auth required.
+
+```bash
+curl -s http://localhost:8080/api/status | python3 -m json.tool
+```
+
+Expected response shape:
+
+```json
+{
+  "version": "0.1.0",
+  "uptime_secs": 12,
+  "sidecar_url": "http://localhost:3001",
+  "sources": [
+    { "id": "weather", "enabled": true, "last_fetched_at": null, "last_error": null, "data_age_secs": null }
+  ]
+}
+```
+
+`last_fetched_at` and `data_age_secs` are `null` until the first successful
+fetch completes. `last_error` is non-null when the most recent fetch failed.
+
+---
+
+## 5. Test the webhook endpoint
+
+`POST /api/webhook/:plugin_instance_id` stores new data for a plugin instance
+and triggers a re-render of any display that uses it.
+
+```bash
+# Push new river data
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -X POST http://localhost:8080/api/webhook/river \
+  -H "Content-Type: application/json" \
+  -d '{"water_level_ft": 8.3, "streamflow_cfs": 4200}'
+# Expected: 204
+```
+
+To verify the pushed data is reflected in the image:
+
+1. Fetch the current image: `curl -o /tmp/before.png http://localhost:8080/api/image/default`
+2. Push new data via webhook.
+3. Fetch again: `curl -o /tmp/after.png http://localhost:8080/api/image/default`
+4. Compare: `cmp /tmp/before.png /tmp/after.png && echo "same" || echo "different"`
+
+The webhook also accepts an empty or invalid JSON body — the server stores an
+empty object and returns `204` in both cases.
+
+---
+
+## 6. Test the display API endpoint
+
+`GET /api/display` requires a Bearer token. Find your API key:
+
+```bash
+cat config/secrets.toml
+# api_key = "<64-char hex string>"
+API_KEY=$(grep api_key config/secrets.toml | awk '{print $3}' | tr -d '"')
+```
+
+Test without auth (should be 401):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/display
+# Expected: 401
+```
+
+Test with correct auth:
+
+```bash
+curl -s -H "Authorization: Bearer $API_KEY" http://localhost:8080/api/display
+# Expected: {"image_url":"/api/image/default?t=...","refresh_rate":60}
+```
+
+---
+
+## 7. Test named display images
+
+```bash
+# Default display
+curl -s -o /tmp/default.png http://localhost:8080/api/image/default
+file /tmp/default.png
+# Expected: PNG image data, 800 x 480
+
+# Trip-planner (multi-slot composite)
+curl -s -o /tmp/trip.png http://localhost:8080/api/image/trip-planner
+file /tmp/trip.png
+# Expected: PNG image data, 800 x 480
+
+# Unknown display
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/image/unknown
+# Expected: 404
+```
+
+Verify the `Cache-Control` header:
+
+```bash
+curl -sI http://localhost:8080/api/image/default | grep -i cache-control
+# Expected: Cache-Control: no-store
+```
+
+---
+
+## 8. Trigger a re-render and observe changes
+
+The image cache is invalidated by `POST /api/webhook/:id` for affected displays.
+To observe a render change driven by polling:
 
 1. **Fetch the current image** and save it:
 
@@ -185,12 +307,6 @@ the most recently cached data. To observe a re-render:
 
    ```bash
    RUST_LOG=info cargo run
-   ```
-
-   A successful source update logs:
-
-   ```
-   [INFO cascades] source 'noaa' fetched successfully
    ```
 
 3. **Fetch again** after a source update:
@@ -214,7 +330,7 @@ mode to observe real data updates.
 
 ---
 
-## 5. Point a SkagitFlats device at a local Cascades instance
+## 9. Point a SkagitFlats device at a local Cascades instance
 
 A SkagitFlats device is a thin client that periodically fetches the pre-rendered
 PNG from a Cascades server and pushes it to e-ink hardware. To point it at your
