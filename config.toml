@@ -1,4 +1,18 @@
 [server]
 port = 8080
-image_width = 800
-image_height = 480
+
+[display]
+width = 800
+height = 480
+
+[location]
+latitude = 48.4232
+longitude = -122.3351
+name = "Mount Vernon, WA"
+
+[sources]
+weather_interval_secs = 300
+river_interval_secs = 300
+ferry_interval_secs = 60
+trail_interval_secs = 900
+road_interval_secs = 1800
