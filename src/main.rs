@@ -63,7 +63,7 @@ async fn main() {
                 .expect("source task panicked");
                 source = s;
                 match result {
-                    Ok(point) => domain.write().unwrap().apply(point),
+                    Ok(value) => domain.write().unwrap().apply_raw(source.id(), value),
                     Err(e) => log::warn!("source fetch failed: {}", e),
                 }
                 tokio::time::sleep(interval).await;

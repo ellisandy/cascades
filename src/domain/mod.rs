@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Current weather at a NOAA observation station.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +189,10 @@ pub struct SourceAge {
     pub road_secs: Option<u64>,
 }
 
-/// All possible outputs from a data source.
+/// All possible outputs from a data source (backward-compatibility bridge).
+///
+/// Used by `DomainState::apply` to accept typed values and store them as JSON.
+/// New code should use `DomainState::apply_raw` with `serde_json::Value` directly.
 #[derive(Debug, Clone)]
 pub enum DataPoint {
     Weather(WeatherObservation),
@@ -198,26 +202,110 @@ pub enum DataPoint {
     Road(RoadStatus),
 }
 
-/// Snapshot of the most recent value from every source.
+/// Stable plugin identifier used as the cache key in `DomainState`.
+pub type PluginId = String;
+
+/// A cached source value: the raw JSON data plus metadata.
+#[derive(Debug, Clone)]
+pub struct CachedValue {
+    /// The JSON data returned by the last successful fetch.
+    pub data: serde_json::Value,
+    /// Unix timestamp (seconds) when this value was last successfully fetched.
+    pub fetched_at: u64,
+    /// Error message from the last fetch attempt, if it failed (stale data in use).
+    pub error: Option<String>,
+}
+
+/// Snapshot of the most recent value from every source, keyed by plugin ID.
+///
+/// Well-known plugin IDs: `"weather"`, `"river"`, `"ferry"`, `"trail"`, `"road"`.
+/// New sources use `apply_raw` with their own ID. Typed accessor methods
+/// (`weather()`, `river()`, etc.) deserialize the JSON into domain structs.
 #[derive(Debug, Clone, Default)]
 pub struct DomainState {
-    pub weather: Option<WeatherObservation>,
-    pub river: Option<RiverGauge>,
-    pub ferry: Option<FerryStatus>,
-    pub trail: Option<TrailCondition>,
-    pub road: Option<RoadStatus>,
+    pub cache: HashMap<PluginId, CachedValue>,
 }
 
 impl DomainState {
-    /// Apply an incoming DataPoint, replacing the stored value for its type.
+    /// Apply an incoming DataPoint (backward-compatibility bridge).
+    ///
+    /// Serializes the typed value to JSON and stores it under the standard plugin ID.
+    /// Existing callers (tests, acceptance tests) can continue using this method.
     pub fn apply(&mut self, point: DataPoint) {
-        match point {
-            DataPoint::Weather(v) => self.weather = Some(v),
-            DataPoint::River(v) => self.river = Some(v),
-            DataPoint::Ferry(v) => self.ferry = Some(v),
-            DataPoint::Trail(v) => self.trail = Some(v),
-            DataPoint::Road(v) => self.road = Some(v),
-        }
+        let (id, data) = match point {
+            DataPoint::Weather(v) => (
+                "weather".to_string(),
+                serde_json::to_value(v).expect("WeatherObservation is always serializable"),
+            ),
+            DataPoint::River(v) => (
+                "river".to_string(),
+                serde_json::to_value(v).expect("RiverGauge is always serializable"),
+            ),
+            DataPoint::Ferry(v) => (
+                "ferry".to_string(),
+                serde_json::to_value(v).expect("FerryStatus is always serializable"),
+            ),
+            DataPoint::Trail(v) => (
+                "trail".to_string(),
+                serde_json::to_value(v).expect("TrailCondition is always serializable"),
+            ),
+            DataPoint::Road(v) => (
+                "road".to_string(),
+                serde_json::to_value(v).expect("RoadStatus is always serializable"),
+            ),
+        };
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.cache.insert(id, CachedValue { data, fetched_at, error: None });
+    }
+
+    /// Apply a raw JSON value from a source fetch, keyed by plugin ID.
+    ///
+    /// This is the primary path used by the scheduler after sources return
+    /// `serde_json::Value` from their `fetch()` call.
+    pub fn apply_raw(&mut self, id: &str, data: serde_json::Value) {
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.cache.insert(id.to_string(), CachedValue { data, fetched_at, error: None });
+    }
+
+    /// Return the most recent weather observation, if available.
+    pub fn weather(&self) -> Option<WeatherObservation> {
+        self.cache
+            .get("weather")
+            .and_then(|cv| serde_json::from_value(cv.data.clone()).ok())
+    }
+
+    /// Return the most recent river gauge reading, if available.
+    pub fn river(&self) -> Option<RiverGauge> {
+        self.cache
+            .get("river")
+            .and_then(|cv| serde_json::from_value(cv.data.clone()).ok())
+    }
+
+    /// Return the most recent ferry status, if available.
+    pub fn ferry(&self) -> Option<FerryStatus> {
+        self.cache
+            .get("ferry")
+            .and_then(|cv| serde_json::from_value(cv.data.clone()).ok())
+    }
+
+    /// Return the most recent trail condition, if available.
+    pub fn trail(&self) -> Option<TrailCondition> {
+        self.cache
+            .get("trail")
+            .and_then(|cv| serde_json::from_value(cv.data.clone()).ok())
+    }
+
+    /// Return the most recent road status, if available.
+    pub fn road(&self) -> Option<RoadStatus> {
+        self.cache
+            .get("road")
+            .and_then(|cv| serde_json::from_value(cv.data.clone()).ok())
     }
 }
 
@@ -274,64 +362,64 @@ mod tests {
     #[test]
     fn default_domain_state_is_all_none() {
         let state = DomainState::default();
-        assert!(state.weather.is_none());
-        assert!(state.river.is_none());
-        assert!(state.ferry.is_none());
-        assert!(state.trail.is_none());
-        assert!(state.road.is_none());
+        assert!(state.weather().is_none());
+        assert!(state.river().is_none());
+        assert!(state.ferry().is_none());
+        assert!(state.trail().is_none());
+        assert!(state.road().is_none());
     }
 
     #[test]
     fn apply_weather_sets_weather() {
         let mut state = DomainState::default();
         state.apply(DataPoint::Weather(sample_weather()));
-        assert!(state.weather.is_some());
-        assert_eq!(state.weather.as_ref().unwrap().temperature_f, 55.0);
-        assert!(state.river.is_none());
+        assert!(state.weather().is_some());
+        assert_eq!(state.weather().unwrap().temperature_f, 55.0);
+        assert!(state.river().is_none());
     }
 
     #[test]
     fn apply_river_sets_river() {
         let mut state = DomainState::default();
         state.apply(DataPoint::River(sample_river()));
-        assert!(state.river.is_some());
-        assert_eq!(state.river.as_ref().unwrap().site_id, "12200500");
+        assert!(state.river().is_some());
+        assert_eq!(state.river().unwrap().site_id, "12200500");
     }
 
     #[test]
     fn apply_ferry_sets_ferry() {
         let mut state = DomainState::default();
         state.apply(DataPoint::Ferry(sample_ferry()));
-        assert!(state.ferry.is_some());
-        assert_eq!(state.ferry.as_ref().unwrap().vessel_name, "MV Samish");
+        assert!(state.ferry().is_some());
+        assert_eq!(state.ferry().unwrap().vessel_name, "MV Samish");
     }
 
     #[test]
     fn apply_trail_sets_trail() {
         let mut state = DomainState::default();
         state.apply(DataPoint::Trail(sample_trail()));
-        assert!(state.trail.is_some());
-        assert_eq!(state.trail.as_ref().unwrap().destination_name, "Cascade Pass");
+        assert!(state.trail().is_some());
+        assert_eq!(state.trail().unwrap().destination_name, "Cascade Pass");
     }
 
     #[test]
     fn apply_road_sets_road() {
         let mut state = DomainState::default();
         state.apply(DataPoint::Road(sample_road()));
-        assert!(state.road.is_some());
-        assert_eq!(state.road.as_ref().unwrap().status, "closed");
+        assert!(state.road().is_some());
+        assert_eq!(state.road().unwrap().status, "closed");
     }
 
     #[test]
     fn apply_replaces_existing_value() {
         let mut state = DomainState::default();
         state.apply(DataPoint::Weather(sample_weather()));
-        assert_eq!(state.weather.as_ref().unwrap().temperature_f, 55.0);
+        assert_eq!(state.weather().unwrap().temperature_f, 55.0);
 
         let mut updated = sample_weather();
         updated.temperature_f = 72.0;
         state.apply(DataPoint::Weather(updated));
-        assert_eq!(state.weather.as_ref().unwrap().temperature_f, 72.0);
+        assert_eq!(state.weather().unwrap().temperature_f, 72.0);
     }
 
     #[test]
@@ -343,11 +431,22 @@ mod tests {
         state.apply(DataPoint::Trail(sample_trail()));
         state.apply(DataPoint::Road(sample_road()));
 
-        assert!(state.weather.is_some());
-        assert!(state.river.is_some());
-        assert!(state.ferry.is_some());
-        assert!(state.trail.is_some());
-        assert!(state.road.is_some());
+        assert!(state.weather().is_some());
+        assert!(state.river().is_some());
+        assert!(state.ferry().is_some());
+        assert!(state.trail().is_some());
+        assert!(state.road().is_some());
+    }
+
+    #[test]
+    fn apply_raw_stores_and_retrieves_value() {
+        let mut state = DomainState::default();
+        let obs = sample_weather();
+        let value = serde_json::to_value(&obs).unwrap();
+        state.apply_raw("weather", value);
+        let retrieved = state.weather().unwrap();
+        assert_eq!(retrieved.temperature_f, obs.temperature_f);
+        assert_eq!(retrieved.wind_direction, obs.wind_direction);
     }
 
     #[test]

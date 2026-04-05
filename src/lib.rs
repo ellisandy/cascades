@@ -34,7 +34,7 @@ pub fn render_current_state_with_destinations(
     let mut state = DomainState::default();
     for source in &all_sources {
         match source.fetch() {
-            Ok(point) => state.apply(point),
+            Ok(value) => state.apply_raw(source.id(), value),
             Err(e) => log::warn!("source '{}' fetch failed: {}", source.name(), e),
         }
     }

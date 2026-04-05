@@ -1,5 +1,5 @@
 use crate::config::TrailSourceConfig;
-use crate::domain::{DataPoint, TrailCondition};
+use crate::domain::TrailCondition;
 use crate::sources::{Source, SourceError};
 use serde::Deserialize;
 use std::time::Duration;
@@ -70,6 +70,10 @@ struct NpsAlert {
 }
 
 impl Source for TrailConditionsSource {
+    fn id(&self) -> &str {
+        "trail"
+    }
+
     fn name(&self) -> &str {
         "trail-conditions"
     }
@@ -78,7 +82,7 @@ impl Source for TrailConditionsSource {
         self.refresh
     }
 
-    fn fetch(&self) -> Result<DataPoint, SourceError> {
+    fn fetch(&self) -> Result<serde_json::Value, SourceError> {
         let response_text = if self.use_fixtures {
             FIXTURE_RESPONSE.to_string()
         } else {
@@ -96,7 +100,7 @@ impl Source for TrailConditionsSource {
             .find(|a| a.category == "Caution" || a.category == "Danger")
             .or_else(|| parsed.data.first());
 
-        match alert {
+        let condition = match alert {
             Some(a) => {
                 // Truncate long descriptions for the e-ink display.
                 let summary = if a.description.len() > 120 {
@@ -105,24 +109,26 @@ impl Source for TrailConditionsSource {
                     format!("[{}] {}", a.category, a.description)
                 };
 
-                Ok(DataPoint::Trail(TrailCondition {
+                TrailCondition {
                     destination_name: a.title.clone(),
                     suitability_summary: summary,
                     last_updated: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
-                }))
+                }
             }
-            None => Ok(DataPoint::Trail(TrailCondition {
+            None => TrailCondition {
                 destination_name: format!("NPS {}", self.park_code.to_uppercase()),
                 suitability_summary: "No active alerts".to_string(),
                 last_updated: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-            })),
-        }
+            },
+        };
+
+        serde_json::to_value(condition).map_err(|e| SourceError::Parse(e.to_string()))
     }
 }
 
@@ -147,6 +153,7 @@ impl TrailConditionsSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::TrailCondition;
 
     #[test]
     fn parse_fixture_response() {
@@ -168,14 +175,10 @@ mod tests {
         let result = source.fetch();
         assert!(result.is_ok(), "fixture fetch should succeed");
 
-        match result.unwrap() {
-            DataPoint::Trail(cond) => {
-                assert!(!cond.destination_name.is_empty());
-                assert!(!cond.suitability_summary.is_empty());
-                assert!(cond.last_updated > 0);
-            }
-            other => panic!("expected DataPoint::Trail, got {:?}", other),
-        }
+        let cond: TrailCondition = serde_json::from_value(result.unwrap()).unwrap();
+        assert!(!cond.destination_name.is_empty());
+        assert!(!cond.suitability_summary.is_empty());
+        assert!(cond.last_updated > 0);
     }
 
     #[test]
@@ -229,5 +232,14 @@ mod tests {
         // "[Caution] " = 10 chars + 117 chars + "…" = 128 chars
         assert!(summary.len() < 200);
         assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn source_id_name_and_interval() {
+        let source = TrailConditionsSource::new(None, 900, true)
+            .expect("should create in fixture mode");
+        assert_eq!(source.id(), "trail");
+        assert_eq!(source.name(), "trail-conditions");
+        assert_eq!(source.refresh_interval(), Duration::from_secs(900));
     }
 }

@@ -4,7 +4,6 @@ pub mod trail_conditions;
 pub mod usgs;
 pub mod wsdot;
 
-use crate::domain::DataPoint;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -26,14 +25,20 @@ pub enum SourceError {
 /// source should log and return `Err`; the scheduler will retry after
 /// `refresh_interval`. Sources must not panic.
 pub trait Source: Send {
+    /// Stable identifier used as the cache key in DomainState.
+    ///
+    /// Well-known IDs: `"weather"`, `"river"`, `"ferry"`, `"trail"`, `"road"`.
+    /// New sources choose their own unique ID.
+    fn id(&self) -> &str;
+
     /// Human-readable name shown in the web UI and logs.
     fn name(&self) -> &str;
 
     /// How often the scheduler should call `fetch`.
     fn refresh_interval(&self) -> Duration;
 
-    /// Fetch the latest data. Returns a DataPoint on success or a SourceError
-    /// on failure. Never panics. Never blocks indefinitely — callers rely on
-    /// this to drain the scheduler.
-    fn fetch(&self) -> Result<DataPoint, SourceError>;
+    /// Fetch the latest data. Returns arbitrary JSON on success, keyed by the
+    /// shape documented in the source's plugin definition. On error, the cache
+    /// retains the previous value. Never panics. Never blocks indefinitely.
+    fn fetch(&self) -> Result<serde_json::Value, SourceError>;
 }

@@ -1,5 +1,5 @@
 use crate::config::FerrySourceConfig;
-use crate::domain::{DataPoint, FerryStatus};
+use crate::domain::FerryStatus;
 use crate::sources::{Source, SourceError};
 use serde::Deserialize;
 use std::time::Duration;
@@ -88,6 +88,10 @@ struct ScheduleTime {
 }
 
 impl Source for WsdotFerrySource {
+    fn id(&self) -> &str {
+        "ferry"
+    }
+
     fn name(&self) -> &str {
         "wsdot-ferries"
     }
@@ -96,7 +100,7 @@ impl Source for WsdotFerrySource {
         self.refresh
     }
 
-    fn fetch(&self) -> Result<DataPoint, SourceError> {
+    fn fetch(&self) -> Result<serde_json::Value, SourceError> {
         let response_text = if self.use_fixtures {
             FIXTURE_RESPONSE.to_string()
         } else {
@@ -107,8 +111,8 @@ impl Source for WsdotFerrySource {
     }
 }
 
-/// Parse a WSDOT schedule response into a FerryStatus DataPoint.
-fn parse_schedule(json: &str, route_description: &str) -> Result<DataPoint, SourceError> {
+/// Parse a WSDOT schedule response into a serde_json::Value.
+fn parse_schedule(json: &str, route_description: &str) -> Result<serde_json::Value, SourceError> {
     let schedule: ScheduleResponse =
         serde_json::from_str(json).map_err(|e| SourceError::Parse(e.to_string()))?;
 
@@ -139,11 +143,13 @@ fn parse_schedule(json: &str, route_description: &str) -> Result<DataPoint, Sour
         )
     };
 
-    Ok(DataPoint::Ferry(FerryStatus {
+    let status = FerryStatus {
         route,
         vessel_name,
         estimated_departures: departures,
-    }))
+    };
+
+    serde_json::to_value(status).map_err(|e| SourceError::Parse(e.to_string()))
 }
 
 /// Parse a WSDOT date string like "/Date(1711652400000-0700)/" to Unix epoch seconds.
@@ -223,6 +229,7 @@ impl WsdotFerrySource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FerryStatus;
 
     #[test]
     fn parse_fixture_response() {
@@ -241,15 +248,11 @@ mod tests {
         let result = source.fetch();
         assert!(result.is_ok(), "fixture fetch should succeed: {:?}", result);
 
-        match result.unwrap() {
-            DataPoint::Ferry(status) => {
-                assert!(status.route.contains("Anacortes"));
-                assert_eq!(status.vessel_name, "MV Samish");
-                assert_eq!(status.estimated_departures.len(), 3);
-                assert!(status.estimated_departures[0] > 0);
-            }
-            other => panic!("expected DataPoint::Ferry, got {:?}", other),
-        }
+        let status: FerryStatus = serde_json::from_value(result.unwrap()).unwrap();
+        assert!(status.route.contains("Anacortes"));
+        assert_eq!(status.vessel_name, "MV Samish");
+        assert_eq!(status.estimated_departures.len(), 3);
+        assert!(status.estimated_departures[0] > 0);
     }
 
     #[test]
@@ -269,14 +272,10 @@ mod tests {
         let result = parse_schedule(json, "Test Route");
         assert!(result.is_ok());
 
-        match result.unwrap() {
-            DataPoint::Ferry(status) => {
-                assert_eq!(status.vessel_name, "Unknown");
-                assert!(status.estimated_departures.is_empty());
-                assert!(status.route.contains("Anacortes"));
-            }
-            other => panic!("expected DataPoint::Ferry, got {:?}", other),
-        }
+        let status: FerryStatus = serde_json::from_value(result.unwrap()).unwrap();
+        assert_eq!(status.vessel_name, "Unknown");
+        assert!(status.estimated_departures.is_empty());
+        assert!(status.route.contains("Anacortes"));
     }
 
     #[test]
@@ -328,9 +327,10 @@ mod tests {
     }
 
     #[test]
-    fn source_name_and_interval() {
+    fn source_id_name_and_interval() {
         let source =
             WsdotFerrySource::new(None, 60, true).expect("should create in fixture mode");
+        assert_eq!(source.id(), "ferry");
         assert_eq!(source.name(), "wsdot-ferries");
         assert_eq!(source.refresh_interval(), Duration::from_secs(60));
     }
