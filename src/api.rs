@@ -7,6 +7,17 @@
 //! - `GET  /api/image/:display_id`             — latest rendered PNG, `Cache-Control: no-store`
 //! - `GET  /image.png`                         — legacy alias for the default display
 //! - `GET  /api/status`                        — JSON health snapshot with per-source state
+//!
+//! Admin API endpoints (require `X-Api-Key` header):
+//! - `GET  /admin`                                      — serve admin UI HTML placeholder
+//! - `GET  /api/admin/layouts`                          — list layout summaries `[{id, name, updated_at}]`
+//! - `GET  /api/admin/layout/{id}`                      — get full layout as JSON
+//! - `PUT  /api/admin/layout/{id}`                      — replace full layout, returns updated layout
+//! - `POST /api/admin/preview/{id}`                     — render layout to PNG
+//! - `GET  /api/admin/plugins`                          — list plugin instances `[{id, name, supported_variants}]`
+//! - `POST /api/admin/layout/{id}/item`                 — add item to layout
+//! - `PUT  /api/admin/layout/{id}/item/{item_id}`       — update single item
+//! - `DELETE /api/admin/layout/{id}/item/{item_id}`     — remove item
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -16,15 +27,16 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
-    Router,
+    routing::{delete, get, post, put},
+    Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     compositor::{Compositor, DisplayConfiguration},
     instance_store::InstanceStore,
-    layout_store::{LayoutItem, LayoutStore},
+    layout_store::{LayoutConfig, LayoutItem, LayoutStore},
 };
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -61,6 +73,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/display", get(get_display))
         .route("/api/image/{display_id}", get(get_image))
         .route("/api/status", get(get_status))
+        // Admin routes — all require X-Api-Key header
+        .route("/admin", get(get_admin_ui))
+        .route("/api/admin/layouts", get(admin_list_layouts))
+        .route("/api/admin/layout/{id}", get(admin_get_layout))
+        .route("/api/admin/layout/{id}", put(admin_put_layout))
+        .route("/api/admin/preview/{id}", post(admin_post_preview))
+        .route("/api/admin/plugins", get(admin_list_plugins))
+        .route("/api/admin/layout/{id}/item", post(admin_post_item))
+        .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
+        .route("/api/admin/layout/{id}/item/{item_id}", delete(admin_delete_item))
         .with_state(state)
 }
 
@@ -437,6 +459,397 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
         .unwrap()
 }
 
+// ─── Admin types ─────────────────────────────────────────────────────────────
+
+/// Flat item payload used by POST/PUT item admin endpoints.
+///
+/// All geometry fields are required.  Type-specific fields (`plugin_instance_id`,
+/// `layout_variant`, `text_content`, `font_size`, `orientation`) are optional;
+/// missing ones get safe defaults on conversion to [`LayoutItem`].
+#[derive(Debug, Deserialize)]
+struct ItemPayload {
+    id: String,
+    item_type: String,
+    z_index: i32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    plugin_instance_id: Option<String>,
+    layout_variant: Option<String>,
+    text_content: Option<String>,
+    font_size: Option<i32>,
+    orientation: Option<String>,
+}
+
+impl ItemPayload {
+    fn into_layout_item(self) -> Result<LayoutItem, String> {
+        match self.item_type.as_str() {
+            "plugin_slot" => Ok(LayoutItem::PluginSlot {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                plugin_instance_id: self.plugin_instance_id.unwrap_or_default(),
+                layout_variant: self.layout_variant.unwrap_or_else(|| "full".to_string()),
+            }),
+            "static_text" => Ok(LayoutItem::StaticText {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                text_content: self.text_content.unwrap_or_default(),
+                font_size: self.font_size.unwrap_or(16),
+                orientation: self.orientation,
+            }),
+            "static_divider" => Ok(LayoutItem::StaticDivider {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                orientation: self.orientation,
+            }),
+            other => Err(format!("unknown item_type '{other}'")),
+        }
+    }
+}
+
+/// Body for `PUT /api/admin/layout/{id}`.
+#[derive(Debug, Deserialize)]
+struct LayoutPayload {
+    name: String,
+    items: Vec<ItemPayload>,
+}
+
+/// Summary entry returned by `GET /api/admin/layouts`.
+#[derive(Debug, Serialize)]
+struct LayoutSummary {
+    id: String,
+    name: String,
+    updated_at: i64,
+}
+
+/// Plugin instance entry returned by `GET /api/admin/plugins`.
+#[derive(Debug, Serialize)]
+struct PluginInstanceSummary {
+    id: String,
+    name: String,
+    supported_variants: Vec<&'static str>,
+}
+
+// ─── Admin handlers ───────────────────────────────────────────────────────────
+
+/// `GET /admin` — serve the admin UI HTML.
+async fn get_admin_ui() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        ADMIN_HTML,
+    )
+}
+
+const ADMIN_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Cascades Admin</title>
+  <style>
+    body{background:#0d1117;color:#c9d1d9;font-family:'Courier New',Courier,monospace;font-size:14px;padding:2rem}
+    h1{color:#58a6ff}
+    p{color:#8b949e}
+  </style>
+</head>
+<body>
+  <h1>Cascades Admin UI</h1>
+  <p>The visual layout editor is coming soon.</p>
+  <p>API endpoints are available at <code>/api/admin/</code>.</p>
+</body>
+</html>"#;
+
+/// `GET /api/admin/layouts` — list all layout summaries.
+async fn admin_list_layouts(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let layouts = match app.layout_store.list_layouts() {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("admin_list_layouts: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let summaries: Vec<LayoutSummary> = layouts
+        .into_iter()
+        .map(|l| LayoutSummary { id: l.id, name: l.name, updated_at: l.updated_at })
+        .collect();
+
+    Json(summaries).into_response()
+}
+
+/// `GET /api/admin/layout/{id}` — get full layout as JSON.
+async fn admin_get_layout(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.layout_store.get_layout(&id) {
+        Ok(Some(layout)) => Json(layout).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_get_layout '{}': {}", id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `PUT /api/admin/layout/{id}` — replace entire layout; returns saved layout.
+async fn admin_put_layout(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<LayoutPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let items: Result<Vec<LayoutItem>, String> =
+        payload.items.into_iter().map(|p| p.into_layout_item()).collect();
+
+    let items = match items {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"error": e})).unwrap(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let layout = LayoutConfig { id: id.clone(), name: payload.name, items, updated_at: 0 };
+
+    if let Err(e) = app.layout_store.upsert_layout(&layout) {
+        log::error!("admin_put_layout '{}': {}", id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Invalidate image cache so next render picks up the new layout.
+    app.image_cache.write().unwrap().remove(&id);
+
+    match app.layout_store.get_layout(&id) {
+        Ok(Some(saved)) => Json(saved).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `POST /api/admin/preview/{id}` — render layout to PNG.
+async fn admin_post_preview(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let layout = match app.layout_store.get_layout(&id) {
+        Ok(Some(l)) => l,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_post_preview '{}': {}", id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let cfg = DisplayConfiguration::from_layout_config(&layout);
+    match compose_display(&app, &cfg).await {
+        Some(png) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `GET /api/admin/plugins` — list plugin instances with supported variants.
+async fn admin_list_plugins(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let instances = match app.instance_store.list_instances() {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("admin_list_plugins: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let plugins: Vec<PluginInstanceSummary> = instances
+        .into_iter()
+        .map(|inst| PluginInstanceSummary {
+            name: capitalize_first(&inst.plugin_id),
+            id: inst.id,
+            supported_variants: vec!["full", "half_horizontal", "half_vertical", "quadrant"],
+        })
+        .collect();
+
+    Json(plugins).into_response()
+}
+
+/// `POST /api/admin/layout/{id}/item` — add an item to an existing layout.
+async fn admin_post_item(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<ItemPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut layout = match app.layout_store.get_layout(&id) {
+        Ok(Some(l)) => l,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_post_item '{}': {}", id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let item = match payload.into_layout_item() {
+        Ok(i) => i,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"error": e})).unwrap(),
+                ))
+                .unwrap();
+        }
+    };
+
+    layout.items.push(item);
+
+    if let Err(e) = app.layout_store.upsert_layout(&layout) {
+        log::error!("admin_post_item upsert '{}': {}", id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    app.image_cache.write().unwrap().remove(&id);
+
+    match app.layout_store.get_layout(&id) {
+        Ok(Some(saved)) => (StatusCode::CREATED, Json(saved)).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `PUT /api/admin/layout/{id}/item/{item_id}` — replace a single item.
+async fn admin_put_item(
+    headers: HeaderMap,
+    Path((id, item_id)): Path<(String, String)>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<ItemPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut layout = match app.layout_store.get_layout(&id) {
+        Ok(Some(l)) => l,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_put_item '{}': {}", id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let pos = match layout.items.iter().position(|i| i.id() == item_id) {
+        Some(p) => p,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let new_item = match payload.into_layout_item() {
+        Ok(i) => i,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"error": e})).unwrap(),
+                ))
+                .unwrap();
+        }
+    };
+
+    layout.items[pos] = new_item;
+
+    if let Err(e) = app.layout_store.upsert_layout(&layout) {
+        log::error!("admin_put_item upsert '{}': {}", id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    app.image_cache.write().unwrap().remove(&id);
+
+    match app.layout_store.get_layout(&id) {
+        Ok(Some(saved)) => Json(saved).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `DELETE /api/admin/layout/{id}/item/{item_id}` — remove a single item.
+async fn admin_delete_item(
+    headers: HeaderMap,
+    Path((id, item_id)): Path<(String, String)>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut layout = match app.layout_store.get_layout(&id) {
+        Ok(Some(l)) => l,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_delete_item '{}': {}", id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let before = layout.items.len();
+    layout.items.retain(|i| i.id() != item_id);
+    if layout.items.len() == before {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if let Err(e) = app.layout_store.upsert_layout(&layout) {
+        log::error!("admin_delete_item upsert '{}': {}", id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    app.image_cache.write().unwrap().remove(&id);
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn image_response(png: Vec<u8>) -> Response<Body> {
@@ -454,6 +867,14 @@ fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(|v| v == expected)
+        .unwrap_or(false)
+}
+
+fn is_admin_authorized(headers: &HeaderMap, api_key: &str) -> bool {
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == api_key)
         .unwrap_or(false)
 }
 
@@ -696,5 +1117,362 @@ mod tests {
         assert!(body.contains("/image.png"), "missing /image.png in endpoint table");
         assert!(body.contains("Live Status"), "missing Live Status section");
         assert!(body.contains("fetch('/api/status')"), "missing JS status fetch");
+    }
+
+    // ── Admin API tests ───────────────────────────────────────────────────────
+
+    /// Returns `(AppState, TempDir)` — caller must keep `TempDir` alive for writes.
+    fn make_writable_test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
+        use crate::layout_store::LayoutStore;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let templates_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+
+        let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
+        let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
+        let config = Config {
+            display: DisplayConfig { width: 800, height: 480 },
+            location: LocationConfig { latitude: 48.4, longitude: -122.3, name: "Test".to_string() },
+            sources: SourceIntervals {
+                weather_interval_secs: 300,
+                river_interval_secs: 300,
+                ferry_interval_secs: 60,
+                trail_interval_secs: 900,
+                road_interval_secs: 1800,
+                river: None, trail: None, road: None, ferry: None,
+            },
+            server: None, auth: None, device: None,
+            storage: StorageConfig::default(),
+        };
+        seed_from_config(&instance_store, &config).unwrap();
+
+        let template_engine = Arc::new(TemplateEngine::new(&templates_dir).unwrap());
+        let compositor = Arc::new(Compositor::new(
+            Arc::clone(&template_engine),
+            Arc::clone(&instance_store),
+            "http://localhost:3001".to_string(),
+        ));
+
+        let state = Arc::new(AppState {
+            compositor,
+            instance_store,
+            layout_store,
+            image_cache: Arc::new(RwLock::new(HashMap::new())),
+            api_key: "test-key".to_string(),
+            refresh_rate_secs: 60,
+            started_at: std::time::Instant::now(),
+            sidecar_url: "http://localhost:3001".to_string(),
+        });
+        (state, dir)
+    }
+
+    fn seed_default_layout(state: &Arc<AppState>) {
+        state.layout_store.upsert_layout(&crate::layout_store::LayoutConfig {
+            id: "default".to_string(),
+            name: "Default".to_string(),
+            items: vec![],
+            updated_at: 0,
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_get_ui_returns_200_html() {
+        let app = build_router(make_test_state());
+        let req = Request::builder().uri("/admin").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response.headers().get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()).unwrap_or("");
+        assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
+    }
+
+    #[tokio::test]
+    async fn admin_list_layouts_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder().uri("/api/admin/layouts").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_list_layouts_returns_empty_array_when_no_layouts() {
+        let state = make_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/layouts")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.is_array(), "expected array");
+        assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn admin_list_layouts_returns_summaries() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/layouts")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "default");
+        assert_eq!(arr[0]["name"], "Default");
+        assert!(arr[0]["updated_at"].is_number());
+    }
+
+    #[tokio::test]
+    async fn admin_get_layout_not_found() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/layout/nonexistent")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_get_layout_returns_full_layout() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["id"], "default");
+        assert_eq!(body["name"], "Default");
+        assert!(body["items"].is_array());
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_replaces_layout() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Updated",
+            "items": [
+                {
+                    "id": "item-1",
+                    "item_type": "plugin_slot",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 800, "height": 480,
+                    "plugin_instance_id": "river",
+                    "layout_variant": "full"
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp["name"], "Updated");
+        assert_eq!(resp["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_rejects_unknown_item_type() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Bad",
+            "items": [
+                {
+                    "id": "x",
+                    "item_type": "not_a_type",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 100, "height": 100
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn admin_list_plugins_returns_instances() {
+        let state = make_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/plugins")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = body.as_array().unwrap();
+        assert!(!arr.is_empty(), "should list seeded instances");
+        // Each entry has id, name, supported_variants
+        let first = &arr[0];
+        assert!(first["id"].is_string());
+        assert!(first["name"].is_string());
+        assert!(first["supported_variants"].is_array());
+        let variants = first["supported_variants"].as_array().unwrap();
+        assert!(variants.iter().any(|v| v == "full"), "should include 'full' variant");
+    }
+
+    #[tokio::test]
+    async fn admin_post_item_adds_to_layout() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let item = serde_json::json!({
+            "id": "new-item",
+            "item_type": "static_text",
+            "z_index": 0,
+            "x": 10, "y": 10, "width": 200, "height": 40,
+            "text_content": "Hello",
+            "font_size": 20
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/layout/default/item")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&item).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_post_item_404_for_missing_layout() {
+        let app = build_router(make_test_state());
+        let item = serde_json::json!({
+            "id": "x", "item_type": "static_divider",
+            "z_index": 0, "x": 0, "y": 0, "width": 800, "height": 2
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/layout/no-such-layout/item")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&item).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_item_removes_item() {
+        let (state, _dir) = make_writable_test_state();
+        state.layout_store.upsert_layout(&crate::layout_store::LayoutConfig {
+            id: "default".to_string(),
+            name: "Default".to_string(),
+            items: vec![crate::layout_store::LayoutItem::StaticDivider {
+                id: "div-1".to_string(),
+                z_index: 0, x: 0, y: 240, width: 800, height: 2,
+                orientation: None,
+            }],
+            updated_at: 0,
+        }).unwrap();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/layout/default/item/div-1")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        // Layout should now have 0 items
+        let layout = state.layout_store.get_layout("default").unwrap().unwrap();
+        assert_eq!(layout.items.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_item_404_for_missing_item() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/layout/default/item/no-such-item")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_put_item_replaces_item() {
+        let (state, _dir) = make_writable_test_state();
+        state.layout_store.upsert_layout(&crate::layout_store::LayoutConfig {
+            id: "default".to_string(),
+            name: "Default".to_string(),
+            items: vec![crate::layout_store::LayoutItem::StaticText {
+                id: "txt-1".to_string(),
+                z_index: 0, x: 0, y: 0, width: 200, height: 40,
+                text_content: "Old".to_string(),
+                font_size: 16,
+                orientation: None,
+            }],
+            updated_at: 0,
+        }).unwrap();
+        let app = build_router(Arc::clone(&state));
+        let updated = serde_json::json!({
+            "id": "txt-1",
+            "item_type": "static_text",
+            "z_index": 0, "x": 0, "y": 0, "width": 200, "height": 40,
+            "text_content": "New",
+            "font_size": 24
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default/item/txt-1")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&updated).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let layout = state.layout_store.get_layout("default").unwrap().unwrap();
+        assert!(matches!(&layout.items[0],
+            crate::layout_store::LayoutItem::StaticText { text_content, .. }
+            if text_content == "New"
+        ));
     }
 }
