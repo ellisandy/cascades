@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 /// Current weather at a NOAA observation station.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,76 +118,50 @@ pub struct TripCriteria {
     pub road_open_required: bool,
 }
 
+/// One evaluated criterion result.
+///
+/// Returned by `Criterion::evaluate`; collected into `TripDecision::results`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CriterionResult {
+    /// Machine key, e.g. `"temperature_min"`.
+    pub key: String,
+    /// Human label, e.g. `"Min temperature"`.
+    pub label: String,
+    /// Observed value as JSON (number, string, or null when absent).
+    pub value: serde_json::Value,
+    /// Configured threshold as JSON.
+    pub threshold: serde_json::Value,
+    /// `true` if the criterion passes (safe to go for this criterion).
+    pub pass: bool,
+    /// Human-readable verdict, e.g. `"45°F — 5° below minimum 50°F"`.
+    pub reason: String,
+    /// `true` when the criterion could not be evaluated because the required
+    /// data is absent or stale.  Used to distinguish Unknown from NoGo when
+    /// deriving a 4-state display status from `TripDecision`.
+    #[serde(default)]
+    pub data_missing: bool,
+    /// `true` when the criterion passes but the observed value is within the
+    /// near-miss margin of the threshold.  Used to derive a Caution display
+    /// state from a `go = true` decision.
+    #[serde(default)]
+    pub near_miss: bool,
+}
+
 /// Result of evaluating a destination against current conditions.
 ///
-/// States in priority order (see `docs/product/trip-recommendation-model.md`):
-/// - `NoGo`: a hard criterion is exceeded — don't go.
-/// - `Unknown`: no blocker confirmed but required data is absent or stale.
-/// - `Caution`: all criteria met but one or more are near-miss or data aging.
-/// - `Go`: all criteria met, all required data present and fresh.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "decision")]
-pub enum TripDecision {
-    Go,
-    Caution { warnings: Vec<String> },
-    NoGo { reasons: Vec<String> },
-    Unknown { missing: Vec<String> },
-}
-
-/// A single evaluated criterion — used in the planning view.
-///
-/// Each `EvalFactor` represents one configured threshold that was checked against
-/// live data. The planning view uses these to show a structured breakdown of why
-/// the recommendation is GO or NO GO.
-#[derive(Debug, Clone, Serialize)]
-pub struct EvalFactor {
-    /// Short label, e.g. "Temperature", "River level".
-    pub name: String,
-    /// Formatted actual value, e.g. "14.2 ft".
-    pub actual: String,
-    /// Formatted threshold, e.g. "≤ 12.0 ft".
-    pub threshold: String,
-    /// Human-readable verdict, e.g. "14.2 ft — 2.2 ft over limit".
-    pub detail: String,
-}
-
-/// A criterion that could not be evaluated because the required data source has
-/// not yet produced a reading.
-#[derive(Debug, Clone, Serialize)]
-pub struct UncheckedCriterion {
-    /// Criterion label, e.g. "Min temperature".
-    pub criterion: String,
-    /// Which source is missing, e.g. "Weather".
-    pub missing_source: String,
-}
-
-/// Full structured evaluation result for the planning view.
-///
-/// Unlike `TripDecision`, this carries the breakdown of all checked and
-/// unchecked criteria so the planning view can render hero + detail separately.
-#[derive(Debug, Clone, Serialize)]
-pub struct EvaluationDetail {
-    /// The binary recommendation.
-    pub decision: TripDecision,
-    /// Criteria that are currently blocking GO.
-    pub blockers: Vec<EvalFactor>,
-    /// Criteria that passed.
-    pub passing: Vec<EvalFactor>,
-    /// Criteria that could not be checked due to missing source data.
-    pub unchecked: Vec<UncheckedCriterion>,
-    /// Data freshness for each source, in seconds since last update.
-    /// `None` means the source has never produced a reading.
-    pub source_age_secs: SourceAge,
-}
-
-/// Per-source data age (seconds since last reading, or None if never received).
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct SourceAge {
-    pub weather_secs: Option<u64>,
-    pub river_secs: Option<u64>,
-    pub ferry_secs: Option<u64>,
-    pub trail_secs: Option<u64>,
-    pub road_secs: Option<u64>,
+/// `go` is `true` when all registered criteria pass, `false` when any criterion
+/// fails (either a hard limit exceeded or required data absent/stale).
+/// The individual `results` carry per-criterion detail.
+#[derive(Debug, Clone)]
+pub struct TripDecision {
+    /// Binary go/no-go recommendation.
+    pub go: bool,
+    /// Destination name this decision was computed for.
+    pub destination: String,
+    /// Per-criterion evaluation results (empty when no criteria are registered).
+    pub results: Vec<CriterionResult>,
+    /// When this decision was computed.
+    pub evaluated_at: SystemTime,
 }
 
 /// All possible outputs from a data source (backward-compatibility bridge).
@@ -478,40 +453,54 @@ mod tests {
     }
 
     #[test]
-    fn trip_decision_go_serialization() {
-        let decision = TripDecision::Go;
-        let json = serde_json::to_string(&decision).unwrap();
-        assert!(json.contains("\"decision\":\"Go\""));
+    fn criterion_result_serialization() {
+        let r = CriterionResult {
+            key: "temperature_min".to_string(),
+            label: "Min temperature".to_string(),
+            value: serde_json::json!(45.0_f32),
+            threshold: serde_json::json!(50.0_f32),
+            pass: false,
+            reason: "45°F below minimum 50°F".to_string(),
+            data_missing: false,
+            near_miss: false,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"key\":\"temperature_min\""));
+        assert!(json.contains("\"pass\":false"));
+        assert!(json.contains("below minimum"));
     }
 
     #[test]
-    fn trip_decision_caution_serialization() {
-        let decision = TripDecision::Caution {
-            warnings: vec!["Temp near minimum".to_string()],
+    fn criterion_result_data_missing_serialization() {
+        let r = CriterionResult {
+            key: "temperature_min".to_string(),
+            label: "Min temperature".to_string(),
+            value: serde_json::Value::Null,
+            threshold: serde_json::json!(50.0_f32),
+            pass: false,
+            reason: "No weather data".to_string(),
+            data_missing: true,
+            near_miss: false,
         };
-        let json = serde_json::to_string(&decision).unwrap();
-        assert!(json.contains("\"decision\":\"Caution\""));
-        assert!(json.contains("Temp near minimum"));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"data_missing\":true"));
     }
 
     #[test]
-    fn trip_decision_nogo_serialization() {
-        let decision = TripDecision::NoGo {
-            reasons: vec!["Too cold".to_string()],
+    fn criterion_result_near_miss_serialization() {
+        let r = CriterionResult {
+            key: "temperature_min".to_string(),
+            label: "Min temperature".to_string(),
+            value: serde_json::json!(52.0_f32),
+            threshold: serde_json::json!(50.0_f32),
+            pass: true,
+            reason: "Temp 52°F — 2° above minimum".to_string(),
+            data_missing: false,
+            near_miss: true,
         };
-        let json = serde_json::to_string(&decision).unwrap();
-        assert!(json.contains("\"decision\":\"NoGo\""));
-        assert!(json.contains("Too cold"));
-    }
-
-    #[test]
-    fn trip_decision_unknown_serialization() {
-        let decision = TripDecision::Unknown {
-            missing: vec!["No weather data".to_string()],
-        };
-        let json = serde_json::to_string(&decision).unwrap();
-        assert!(json.contains("\"decision\":\"Unknown\""));
-        assert!(json.contains("No weather data"));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"near_miss\":true"));
+        assert!(json.contains("\"pass\":true"));
     }
 
     #[test]

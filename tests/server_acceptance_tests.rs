@@ -21,7 +21,7 @@ use cascades::{
         load_config, Config, Destination, DisplayConfig, LocationConfig, SourceIntervals,
     },
     domain::{
-        DataPoint, DomainState, RiverGauge, TripDecision, WeatherObservation,
+        DataPoint, DomainState, RiverGauge, WeatherObservation,
     },
     evaluation::evaluate,
     presentation::{build_display_layout, HeroDecision},
@@ -324,8 +324,8 @@ fn us4_absent_weather_causes_unknown_decision() {
     let now_secs = 1_000_000u64;
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        matches!(decision, TripDecision::Unknown { .. }),
-        "absent weather should produce Unknown; got {:?}",
+        !decision.go && decision.results.iter().all(|r| r.data_missing),
+        "absent weather should produce Unknown (go=false, all data_missing); got {:?}",
         decision
     );
 }
@@ -346,8 +346,8 @@ fn us4_stale_weather_over_3h_causes_unknown() {
     let dest = go_destination();
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        matches!(decision, TripDecision::Unknown { .. }),
-        "stale weather (>3h) should produce Unknown; got {:?}",
+        !decision.go && decision.results.iter().all(|r| r.data_missing),
+        "stale weather (>3h) should produce Unknown (go=false, all data_missing); got {:?}",
         decision
     );
 }
@@ -376,8 +376,8 @@ fn us4_fresh_weather_does_not_cause_unknown() {
     };
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        !matches!(decision, TripDecision::Unknown { .. }),
-        "fresh weather should not produce Unknown; got {:?}",
+        decision.go,
+        "fresh weather should not produce Unknown (should be go=true); got {:?}",
         decision
     );
 }
@@ -569,13 +569,13 @@ fn us8_nogo_destination_beats_go_destination() {
     let decision_nogo = evaluate(&dest_nogo, &state, now_secs);
 
     assert!(
-        matches!(decision_go, TripDecision::Go | TripDecision::Caution { .. }),
-        "go_destination should be Go or Caution; got {:?}",
+        decision_go.go,
+        "go_destination should be Go or Caution (go=true); got {:?}",
         decision_go
     );
     assert!(
-        matches!(decision_nogo, TripDecision::NoGo { .. }),
-        "nogo_destination should be NoGo; got {:?}",
+        !decision_nogo.go && decision_nogo.results.iter().any(|r| !r.pass && !r.data_missing),
+        "nogo_destination should be NoGo (go=false with hard fail); got {:?}",
         decision_nogo
     );
 }
@@ -632,13 +632,13 @@ fn us8_decision_priority_nogo_beats_unknown() {
     let decision_nogo = evaluate(&dest_nogo, &state, now_secs);
 
     assert!(
-        matches!(decision_unknown, TripDecision::Unknown { .. }),
-        "no-road-data should be Unknown; got {:?}",
+        !decision_unknown.go && decision_unknown.results.iter().all(|r| r.data_missing),
+        "no-road-data should be Unknown (go=false, all data_missing); got {:?}",
         decision_unknown
     );
     assert!(
-        matches!(decision_nogo, TripDecision::Unknown { .. } | TripDecision::NoGo { .. }),
-        "nogo_destination with no river data should be Unknown or NoGo; got {:?}",
+        !decision_nogo.go,
+        "nogo_destination with no river data should be Unknown or NoGo (go=false); got {:?}",
         decision_nogo
     );
 }
@@ -673,8 +673,8 @@ fn us9_temperature_near_max_returns_caution() {
 
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        matches!(decision, TripDecision::Caution { .. }),
-        "temp within 5°F of max should return Caution; got {:?}",
+        decision.go && decision.results.iter().any(|r| r.near_miss),
+        "temp within 5°F of max should return Caution (go=true, near_miss); got {:?}",
         decision
     );
 }
@@ -703,8 +703,8 @@ fn us9_temperature_well_below_max_returns_go() {
 
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        matches!(decision, TripDecision::Go),
-        "temp well below max should return Go; got {:?}",
+        decision.go && !decision.results.iter().any(|r| r.near_miss),
+        "temp well below max should return Go (go=true, no near_miss); got {:?}",
         decision
     );
 }
@@ -733,8 +733,8 @@ fn us9_temperature_above_max_returns_nogo() {
 
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        matches!(decision, TripDecision::NoGo { .. }),
-        "temp above max should return NoGo; got {:?}",
+        !decision.go && decision.results.iter().any(|r| !r.pass && !r.data_missing),
+        "temp above max should return NoGo (go=false, hard fail); got {:?}",
         decision
     );
 }
@@ -763,8 +763,8 @@ fn us9_river_near_limit_returns_caution() {
 
     let decision = evaluate(&dest, &state, now_secs);
     assert!(
-        matches!(decision, TripDecision::Caution { .. }),
-        "river near limit should return Caution; got {:?}",
+        decision.go && decision.results.iter().any(|r| r.near_miss),
+        "river near limit should return Caution (go=true, near_miss); got {:?}",
         decision
     );
 }
