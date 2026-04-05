@@ -1,6 +1,6 @@
 use crate::domain::{
-    DomainState, FerryStatus, RiverGauge, RoadStatus, TrailCondition, TripDecision,
-    WeatherObservation,
+    CriterionResult, DomainState, FerryStatus, RiverGauge, RoadStatus, TrailCondition,
+    TripDecision, WeatherObservation,
 };
 
 /// A rendered panel: a title and zero or more text rows.
@@ -73,26 +73,33 @@ pub fn format_road(road: &RoadStatus) -> Panel {
 
 /// Format a TripDecision into a Panel.
 pub fn format_trip_decision(destination: &str, decision: &TripDecision) -> Panel {
-    match decision {
-        TripDecision::Go => Panel::new(destination).with_row("GO".to_string()),
-        TripDecision::Caution { warnings } => {
+    if decision.go {
+        let cautions: Vec<&CriterionResult> =
+            decision.results.iter().filter(|r| r.near_miss).collect();
+        if cautions.is_empty() {
+            Panel::new(destination).with_row("GO".to_string())
+        } else {
             let mut panel = Panel::new(destination).with_row("CAUTION".to_string());
-            for w in warnings {
-                panel.rows.push(format!("• {w}"));
+            for r in &cautions {
+                panel.rows.push(format!("• {}", r.reason));
             }
             panel
         }
-        TripDecision::NoGo { reasons } => {
+    } else {
+        let hard_fails: Vec<&CriterionResult> =
+            decision.results.iter().filter(|r| !r.pass && !r.data_missing).collect();
+        if !hard_fails.is_empty() {
             let mut panel = Panel::new(destination).with_row("NO GO".to_string());
-            for r in reasons {
-                panel.rows.push(format!("• {r}"));
+            for r in &hard_fails {
+                panel.rows.push(format!("• {}", r.reason));
             }
             panel
-        }
-        TripDecision::Unknown { missing } => {
+        } else {
+            let missing: Vec<&CriterionResult> =
+                decision.results.iter().filter(|r| r.data_missing).collect();
             let mut panel = Panel::new(destination).with_row("UNKNOWN".to_string());
-            for m in missing {
-                panel.rows.push(format!("• {m}"));
+            for r in &missing {
+                panel.rows.push(format!("• {}", r.reason));
             }
             panel
         }
@@ -317,6 +324,43 @@ pub struct DisplayLayout {
     pub context: ContextContent,
 }
 
+/// Map a [`TripDecision`] to a [`HeroDecision`] for the display layout.
+///
+/// Priority (highest first): NoGo > Unknown > Caution > Go.
+fn trip_decision_to_hero(decision: &TripDecision, dest_name: &str) -> HeroDecision {
+    if decision.go {
+        let warnings: Vec<String> = decision
+            .results
+            .iter()
+            .filter(|r| r.near_miss)
+            .map(|r| r.reason.clone())
+            .collect();
+        if warnings.is_empty() {
+            HeroDecision::Go { destination: dest_name.to_string() }
+        } else {
+            HeroDecision::Caution { destination: dest_name.to_string(), warnings }
+        }
+    } else {
+        let hard_fails: Vec<String> = decision
+            .results
+            .iter()
+            .filter(|r| !r.pass && !r.data_missing)
+            .map(|r| r.reason.clone())
+            .collect();
+        if !hard_fails.is_empty() {
+            HeroDecision::NoGo { destination: dest_name.to_string(), reasons: hard_fails }
+        } else {
+            let missing: Vec<String> = decision
+                .results
+                .iter()
+                .filter(|r| r.data_missing)
+                .map(|r| r.reason.clone())
+                .collect();
+            HeroDecision::Unknown { destination: dest_name.to_string(), missing }
+        }
+    }
+}
+
 /// Build a [`DisplayLayout`] from current domain state and destinations.
 ///
 /// Destination decisions are evaluated and the worst-case result is shown in
@@ -352,38 +396,28 @@ pub fn build_display_layout(
         let mut result: Option<HeroDecision> = None;
         for dest in destinations {
             let d = crate::evaluation::evaluate(dest, state, now_secs);
-            match d {
-                crate::domain::TripDecision::NoGo { reasons } => {
-                    result = Some(HeroDecision::NoGo {
-                        destination: dest.name.clone(),
-                        reasons,
-                    });
+            let hero = trip_decision_to_hero(&d, &dest.name);
+            match &hero {
+                HeroDecision::NoGo { .. } => {
+                    result = Some(hero);
                     break; // NoGo is worst-case; stop looking
                 }
-                crate::domain::TripDecision::Unknown { missing } => {
+                HeroDecision::Unknown { .. } => {
                     if !matches!(result, Some(HeroDecision::NoGo { .. })) {
-                        result = Some(HeroDecision::Unknown {
-                            destination: dest.name.clone(),
-                            missing,
-                        });
+                        result = Some(hero);
                     }
                 }
-                crate::domain::TripDecision::Caution { warnings } => {
+                HeroDecision::Caution { .. } => {
                     if !matches!(
                         result,
                         Some(HeroDecision::NoGo { .. }) | Some(HeroDecision::Unknown { .. })
                     ) {
-                        result = Some(HeroDecision::Caution {
-                            destination: dest.name.clone(),
-                            warnings,
-                        });
+                        result = Some(hero);
                     }
                 }
-                crate::domain::TripDecision::Go => {
+                HeroDecision::Go { .. } | HeroDecision::AllGo => {
                     if result.is_none() {
-                        result = Some(HeroDecision::Go {
-                            destination: dest.name.clone(),
-                        });
+                        result = Some(hero);
                     }
                 }
             }
@@ -591,18 +625,48 @@ mod tests {
         assert!(panel.rows[0].contains("Newhalem to Rainy Pass"));
     }
 
+    fn make_go_decision(dest: &str) -> TripDecision {
+        TripDecision {
+            go: true,
+            destination: dest.to_string(),
+            results: vec![],
+            evaluated_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn make_nogo_decision(dest: &str, reasons: Vec<&str>) -> TripDecision {
+        use crate::domain::CriterionResult;
+        TripDecision {
+            go: false,
+            destination: dest.to_string(),
+            results: reasons
+                .iter()
+                .map(|r| CriterionResult {
+                    key: "test".to_string(),
+                    label: "Test".to_string(),
+                    value: serde_json::Value::Null,
+                    threshold: serde_json::Value::Null,
+                    pass: false,
+                    reason: r.to_string(),
+                    data_missing: false,
+                    near_miss: false,
+                })
+                .collect(),
+            evaluated_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
     #[test]
     fn trip_decision_go_panel() {
-        let panel = format_trip_decision("Test Dest", &TripDecision::Go);
+        let decision = make_go_decision("Test Dest");
+        let panel = format_trip_decision("Test Dest", &decision);
         assert_eq!(panel.title, "Test Dest");
         assert_eq!(panel.rows[0], "GO");
     }
 
     #[test]
     fn trip_decision_no_go_panel_lists_reasons() {
-        let decision = TripDecision::NoGo {
-            reasons: vec!["Too cold".to_string()],
-        };
+        let decision = make_nogo_decision("Test Dest", vec!["Too cold"]);
         let panel = format_trip_decision("Test Dest", &decision);
         assert_eq!(panel.rows[0], "NO GO");
         assert!(panel.rows[1].contains("Too cold"));
@@ -610,13 +674,10 @@ mod tests {
 
     #[test]
     fn trip_decision_nogo_multiple_reasons() {
-        let decision = TripDecision::NoGo {
-            reasons: vec![
-                "Too cold".to_string(),
-                "River too high".to_string(),
-                "Road closed".to_string(),
-            ],
-        };
+        let decision = make_nogo_decision(
+            "Test",
+            vec!["Too cold", "River too high", "Road closed"],
+        );
         let panel = format_trip_decision("Test", &decision);
         // 1 "NO GO" + 3 reason rows
         assert_eq!(panel.rows.len(), 4);
