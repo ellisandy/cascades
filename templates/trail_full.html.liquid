@@ -1,0 +1,29 @@
+<div class="layout--stretch flex--col">
+  <div class="title_bar">
+    <span class="title">{{ settings.park_name | default("Trail Conditions") }}</span>
+    {% if error %}
+      <span class="label text--gray-50">stale data</span>
+    {% endif %}
+  </div>
+
+  <div class="flex--col layout--center-x" style="flex: 1;">
+    <span class="value value--large">{{ data.destination_name }}</span>
+    <span class="label">{{ data.suitability_summary }}</span>
+  </div>
+
+  {% if trip_decision %}
+    <div class="divider"></div>
+    <div class="flex--row layout--center-x">
+      {% if trip_decision.go %}
+        <span class="value value--large">GO</span>
+      {% else %}
+        <span class="value value--large text--gray-50">NO GO</span>
+      {% endif %}
+      <span class="label">{{ trip_decision.destination | default("") }}</span>
+    </div>
+  {% endif %}
+
+  <div class="label text--gray-50" style="text-align: right;">
+    Updated {{ data.last_updated | days_ago }} · {{ now.local }}
+  </div>
+</div>
