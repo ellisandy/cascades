@@ -148,3 +148,54 @@ one polling interval.
 **Acceptance:** After server startup, wait one full `weather_interval_secs` with no
 HTTP requests. Then call `GET /image.png`. The weather observation in the rendered
 state is no older than `weather_interval_secs + a small buffer`.
+
+---
+
+## 13. Webhook — external system pushes plugin data
+
+**As an integrator**, when I `POST` a JSON payload to
+`/api/webhook/:plugin_instance_id`, I expect the server to store that payload
+as the plugin instance's cached data and return `204 No Content`, so that the
+next display render uses the newly pushed data.
+
+**Acceptance:** `POST /api/webhook/river` with valid JSON returns `204 No
+Content`. A subsequent `GET /api/image/default` reflects the pushed data in the
+rendered PNG.
+
+---
+
+## 14. Display API — TRMNL device polls for image URL and refresh rate
+
+**As a TRMNL device**, when I send `GET /api/display` with a valid
+`Authorization: Bearer <api_key>` header, I expect a JSON response containing
+`image_url` (a relative URL to the current PNG) and `refresh_rate` (seconds),
+so I know where to fetch the image and how often to refresh.
+
+**Acceptance:** `GET /api/display` with the correct Bearer token returns HTTP
+200, `Content-Type: application/json`, and a body with `image_url` and
+`refresh_rate` fields. Without a valid token, the response is `401 Unauthorized`.
+
+---
+
+## 15. Named display images
+
+**As a display client**, when I send `GET /api/image/:display_id` with a valid
+display name (e.g. `default`, `trip-planner`), I expect the latest rendered PNG
+for that display with `Cache-Control: no-store`. When the display name is
+unknown, I expect `404 Not Found`.
+
+**Acceptance:** `GET /api/image/default` returns `200 image/png` with
+`Cache-Control: no-store` and a valid PNG. `GET /api/image/unknown` returns 404.
+
+---
+
+## 16. Multi-slot compositor — display layout with multiple plugins
+
+**As an operator**, when I configure a display with multiple slots (e.g.
+`trip-planner` with weather, river, and ferry slots), I expect the server to
+render each slot independently and composite them into a single 800×480 PNG,
+with each plugin's content placed at the correct position.
+
+**Acceptance:** `GET /api/image/trip-planner` returns a valid 800×480 PNG. The
+pixels in the weather region, river region, and ferry region all contain
+non-trivial content (not uniform white or black).
