@@ -246,6 +246,62 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     })
 }
 
+// ─── Display layout config ────────────────────────────────────────────────────
+
+/// A single slot in a display layout configuration (TOML representation).
+#[derive(Debug, Deserialize, Clone)]
+pub struct DisplaySlotEntry {
+    /// Plugin instance ID to render in this slot (e.g. `"river"`, `"weather"`).
+    pub plugin: String,
+    /// X offset in the final 800×480 frame. Defaults to 0.
+    #[serde(default)]
+    pub x: Option<u32>,
+    /// Y offset in the final 800×480 frame. Defaults to 0.
+    #[serde(default)]
+    pub y: Option<u32>,
+    /// Slot width in pixels. Defaults to the variant's canonical width.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Slot height in pixels. Defaults to the variant's canonical height.
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// Layout variant controlling which template is selected and at what size
+    /// the sidecar renders it.  One of: `full`, `half_horizontal`,
+    /// `half_vertical`, `quadrant`.
+    pub variant: String,
+}
+
+/// A named display layout with an ordered list of slots.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DisplayConfigEntry {
+    /// Unique name for this display layout (e.g. `"default"`, `"trip-planner"`).
+    pub name: String,
+    /// Ordered list of slots to render and composite.
+    pub slots: Vec<DisplaySlotEntry>,
+}
+
+/// Top-level wrapper for `config/display.toml`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DisplayLayoutsConfig {
+    #[serde(rename = "display")]
+    pub displays: Vec<DisplayConfigEntry>,
+}
+
+/// Load and parse `config/display.toml`. Returns empty config if file is absent.
+pub fn load_display_layouts(path: &Path) -> Result<DisplayLayoutsConfig, ConfigError> {
+    if !path.exists() {
+        return Ok(DisplayLayoutsConfig::default());
+    }
+    let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
+        path: path.to_string_lossy().into_owned(),
+        source: e,
+    })?;
+    toml::from_str(&contents).map_err(|e| ConfigError::Parse {
+        path: path.to_string_lossy().into_owned(),
+        source: e,
+    })
+}
+
 /// Load and parse destinations.toml. Fails fast on any error.
 pub fn load_destinations(path: &Path) -> Result<DestinationsConfig, ConfigError> {
     let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {

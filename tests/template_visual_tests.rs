@@ -324,12 +324,16 @@ fn road_full_renders_open_road() {
 // ─── Engine loads all five templates ─────────────────────────────────────────
 
 #[test]
-fn engine_loads_all_five_templates() {
+fn engine_loads_base_templates() {
     let engine = TemplateEngine::new(templates_dir()).expect("templates directory must exist");
-    assert_eq!(engine.template_count(), 5, "expected 5 templates");
+    // All original full-variant templates must be present.
     assert!(engine.has_template("river_full"));
     assert!(engine.has_template("weather_full"));
     assert!(engine.has_template("ferry_full"));
     assert!(engine.has_template("trail_full"));
     assert!(engine.has_template("road_full"));
+    // Compositor variant templates added for multi-slot layouts.
+    assert!(engine.has_template("weather_half_horizontal"));
+    assert!(engine.has_template("river_quadrant"));
+    assert!(engine.has_template("ferry_quadrant"));
 }

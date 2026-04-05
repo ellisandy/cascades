@@ -1,0 +1,13 @@
+[[display]]
+name = "default"
+slots = [
+    { plugin = "river", variant = "full" },
+]
+
+[[display]]
+name = "trip-planner"
+slots = [
+    { plugin = "weather", x = 0,   y = 0,   width = 800, height = 240, variant = "half_horizontal" },
+    { plugin = "river",   x = 0,   y = 240, width = 400, height = 240, variant = "quadrant" },
+    { plugin = "ferry",   x = 400, y = 240, width = 400, height = 240, variant = "quadrant" },
+]

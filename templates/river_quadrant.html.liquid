@@ -1,0 +1,12 @@
+<div class="layout--stretch flex--col" style="padding: 6px;">
+  <div class="title_bar">
+    <span class="title">{{ settings.site_name | default("River") }}</span>
+    {% if error %}
+      <span class="label text--gray-50">stale</span>
+    {% endif %}
+  </div>
+  <div class="flex--col layout--center-x" style="flex: 1;">
+    <span class="value value--xlarge">{{ data.water_level_ft | round(1) }} ft</span>
+    <span class="label">{{ data.streamflow_cfs | round(0) }} cfs</span>
+  </div>
+</div>
