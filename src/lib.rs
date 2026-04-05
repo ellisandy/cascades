@@ -1,3 +1,4 @@
+pub mod api;
 pub mod compositor;
 pub mod config;
 pub mod domain;

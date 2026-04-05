@@ -975,3 +975,400 @@ async fn concurrent_write_and_read_do_not_deadlock() {
         r.await.expect("reader should complete");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// US-q55: Device API — POST /api/webhook, GET /api/display, GET /api/image
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a test router and AppState backed by a temp directory.
+///
+/// The display "default" has zero slots so the compositor completes
+/// immediately (producing an 800×480 white PNG) without requiring a sidecar.
+fn make_api_app(
+    base_dir: &std::path::Path,
+) -> (Router, Arc<cascades::api::AppState>) {
+    use cascades::{
+        api::{AppState, build_router},
+        compositor::{Compositor, DisplayConfiguration},
+        instance_store::InstanceStore,
+        template::TemplateEngine,
+    };
+    use std::collections::HashMap;
+
+    let db_path = base_dir.join("test.db");
+    let templates_dir = base_dir.join("templates");
+    std::fs::create_dir_all(&templates_dir).unwrap();
+
+    let instance_store =
+        Arc::new(InstanceStore::open(&db_path).expect("open instance store"));
+    let template_engine =
+        Arc::new(TemplateEngine::new(&templates_dir).expect("load templates"));
+
+    let compositor = Arc::new(Compositor::new(
+        Arc::clone(&template_engine),
+        Arc::clone(&instance_store),
+        "http://localhost:9999", // no sidecar — compositor produces empty-slot PNGs
+    ));
+
+    // "default" display has no slots → compositor returns 800×480 white PNG.
+    let mut display_configs: HashMap<String, DisplayConfiguration> = HashMap::new();
+    display_configs.insert(
+        "default".to_string(),
+        DisplayConfiguration {
+            name: "default".to_string(),
+            slots: vec![],
+        },
+    );
+
+    let image_cache = Arc::new(RwLock::new(HashMap::<String, Vec<u8>>::new()));
+
+    let state = Arc::new(AppState {
+        compositor,
+        instance_store,
+        display_configs,
+        image_cache,
+        api_key: "test-bearer-key".to_string(),
+        refresh_rate_secs: 42,
+    });
+
+    let router = build_router(Arc::clone(&state));
+    (router, state)
+}
+
+// ── POST /api/webhook/:plugin_instance_id ─────────────────────────────────────
+
+#[tokio::test]
+async fn webhook_returns_204_with_valid_json() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/webhook/river")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"level_ft": 8.2}"#))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn webhook_returns_204_with_empty_body() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/webhook/weather")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn webhook_invalidates_image_cache_for_affected_display() {
+    use cascades::compositor::{DisplayConfiguration, LayoutSlot, LayoutVariant};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // Build an AppState with "default" display containing a "river" slot
+    // so the webhook for "river" will try to re-render "default".
+    let db_path = tmp.path().join("test.db");
+    let templates_dir = tmp.path().join("templates");
+    std::fs::create_dir_all(&templates_dir).unwrap();
+
+    let instance_store = Arc::new(
+        cascades::instance_store::InstanceStore::open(&db_path).unwrap(),
+    );
+    let template_engine = Arc::new(
+        cascades::template::TemplateEngine::new(&templates_dir).unwrap(),
+    );
+    let compositor = Arc::new(cascades::compositor::Compositor::new(
+        Arc::clone(&template_engine),
+        Arc::clone(&instance_store),
+        "http://localhost:9999",
+    ));
+
+    let mut display_configs = std::collections::HashMap::new();
+    display_configs.insert(
+        "default".to_string(),
+        DisplayConfiguration {
+            name: "default".to_string(),
+            slots: vec![LayoutSlot {
+                plugin_instance_id: "river".to_string(),
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 480,
+                layout_variant: LayoutVariant::Full,
+            }],
+        },
+    );
+
+    let image_cache = Arc::new(RwLock::new({
+        let mut m = std::collections::HashMap::new();
+        m.insert("default".to_string(), b"stale-png".to_vec());
+        m
+    }));
+
+    let state = Arc::new(cascades::api::AppState {
+        compositor,
+        instance_store,
+        display_configs,
+        image_cache: Arc::clone(&image_cache),
+        api_key: "key".to_string(),
+        refresh_rate_secs: 60,
+    });
+
+    let app = cascades::api::build_router(Arc::clone(&state));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/webhook/river")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"level_ft": 9.1}"#))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Cache entry for "default" should have been invalidated — either replaced
+    // with a fresh render or removed.  The stale bytes must not remain.
+    let cache = image_cache.read().unwrap();
+    let still_stale = cache
+        .get("default")
+        .map(|v| v.as_slice() == b"stale-png")
+        .unwrap_or(false);
+    assert!(
+        !still_stale,
+        "webhook should have invalidated the stale cache entry"
+    );
+}
+
+// ── GET /api/display ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_display_without_auth_returns_401() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/display")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_display_with_wrong_key_returns_401() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/display")
+        .header(header::AUTHORIZATION, "Bearer wrong-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_display_with_correct_key_returns_200() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/display")
+        .header(header::AUTHORIZATION, "Bearer test-bearer-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn get_display_returns_json_with_required_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/display")
+        .header(header::AUTHORIZATION, "Bearer test-bearer-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("response should be JSON");
+
+    assert!(
+        json.get("image_url").and_then(|v| v.as_str()).is_some(),
+        "response should have 'image_url' string field; got: {json}"
+    );
+    assert!(
+        json.get("refresh_rate").and_then(|v| v.as_u64()).is_some(),
+        "response should have 'refresh_rate' number field; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn get_display_image_url_points_to_api_image() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/display")
+        .header(header::AUTHORIZATION, "Bearer test-bearer-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let url = json["image_url"].as_str().unwrap();
+    assert!(
+        url.starts_with("/api/image/default"),
+        "image_url should start with '/api/image/default'; got: {url}"
+    );
+}
+
+#[tokio::test]
+async fn get_display_refresh_rate_matches_config() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/display")
+        .header(header::AUTHORIZATION, "Bearer test-bearer-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(
+        json["refresh_rate"].as_u64().unwrap(),
+        42,
+        "refresh_rate should match the configured value (42)"
+    );
+}
+
+// ── GET /api/image/:display_id ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_image_known_display_returns_200() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/image/default")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn get_image_unknown_display_returns_404() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/image/nonexistent-display")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_image_content_type_is_png() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/image/default")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(ct, "image/png");
+}
+
+#[tokio::test]
+async fn get_image_has_no_store_cache_control() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/image/default")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let cc = resp
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cc, "no-store");
+}
+
+#[tokio::test]
+async fn get_image_body_is_valid_png() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/api/image/default")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        bytes.starts_with(b"\x89PNG"),
+        "response body should be a valid PNG"
+    );
+}
+
+// ── GET /image.png — legacy endpoint preserved ────────────────────────────────
+
+#[tokio::test]
+async fn legacy_image_endpoint_still_works_with_new_router() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    let req = Request::builder()
+        .uri("/image.png")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(ct, "image/png");
+}

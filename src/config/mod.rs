@@ -47,10 +47,18 @@ pub struct ServerConfig {
     /// TCP port to listen on. Defaults to 8080.
     #[serde(default = "default_server_port")]
     pub port: u16,
+    /// How often the device should refresh the display, in seconds.
+    /// Returned in the GET /api/display response. Defaults to 60.
+    #[serde(default = "default_refresh_rate_secs")]
+    pub refresh_rate_secs: u64,
 }
 
 fn default_server_port() -> u16 {
     8080
+}
+
+fn default_refresh_rate_secs() -> u64 {
+    60
 }
 
 /// Storage configuration for the SQLite database.
@@ -312,6 +320,73 @@ pub fn load_destinations(path: &Path) -> Result<DestinationsConfig, ConfigError>
         path: path.to_string_lossy().into_owned(),
         source: e,
     })
+}
+
+// ─── Secrets config ───────────────────────────────────────────────────────────
+
+/// Runtime secrets — never committed to the repo.
+///
+/// Generated at first startup and persisted to `config/secrets.toml`.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct SecretsConfig {
+    /// Bearer token required by `GET /api/display`.
+    pub api_key: String,
+}
+
+/// Load secrets from `path`.  If the file is absent or corrupt, a new random
+/// API key is generated, logged, and written to `path`.  Never fails.
+pub fn load_or_create_secrets(path: &Path) -> SecretsConfig {
+    if path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if let Ok(s) = toml::from_str::<SecretsConfig>(&contents) {
+                return s;
+            }
+            log::warn!("config/secrets.toml is corrupt — regenerating API key");
+        }
+    }
+    let api_key = generate_api_key();
+    log::info!("Cascades API key: {}", api_key);
+    eprintln!("Cascades API key: {}", api_key);
+    let secrets = SecretsConfig { api_key };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).ok();
+        }
+    }
+    if let Ok(toml_str) = toml::to_string_pretty(&secrets) {
+        std::fs::write(path, toml_str).ok();
+    }
+    secrets
+}
+
+fn generate_api_key() -> String {
+    let mut buf = [0u8; 32];
+    fill_random(&mut buf);
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn fill_random(buf: &mut [u8]) {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(buf).is_ok() {
+            return;
+        }
+    }
+    // Fallback: mix monotonic time + PID.
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0) as u64;
+    let pid = std::process::id() as u64;
+    let mut state = t ^ pid.wrapping_mul(0x9e3779b97f4a7c15);
+    for chunk in buf.chunks_mut(8) {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let bytes = state.to_le_bytes();
+        let n = chunk.len();
+        chunk.copy_from_slice(&bytes[..n]);
+    }
 }
 
 #[cfg(test)]

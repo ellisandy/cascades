@@ -1,38 +1,18 @@
-use axum::{
-    extract::State,
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
 use cascades::{
+    api::{AppState, build_router},
     build_sources,
     compositor::{Compositor, DisplayConfiguration},
-    config::{load_config, load_display_layouts},
+    config::{load_config, load_display_layouts, load_or_create_secrets},
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
     template::TemplateEngine,
 };
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{Arc, RwLock},
 };
 use tokio::net::TcpListener;
-
-struct AppState {
-    compositor: Arc<Compositor>,
-    active_display: DisplayConfiguration,
-}
-
-async fn serve_image(State(app): State<Arc<AppState>>) -> Response {
-    match app.compositor.compose(&app.active_display).await {
-        Ok(png) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
-        Err(e) => {
-            log::error!("compositor error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -45,6 +25,8 @@ async fn main() {
             log::warn!("failed to load config/display.toml: {e}");
             Default::default()
         });
+
+    let secrets = load_or_create_secrets(Path::new("config/secrets.toml"));
 
     let fixture_mode = std::env::var("SKAGIT_FIXTURE_DATA").as_deref() == Ok("1");
     if fixture_mode {
@@ -66,16 +48,21 @@ async fn main() {
         TemplateEngine::new(Path::new("templates")).expect("failed to load templates"),
     );
 
-    // Pick the active display config (default to "default", fall back to first).
-    let active_entry = display_layouts
-        .displays
-        .iter()
-        .find(|d| d.name == "default")
-        .or_else(|| display_layouts.displays.first());
-    let active_display = active_entry
-        .and_then(|e| DisplayConfiguration::from_config(e).ok())
-        .unwrap_or_else(|| {
-            use cascades::compositor::{LayoutSlot, LayoutVariant};
+    // Build display configurations from TOML.
+    let mut display_configs: HashMap<String, DisplayConfiguration> = HashMap::new();
+    for entry in &display_layouts.displays {
+        match DisplayConfiguration::from_config(entry) {
+            Ok(cfg) => {
+                display_configs.insert(cfg.name.clone(), cfg);
+            }
+            Err(e) => log::warn!("skipping display '{}': {}", entry.name, e),
+        }
+    }
+    // Ensure "default" is always present.
+    if !display_configs.contains_key("default") {
+        use cascades::compositor::{LayoutSlot, LayoutVariant};
+        display_configs.insert(
+            "default".to_string(),
             DisplayConfiguration {
                 name: "default".to_string(),
                 slots: vec![LayoutSlot {
@@ -86,8 +73,9 @@ async fn main() {
                     height: 480,
                     layout_variant: LayoutVariant::Full,
                 }],
-            }
-        });
+            },
+        );
+    }
 
     let sidecar_url = std::env::var("SIDECAR_URL")
         .unwrap_or_else(|_| "http://localhost:3001".to_string());
@@ -98,10 +86,15 @@ async fn main() {
         sidecar_url,
     ));
 
-    let domain = Arc::new(RwLock::new(DomainState::default()));
+    let refresh_rate_secs = config
+        .server
+        .as_ref()
+        .map(|s| s.refresh_rate_secs)
+        .unwrap_or(60);
 
-    // Spawn one background task per data source. Each task fetches on its own
-    // interval, updates DomainState, and mirrors the result to InstanceStore.
+    // Spawn one background task per data source.
+    // Tasks update instance_store.cached_data so the compositor uses fresh data.
+    let domain = Arc::new(RwLock::new(DomainState::default()));
     for source in build_sources(&config, fixture_mode) {
         let domain = Arc::clone(&domain);
         let store = Arc::clone(&instance_store);
@@ -138,12 +131,14 @@ async fn main() {
     let port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
     let app_state = Arc::new(AppState {
         compositor,
-        active_display,
+        instance_store,
+        display_configs,
+        image_cache: Arc::new(RwLock::new(HashMap::new())),
+        api_key: secrets.api_key,
+        refresh_rate_secs,
     });
 
-    let app = Router::new()
-        .route("/image.png", get(serve_image))
-        .with_state(app_state);
+    let app = build_router(app_state);
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.expect("failed to bind");
