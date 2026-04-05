@@ -1,0 +1,31 @@
+[[plugin]]
+id = "road"
+name = "WSDOT Road Closures"
+description = "Road closure and restriction status from the WSDOT Highway Alerts API."
+source = "road_closures"
+refresh_interval_secs = 1800
+data_strategy = "polling"
+
+template_full = "templates/road_full.html.jinja"
+
+[[plugin.criteria]]
+key = "status"
+label = "Road open"
+operator = "eq"
+threshold = 0.0
+unit = ""
+go_direction = "above"
+
+[[plugin.settings_schema]]
+key = "routes"
+label = "Route Numbers"
+type = "text"
+required = false
+default = "020"
+placeholder = "020,005"
+
+[[plugin.settings_schema]]
+key = "wsdot_access_code"
+label = "WSDOT Access Code"
+type = "text"
+required = false

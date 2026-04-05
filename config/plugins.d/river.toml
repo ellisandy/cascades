@@ -1,0 +1,40 @@
+[[plugin]]
+id = "river"
+name = "USGS River Gauge"
+description = "River level and flow rate from a USGS NWIS site."
+source = "usgs"
+refresh_interval_secs = 300
+data_strategy = "polling"
+
+template_full = "templates/river_full.html.jinja"
+template_half_horizontal = "templates/river_half.html.jinja"
+
+[[plugin.criteria]]
+key = "water_level_ft"
+label = "River level"
+operator = "lte"
+threshold = 12.0
+unit = "ft"
+go_direction = "below"
+
+[[plugin.criteria]]
+key = "streamflow_cfs"
+label = "Streamflow"
+operator = "lte"
+threshold = 10000.0
+unit = "cfs"
+go_direction = "below"
+
+[[plugin.settings_schema]]
+key = "site_id"
+label = "USGS Site ID"
+type = "text"
+required = true
+placeholder = "12200500"
+
+[[plugin.settings_schema]]
+key = "site_name"
+label = "Display Name"
+type = "text"
+required = false
+default = "River"

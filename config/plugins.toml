@@ -1,0 +1,9 @@
+# Cascades Plugin Registry
+#
+# Plugin definitions can be placed here or as individual files in plugins.d/.
+# Files in plugins.d/ take precedence over (and merge with) definitions here.
+# Each [[plugin]] entry binds a data source to display templates and declares
+# its settings schema and trip evaluation criteria.
+#
+# To add a community plugin: drop a .toml file into config/plugins.d/
+# No recompile required. Hot-reload will pick up changes automatically.
