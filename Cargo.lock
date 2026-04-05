@@ -179,6 +179,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "env_logger",
+ "http-body-util",
  "image",
  "log",
  "serde",
@@ -187,6 +188,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tower",
  "ureq",
 ]
 
