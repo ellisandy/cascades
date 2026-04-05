@@ -1,0 +1,40 @@
+[[plugin]]
+id = "weather"
+name = "NOAA Weather"
+description = "Current conditions from a NOAA observation station near the destination."
+source = "noaa"
+refresh_interval_secs = 300
+data_strategy = "polling"
+
+template_full = "templates/weather_full.html.jinja"
+
+[[plugin.criteria]]
+key = "temperature_f"
+label = "Temperature"
+operator = "gte"
+threshold = 45.0
+unit = "°F"
+go_direction = "above"
+
+[[plugin.criteria]]
+key = "temperature_f"
+label = "Max temperature"
+operator = "lte"
+threshold = 95.0
+unit = "°F"
+go_direction = "below"
+
+[[plugin.criteria]]
+key = "precip_chance_pct"
+label = "Precipitation chance"
+operator = "lte"
+threshold = 50.0
+unit = "%"
+go_direction = "below"
+
+[[plugin.settings_schema]]
+key = "station_id"
+label = "NOAA Station ID"
+type = "text"
+required = false
+placeholder = "KMWH"

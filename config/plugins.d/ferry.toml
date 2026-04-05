@@ -1,0 +1,29 @@
+[[plugin]]
+id = "ferry"
+name = "WSDOT Ferry"
+description = "Ferry vessel status and upcoming departures for a WSDOT route."
+source = "wsdot"
+refresh_interval_secs = 60
+data_strategy = "polling"
+
+template_full = "templates/ferry_full.html.jinja"
+
+[[plugin.settings_schema]]
+key = "route_id"
+label = "WSDOT Route ID"
+type = "number"
+required = true
+placeholder = "9"
+
+[[plugin.settings_schema]]
+key = "route_description"
+label = "Route Description"
+type = "text"
+required = false
+placeholder = "Anacortes / Friday Harbor"
+
+[[plugin.settings_schema]]
+key = "wsdot_access_code"
+label = "WSDOT Access Code"
+type = "text"
+required = false

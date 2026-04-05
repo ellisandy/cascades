@@ -1,0 +1,22 @@
+[[plugin]]
+id = "trail"
+name = "NPS Trail Conditions"
+description = "Trail and campsite suitability from the National Park Service alerts API."
+source = "trail_conditions"
+refresh_interval_secs = 900
+data_strategy = "polling"
+
+template_full = "templates/trail_full.html.jinja"
+
+[[plugin.settings_schema]]
+key = "park_code"
+label = "NPS Park Code"
+type = "text"
+required = true
+placeholder = "noca"
+
+[[plugin.settings_schema]]
+key = "nps_api_key"
+label = "NPS API Key"
+type = "text"
+required = false

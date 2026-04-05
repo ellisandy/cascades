@@ -1,6 +1,7 @@
 pub mod config;
 pub mod domain;
 pub mod evaluation;
+pub mod plugin_registry;
 pub mod presentation;
 pub mod render;
 pub mod sources;
