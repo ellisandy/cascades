@@ -146,6 +146,57 @@ impl DisplayConfiguration {
             slots,
         })
     }
+
+    /// Build from a [`crate::layout_store::LayoutConfig`].
+    ///
+    /// Only [`crate::layout_store::LayoutItem::PluginSlot`] variants are
+    /// converted to [`LayoutSlot`]s; static elements are silently skipped
+    /// (they will be rendered directly once the Admin UI pipeline is complete).
+    ///
+    /// Items with an unrecognised `layout_variant` are also skipped with a
+    /// warning to prevent a single bad row from dropping the whole layout.
+    pub fn from_layout_config(layout: &crate::layout_store::LayoutConfig) -> Self {
+        use crate::layout_store::LayoutItem;
+        let slots = layout
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                LayoutItem::PluginSlot {
+                    plugin_instance_id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    layout_variant,
+                    ..
+                } => {
+                    let variant = match LayoutVariant::from_str(layout_variant) {
+                        Some(v) => v,
+                        None => {
+                            log::warn!(
+                                "layout '{}': unknown variant '{}' for slot '{}', skipping",
+                                layout.id,
+                                layout_variant,
+                                plugin_instance_id
+                            );
+                            return None;
+                        }
+                    };
+                    Some(LayoutSlot {
+                        plugin_instance_id: plugin_instance_id.clone(),
+                        x: (*x).max(0) as u32,
+                        y: (*y).max(0) as u32,
+                        width: (*width).max(0) as u32,
+                        height: (*height).max(0) as u32,
+                        layout_variant: variant,
+                    })
+                }
+                // StaticText and StaticDivider are not yet rendered by the compositor.
+                _ => None,
+            })
+            .collect();
+        DisplayConfiguration { name: layout.name.clone(), slots }
+    }
 }
 
 // ─── Error type ───────────────────────────────────────────────────────────────

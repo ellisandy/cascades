@@ -1,10 +1,11 @@
 use cascades::{
     api::{AppState, build_router},
     build_sources,
-    compositor::{Compositor, DisplayConfiguration},
     config::{load_config, load_display_layouts, load_or_create_secrets},
+    compositor::Compositor,
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
+    layout_store::LayoutStore,
     template::TemplateEngine,
 };
 use std::{
@@ -43,39 +44,18 @@ async fn main() {
     );
     seed_from_config(&instance_store, &config).expect("failed to seed instance store");
 
+    // Open layout store (same SQLite file) and seed from display.toml if empty.
+    let layout_store = Arc::new(
+        LayoutStore::open(store_path).expect("failed to open layout store"),
+    );
+    layout_store
+        .seed_from_toml(&display_layouts)
+        .expect("failed to seed layout store from display.toml");
+
     // Template engine — load from templates/ directory.
     let template_engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("failed to load templates"),
     );
-
-    // Build display configurations from TOML.
-    let mut display_configs: HashMap<String, DisplayConfiguration> = HashMap::new();
-    for entry in &display_layouts.displays {
-        match DisplayConfiguration::from_config(entry) {
-            Ok(cfg) => {
-                display_configs.insert(cfg.name.clone(), cfg);
-            }
-            Err(e) => log::warn!("skipping display '{}': {}", entry.name, e),
-        }
-    }
-    // Ensure "default" is always present.
-    if !display_configs.contains_key("default") {
-        use cascades::compositor::{LayoutSlot, LayoutVariant};
-        display_configs.insert(
-            "default".to_string(),
-            DisplayConfiguration {
-                name: "default".to_string(),
-                slots: vec![LayoutSlot {
-                    plugin_instance_id: "river".to_string(),
-                    x: 0,
-                    y: 0,
-                    width: 800,
-                    height: 480,
-                    layout_variant: LayoutVariant::Full,
-                }],
-            },
-        );
-    }
 
     let sidecar_url = std::env::var("SIDECAR_URL")
         .unwrap_or_else(|_| "http://localhost:3001".to_string());
@@ -132,7 +112,7 @@ async fn main() {
     let app_state = Arc::new(AppState {
         compositor,
         instance_store,
-        display_configs,
+        layout_store,
         image_cache: Arc::new(RwLock::new(HashMap::new())),
         api_key: secrets.api_key,
         refresh_rate_secs,

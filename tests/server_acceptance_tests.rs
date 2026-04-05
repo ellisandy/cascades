@@ -989,8 +989,9 @@ fn make_api_app(
 ) -> (Router, Arc<cascades::api::AppState>) {
     use cascades::{
         api::{AppState, build_router},
-        compositor::{Compositor, DisplayConfiguration},
+        compositor::Compositor,
         instance_store::InstanceStore,
+        layout_store::{LayoutConfig, LayoutStore},
         template::TemplateEngine,
     };
     use std::collections::HashMap;
@@ -1001,6 +1002,8 @@ fn make_api_app(
 
     let instance_store =
         Arc::new(InstanceStore::open(&db_path).expect("open instance store"));
+    let layout_store =
+        Arc::new(LayoutStore::open(&db_path).expect("open layout store"));
     let template_engine =
         Arc::new(TemplateEngine::new(&templates_dir).expect("load templates"));
 
@@ -1011,21 +1014,20 @@ fn make_api_app(
     ));
 
     // "default" display has no slots → compositor returns 800×480 white PNG.
-    let mut display_configs: HashMap<String, DisplayConfiguration> = HashMap::new();
-    display_configs.insert(
-        "default".to_string(),
-        DisplayConfiguration {
+    layout_store
+        .upsert_layout(&LayoutConfig {
+            id: "default".to_string(),
             name: "default".to_string(),
-            slots: vec![],
-        },
-    );
+            items: vec![],
+        })
+        .expect("seed default layout");
 
     let image_cache = Arc::new(RwLock::new(HashMap::<String, Vec<u8>>::new()));
 
     let state = Arc::new(AppState {
         compositor,
         instance_store,
-        display_configs,
+        layout_store,
         image_cache,
         api_key: "test-bearer-key".to_string(),
         refresh_rate_secs: 42,
@@ -1072,7 +1074,7 @@ async fn webhook_returns_204_with_empty_body() {
 
 #[tokio::test]
 async fn webhook_invalidates_image_cache_for_affected_display() {
-    use cascades::compositor::{DisplayConfiguration, LayoutSlot, LayoutVariant};
+    use cascades::layout_store::{LayoutConfig, LayoutItem, LayoutStore};
 
     let tmp = tempfile::TempDir::new().unwrap();
 
@@ -1085,6 +1087,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
     let instance_store = Arc::new(
         cascades::instance_store::InstanceStore::open(&db_path).unwrap(),
     );
+    let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
     let template_engine = Arc::new(
         cascades::template::TemplateEngine::new(&templates_dir).unwrap(),
     );
@@ -1094,21 +1097,22 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         "http://localhost:9999",
     ));
 
-    let mut display_configs = std::collections::HashMap::new();
-    display_configs.insert(
-        "default".to_string(),
-        DisplayConfiguration {
+    layout_store
+        .upsert_layout(&LayoutConfig {
+            id: "default".to_string(),
             name: "default".to_string(),
-            slots: vec![LayoutSlot {
-                plugin_instance_id: "river".to_string(),
+            items: vec![LayoutItem::PluginSlot {
+                id: "default-slot-0".to_string(),
+                z_index: 0,
                 x: 0,
                 y: 0,
                 width: 800,
                 height: 480,
-                layout_variant: LayoutVariant::Full,
+                plugin_instance_id: "river".to_string(),
+                layout_variant: "full".to_string(),
             }],
-        },
-    );
+        })
+        .unwrap();
 
     let image_cache = Arc::new(RwLock::new({
         let mut m = std::collections::HashMap::new();
@@ -1119,7 +1123,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
     let state = Arc::new(cascades::api::AppState {
         compositor,
         instance_store,
-        display_configs,
+        layout_store,
         image_cache: Arc::clone(&image_cache),
         api_key: "key".to_string(),
         refresh_rate_secs: 60,

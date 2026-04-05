@@ -24,6 +24,7 @@ use serde_json::Value;
 use crate::{
     compositor::{Compositor, DisplayConfiguration},
     instance_store::InstanceStore,
+    layout_store::{LayoutItem, LayoutStore},
 };
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -32,8 +33,10 @@ use crate::{
 pub struct AppState {
     pub compositor: Arc<Compositor>,
     pub instance_store: Arc<InstanceStore>,
-    /// All named display configurations keyed by display ID (e.g. `"default"`).
-    pub display_configs: HashMap<String, DisplayConfiguration>,
+    /// SQLite-backed store for display layout configurations.
+    /// Replaces the startup-time `display_configs` HashMap; layouts are now
+    /// mutable at runtime via the Admin UI.
+    pub layout_store: Arc<LayoutStore>,
     /// In-memory PNG cache: display_id → latest rendered PNG bytes.
     /// Invalidated by `POST /api/webhook/:id` for affected displays.
     pub image_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
@@ -258,15 +261,22 @@ async fn post_webhook(
         .ok();
 
     // Re-render every display that uses this plugin instance.
-    let affected: Vec<(String, DisplayConfiguration)> = app
-        .display_configs
+    let all_layouts = match app.layout_store.list_layouts() {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("post_webhook: list_layouts failed: {}", e);
+            return StatusCode::NO_CONTENT;
+        }
+    };
+
+    let affected: Vec<(String, DisplayConfiguration)> = all_layouts
         .iter()
-        .filter(|(_, cfg)| {
-            cfg.slots
-                .iter()
-                .any(|s| s.plugin_instance_id == plugin_instance_id)
+        .filter(|layout| {
+            layout.items.iter().any(|item| {
+                matches!(item, LayoutItem::PluginSlot { plugin_instance_id: pid, .. } if *pid == plugin_instance_id)
+            })
         })
-        .map(|(id, cfg)| (id.clone(), cfg.clone()))
+        .map(|layout| (layout.id.clone(), DisplayConfiguration::from_layout_config(layout)))
         .collect();
 
     for (display_id, config) in affected {
@@ -324,23 +334,33 @@ async fn get_image(
     }
 
     // Render on demand.
-    let config = app.display_configs.get(&display_id).cloned();
-    match config {
-        Some(cfg) => match compose_display(&app, &cfg).await {
-            Some(png) => {
-                app.image_cache
-                    .write()
-                    .unwrap()
-                    .insert(display_id, png.clone());
-                image_response(png)
-            }
-            None => Response::builder()
+    let layout = match app.layout_store.get_layout(&display_id) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap()
+        }
+        Err(e) => {
+            log::error!("get_image: layout store error for '{}': {}", display_id, e);
+            return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::empty())
-                .unwrap(),
-        },
+                .unwrap();
+        }
+    };
+    let cfg = DisplayConfiguration::from_layout_config(&layout);
+    match compose_display(&app, &cfg).await {
+        Some(png) => {
+            app.image_cache
+                .write()
+                .unwrap()
+                .insert(display_id, png.clone());
+            image_response(png)
+        }
         None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(Body::empty())
             .unwrap(),
     }
@@ -472,7 +492,8 @@ async fn render_for_display(app: &AppState, display_id: &str) -> Option<Vec<u8>>
         }
     }
 
-    let config = app.display_configs.get(display_id).cloned()?;
+    let layout = app.layout_store.get_layout(display_id).ok().flatten()?;
+    let config = DisplayConfiguration::from_layout_config(&layout);
     let png = compose_display(app, &config).await?;
     app.image_cache
         .write()
@@ -500,6 +521,7 @@ mod tests {
     /// and an empty templates directory (status doesn't render any templates).
     fn make_test_state() -> Arc<AppState> {
         use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
+        use crate::layout_store::LayoutStore;
 
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
@@ -507,6 +529,7 @@ mod tests {
         std::fs::create_dir_all(&templates_dir).unwrap();
 
         let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
+        let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
         let config = Config {
             display: DisplayConfig { width: 800, height: 480 },
             location: LocationConfig {
@@ -542,7 +565,7 @@ mod tests {
         Arc::new(AppState {
             compositor,
             instance_store,
-            display_configs: HashMap::new(),
+            layout_store,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key: "test-key".to_string(),
             refresh_rate_secs: 60,

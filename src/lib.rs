@@ -4,6 +4,7 @@ pub mod config;
 pub mod domain;
 pub mod evaluation;
 pub mod instance_store;
+pub mod layout_store;
 pub mod plugin_registry;
 pub mod presentation;
 pub mod sources;
