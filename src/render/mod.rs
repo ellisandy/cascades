@@ -105,11 +105,13 @@ pub fn render_panels(panels: &[Panel], width: u32, height: u32) -> PixelBuffer {
     buf
 }
 
-/// Render a typed [`DisplayLayout`] into a 800×480 1-bit pixel buffer.
+/// Render a typed [`DisplayLayout`] into a 1-bit pixel buffer with explicit dimensions.
 ///
 /// This is the primary render entry point for the new 4-zone e-ink display design.
-pub fn render_display(layout: &DisplayLayout) -> PixelBuffer {
-    let mut buf = PixelBuffer::new(800, 480);
+/// Pass `DisplayConfig.width` and `DisplayConfig.height` from config so the output
+/// matches the physical display size rather than hardcoding 800×480.
+pub fn render_display(layout: &DisplayLayout, width: u32, height: u32) -> PixelBuffer {
+    let mut buf = PixelBuffer::new(width, height);
     layout::layout_and_render_display(layout, &mut buf);
     buf
 }

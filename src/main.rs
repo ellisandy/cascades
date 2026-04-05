@@ -15,6 +15,8 @@ use tokio::net::TcpListener;
 struct AppState {
     domain: Arc<RwLock<DomainState>>,
     destinations: Vec<Destination>,
+    display_width: u32,
+    display_height: u32,
 }
 
 async fn serve_image(State(app): State<Arc<AppState>>) -> impl IntoResponse {
@@ -24,7 +26,7 @@ async fn serve_image(State(app): State<Arc<AppState>>) -> impl IntoResponse {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let layout = build_display_layout(&domain, &app.destinations, now_secs);
-    let buf = render_display(&layout);
+    let buf = render_display(&layout, app.display_width, app.display_height);
     let png = buf.to_png();
     ([(header::CONTENT_TYPE, "image/png")], png)
 }
@@ -70,7 +72,12 @@ async fn main() {
     }
 
     let port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
-    let app_state = Arc::new(AppState { domain, destinations });
+    let app_state = Arc::new(AppState {
+        domain,
+        destinations,
+        display_width: config.display.width,
+        display_height: config.display.height,
+    });
 
     let app = Router::new()
         .route("/image.png", get(serve_image))
