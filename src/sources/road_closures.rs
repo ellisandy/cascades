@@ -1,5 +1,5 @@
 use crate::config::RoadSourceConfig;
-use crate::domain::{DataPoint, RoadStatus};
+use crate::domain::RoadStatus;
 use crate::evaluation::current_unix_secs;
 use crate::sources::{Source, SourceError};
 use serde::Deserialize;
@@ -85,6 +85,10 @@ struct RoadwayLocation {
 }
 
 impl Source for RoadClosuresSource {
+    fn id(&self) -> &str {
+        "road"
+    }
+
     fn name(&self) -> &str {
         "road-closures"
     }
@@ -93,7 +97,7 @@ impl Source for RoadClosuresSource {
         self.refresh
     }
 
-    fn fetch(&self) -> Result<DataPoint, SourceError> {
+    fn fetch(&self) -> Result<serde_json::Value, SourceError> {
         let response_text = if self.use_fixtures {
             FIXTURE_RESPONSE.to_string()
         } else {
@@ -110,7 +114,7 @@ impl Source for RoadClosuresSource {
             .filter(|a| a.event_category == "Closure")
             .collect();
 
-        if let Some(closure) = closures.first() {
+        let status = if let Some(closure) = closures.first() {
             let road_name = format_road_name(&closure.start_roadway_location.road_name);
             let segment = format!(
                 "MP {:.0} ({}) to MP {:.0} ({})",
@@ -127,12 +131,12 @@ impl Source for RoadClosuresSource {
                 closure.headline_description.clone()
             };
 
-            Ok(DataPoint::Road(RoadStatus {
+            RoadStatus {
                 road_name,
                 status: status_desc,
                 affected_segment: segment,
                 timestamp: current_unix_secs(),
-            }))
+            }
         } else {
             // No closures found for monitored routes — report open.
             let road_name = self
@@ -141,13 +145,15 @@ impl Source for RoadClosuresSource {
                 .map(|r| format_road_name(r))
                 .unwrap_or_else(|| "Highway".to_string());
 
-            Ok(DataPoint::Road(RoadStatus {
+            RoadStatus {
                 road_name,
                 status: "No active closures".to_string(),
                 affected_segment: String::new(),
                 timestamp: current_unix_secs(),
-            }))
-        }
+            }
+        };
+
+        serde_json::to_value(status).map_err(|e| SourceError::Parse(e.to_string()))
     }
 }
 
@@ -181,6 +187,7 @@ fn format_road_name(route_num: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::RoadStatus;
 
     #[test]
     fn parse_fixture_response() {
@@ -199,14 +206,10 @@ mod tests {
         let result = source.fetch();
         assert!(result.is_ok(), "fixture fetch should succeed");
 
-        match result.unwrap() {
-            DataPoint::Road(status) => {
-                assert_eq!(status.road_name, "SR-20 North Cascades Hwy");
-                assert!(!status.status.is_empty());
-                assert!(status.affected_segment.contains("MP"));
-            }
-            other => panic!("expected DataPoint::Road, got {:?}", other),
-        }
+        let status: RoadStatus = serde_json::from_value(result.unwrap()).unwrap();
+        assert_eq!(status.road_name, "SR-20 North Cascades Hwy");
+        assert!(!status.status.is_empty());
+        assert!(status.affected_segment.contains("MP"));
     }
 
     #[test]
@@ -264,5 +267,14 @@ mod tests {
         // Only the closure should match.
         assert_eq!(closures.len(), 1);
         assert_eq!(closures[0].event_category, "Closure");
+    }
+
+    #[test]
+    fn source_id_name_and_interval() {
+        let source = RoadClosuresSource::new(None, 1800, true)
+            .expect("should create in fixture mode");
+        assert_eq!(source.id(), "road");
+        assert_eq!(source.name(), "road-closures");
+        assert_eq!(source.refresh_interval(), Duration::from_secs(1800));
     }
 }

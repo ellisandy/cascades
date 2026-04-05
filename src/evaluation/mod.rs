@@ -49,7 +49,8 @@ pub fn evaluate(destination: &Destination, state: &DomainState, now_secs: u64) -
             || criteria.max_precip_chance_pct.is_some());
 
     if needs_weather {
-        match &state.weather {
+        let weather = state.weather();
+        match &weather {
             None => missing.push("No weather data".to_string()),
             Some(w) if is_stale(w.observation_time, now_secs, WEATHER_STALE_SECS) => {
                 let age_h = now_secs.saturating_sub(w.observation_time) / 3600;
@@ -107,7 +108,8 @@ pub fn evaluate(destination: &Destination, state: &DomainState, now_secs: u64) -
         && (criteria.max_river_level_ft.is_some() || criteria.max_river_flow_cfs.is_some());
 
     if needs_river {
-        match &state.river {
+        let river = state.river();
+        match &river {
             None => missing.push("No river data".to_string()),
             Some(r) if is_stale(r.timestamp, now_secs, RIVER_STALE_SECS) => {
                 let age_h = now_secs.saturating_sub(r.timestamp) / 3600;
@@ -146,7 +148,8 @@ pub fn evaluate(destination: &Destination, state: &DomainState, now_secs: u64) -
 
     // ── Road ─────────────────────────────────────────────────────────────────
     if signals.road && criteria.road_open_required {
-        match &state.road {
+        let road = state.road();
+        match &road {
             None => missing.push("No road data".to_string()),
             Some(rd) if is_stale(rd.timestamp, now_secs, ROAD_STALE_SECS) => {
                 let age_h = now_secs.saturating_sub(rd.timestamp) / 3600;
@@ -200,7 +203,8 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
             || criteria.max_precip_chance_pct.is_some());
 
     if needs_weather {
-        let weather_missing_source = match &state.weather {
+        let weather = state.weather();
+        let weather_missing_source = match &weather {
             None => Some("Weather (no data)".to_string()),
             Some(w) if is_stale(w.observation_time, now_secs, WEATHER_STALE_SECS) => {
                 let age_h = now_secs.saturating_sub(w.observation_time) / 3600;
@@ -219,7 +223,7 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
             if criteria.max_precip_chance_pct.is_some() {
                 unchecked.push(UncheckedCriterion { criterion: "Precipitation chance".to_string(), missing_source: src });
             }
-        } else if let Some(w) = &state.weather {
+        } else if let Some(w) = &weather {
             if let Some(min) = criteria.min_temp_f {
                 let factor = EvalFactor {
                     name: "Temperature".to_string(),
@@ -267,7 +271,8 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
         && (criteria.max_river_level_ft.is_some() || criteria.max_river_flow_cfs.is_some());
 
     if needs_river {
-        let river_missing_source = match &state.river {
+        let river = state.river();
+        let river_missing_source = match &river {
             None => Some("River gauge (no data)".to_string()),
             Some(r) if is_stale(r.timestamp, now_secs, RIVER_STALE_SECS) => {
                 let age_h = now_secs.saturating_sub(r.timestamp) / 3600;
@@ -283,7 +288,7 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
             if criteria.max_river_flow_cfs.is_some() {
                 unchecked.push(UncheckedCriterion { criterion: "River flow".to_string(), missing_source: src });
             }
-        } else if let Some(r) = &state.river {
+        } else if let Some(r) = &river {
             if let Some(max_level) = criteria.max_river_level_ft {
                 let factor = EvalFactor {
                     name: "River level".to_string(),
@@ -315,7 +320,8 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
 
     // ── Road ─────────────────────────────────────────────────────────────────
     if signals.road && criteria.road_open_required {
-        let road_missing_source = match &state.road {
+        let road = state.road();
+        let road_missing_source = match &road {
             None => Some("Road status (no data)".to_string()),
             Some(rd) if is_stale(rd.timestamp, now_secs, ROAD_STALE_SECS) => {
                 let age_h = now_secs.saturating_sub(rd.timestamp) / 3600;
@@ -326,7 +332,7 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
 
         if let Some(src) = road_missing_source {
             unchecked.push(UncheckedCriterion { criterion: "Road access".to_string(), missing_source: src });
-        } else if let Some(rd) = &state.road {
+        } else if let Some(rd) = &road {
             let is_open = rd.status == "open" || rd.status == "No active closures";
             let factor = EvalFactor {
                 name: "Road access".to_string(),
@@ -347,13 +353,13 @@ pub fn evaluate_detail(destination: &Destination, state: &DomainState, now_secs:
         if ts == 0 { None } else { Some(now_secs.saturating_sub(ts)) }
     };
     let source_age_secs = SourceAge {
-        weather_secs: state.weather.as_ref().and_then(|w| age_secs(w.observation_time)),
-        river_secs: state.river.as_ref().and_then(|r| age_secs(r.timestamp)),
-        ferry_secs: state.ferry.as_ref().and_then(|f| {
+        weather_secs: state.weather().and_then(|w| age_secs(w.observation_time)),
+        river_secs: state.river().and_then(|r| age_secs(r.timestamp)),
+        ferry_secs: state.ferry().and_then(|f| {
             f.estimated_departures.first().and_then(|&t| age_secs(t))
         }),
-        trail_secs: state.trail.as_ref().and_then(|t| age_secs(t.last_updated)),
-        road_secs: state.road.as_ref().and_then(|rd| age_secs(rd.timestamp)),
+        trail_secs: state.trail().and_then(|t| age_secs(t.last_updated)),
+        road_secs: state.road().and_then(|rd| age_secs(rd.timestamp)),
     };
 
     let decision = evaluate(destination, state, now_secs);
@@ -373,7 +379,7 @@ mod tests {
     use super::*;
     use crate::config::Destination;
     use crate::domain::{
-        DomainState, RiverGauge, RoadStatus, TripCriteria, WeatherObservation,
+        DataPoint, DomainState, RiverGauge, RoadStatus, TripCriteria, WeatherObservation,
     };
 
     // All test data uses timestamp = 0. We pass now_secs = 0 to evaluate
@@ -400,6 +406,14 @@ mod tests {
         }
     }
 
+    fn make_dest_with_signals(criteria: TripCriteria, signals: crate::domain::RelevantSignals) -> Destination {
+        Destination {
+            name: "Test".to_string(),
+            signals,
+            criteria,
+        }
+    }
+
     fn make_dest(min_temp: Option<f32>, max_temp: Option<f32>) -> Destination {
         make_dest_with(TripCriteria {
             min_temp_f: min_temp,
@@ -420,10 +434,9 @@ mod tests {
     }
 
     fn weather_state(temp: f32) -> DomainState {
-        DomainState {
-            weather: Some(weather_obs(temp)),
-            ..Default::default()
-        }
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(weather_obs(temp)));
+        state
     }
 
     fn river_gauge(level: f32, flow: f32) -> RiverGauge {
@@ -537,7 +550,7 @@ mod tests {
         let mut state = DomainState::default();
         let mut obs = weather_obs(65.0);
         obs.precip_chance_pct = 80.0;
-        state.weather = Some(obs);
+        state.apply(DataPoint::Weather(obs));
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 assert_eq!(reasons.len(), 1);
@@ -557,7 +570,7 @@ mod tests {
         let mut state = DomainState::default();
         let mut obs = weather_obs(65.0);
         obs.precip_chance_pct = 50.0;
-        state.weather = Some(obs);
+        state.apply(DataPoint::Weather(obs));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Caution { .. }));
     }
 
@@ -571,7 +584,7 @@ mod tests {
         let mut state = DomainState::default();
         let mut obs = weather_obs(65.0);
         obs.precip_chance_pct = 45.0;
-        state.weather = Some(obs);
+        state.apply(DataPoint::Weather(obs));
         match evaluate(&dest, &state, NOW) {
             TripDecision::Caution { warnings } => {
                 assert_eq!(warnings.len(), 1);
@@ -589,10 +602,8 @@ mod tests {
             max_river_level_ft: Some(12.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(14.5, 5000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(14.5, 5000.0)));
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 assert_eq!(reasons.len(), 1);
@@ -609,10 +620,8 @@ mod tests {
             max_river_level_ft: Some(12.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(12.0, 5000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(12.0, 5000.0)));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Caution { .. }));
     }
 
@@ -623,10 +632,8 @@ mod tests {
             max_river_level_ft: Some(12.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(11.0, 1000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(11.0, 1000.0)));
         match evaluate(&dest, &state, NOW) {
             TripDecision::Caution { warnings } => {
                 assert!(warnings[0].contains("River level"));
@@ -643,10 +650,8 @@ mod tests {
             max_river_flow_cfs: Some(10000.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(8.0, 15000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(8.0, 15000.0)));
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 assert_eq!(reasons.len(), 1);
@@ -663,10 +668,8 @@ mod tests {
             max_river_flow_cfs: Some(10000.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(8.0, 10000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(8.0, 10000.0)));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Caution { .. }));
     }
 
@@ -677,10 +680,8 @@ mod tests {
             max_river_flow_cfs: Some(10000.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(8.0, 9500.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(8.0, 9500.0)));
         match evaluate(&dest, &state, NOW) {
             TripDecision::Caution { warnings } => {
                 assert!(warnings[0].contains("River flow"));
@@ -697,10 +698,8 @@ mod tests {
             road_open_required: true,
             ..default_criteria()
         });
-        let state = DomainState {
-            road: Some(road_status("closed")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("closed")));
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 assert_eq!(reasons.len(), 1);
@@ -717,10 +716,8 @@ mod tests {
             road_open_required: true,
             ..default_criteria()
         });
-        let state = DomainState {
-            road: Some(road_status("open")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("open")));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Go));
     }
 
@@ -730,10 +727,8 @@ mod tests {
             road_open_required: false,
             ..default_criteria()
         });
-        let state = DomainState {
-            road: Some(road_status("closed")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("closed")));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Go));
     }
 
@@ -743,10 +738,8 @@ mod tests {
             road_open_required: true,
             ..default_criteria()
         });
-        let state = DomainState {
-            road: Some(road_status("No active closures")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("No active closures")));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Go));
     }
 
@@ -805,12 +798,10 @@ mod tests {
     #[test]
     fn go_when_no_criteria_configured_with_data() {
         let dest = make_dest_with(default_criteria());
-        let state = DomainState {
-            weather: Some(weather_obs(100.0)),
-            river: Some(river_gauge(50.0, 100000.0)),
-            road: Some(road_status("closed")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(weather_obs(100.0)));
+        state.apply(DataPoint::River(river_gauge(50.0, 100000.0)));
+        state.apply(DataPoint::Road(road_status("closed")));
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Go));
     }
 
@@ -820,10 +811,7 @@ mod tests {
     fn unknown_when_weather_stale() {
         let dest = make_dest(Some(50.0), None);
         // Data timestamp = 0, now = WEATHER_STALE_SECS + 1 → stale.
-        let state = DomainState {
-            weather: Some(weather_obs(65.0)), // passes criteria, but stale
-            ..Default::default()
-        };
+        let state = weather_state(65.0); // passes criteria, but stale
         let now = WEATHER_STALE_SECS + 1;
         match evaluate(&dest, &state, now) {
             TripDecision::Unknown { missing } => {
@@ -839,10 +827,8 @@ mod tests {
             max_river_level_ft: Some(12.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(8.0, 5000.0)), // passes, but stale
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(8.0, 5000.0))); // passes, but stale
         let now = RIVER_STALE_SECS + 1;
         match evaluate(&dest, &state, now) {
             TripDecision::Unknown { missing } => {
@@ -858,10 +844,8 @@ mod tests {
             road_open_required: true,
             ..default_criteria()
         });
-        let state = DomainState {
-            road: Some(road_status("open")), // passes, but stale
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("open"))); // passes, but stale
         let now = ROAD_STALE_SECS + 1;
         match evaluate(&dest, &state, now) {
             TripDecision::Unknown { missing } => {
@@ -880,11 +864,9 @@ mod tests {
             road_open_required: true,
             ..default_criteria()
         });
-        let state = DomainState {
-            road: Some(road_status("closed")), // confirmed blocker
-            weather: None,                     // missing
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("closed"))); // confirmed blocker
+        // weather absent (not applied)
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 assert!(reasons.iter().any(|r| r.contains("SR-20")));
@@ -903,12 +885,10 @@ mod tests {
             road_open_required: true,
             ..default_criteria()
         });
-        let state = DomainState {
-            weather: Some(weather_obs(30.0)),
-            river: Some(river_gauge(15.0, 5000.0)),
-            road: Some(road_status("closed")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(weather_obs(30.0)));
+        state.apply(DataPoint::River(river_gauge(15.0, 5000.0)));
+        state.apply(DataPoint::Road(road_status("closed")));
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 assert_eq!(reasons.len(), 3);
@@ -932,12 +912,10 @@ mod tests {
             max_river_flow_cfs: Some(5000.0),
             road_open_required: true,
         });
-        let state = DomainState {
-            weather: Some(obs),
-            river: Some(river_gauge(15.0, 20000.0)),
-            road: Some(road_status("restricted")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(obs));
+        state.apply(DataPoint::River(river_gauge(15.0, 20000.0)));
+        state.apply(DataPoint::Road(road_status("restricted")));
         match evaluate(&dest, &state, NOW) {
             TripDecision::NoGo { reasons } => {
                 // temp below min, precip too high, river level, river flow, road
@@ -980,10 +958,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let state = DomainState {
-            river: Some(river_gauge(20.0, 50000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(20.0, 50000.0)));
         // river signal is off — level criteria are skipped → Go
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Go));
     }
@@ -1001,10 +977,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let state = DomainState {
-            road: Some(road_status("closed")),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Road(road_status("closed")));
         // road signal is off — road criteria are skipped → Go
         assert!(matches!(evaluate(&dest, &state, NOW), TripDecision::Go));
     }
@@ -1017,10 +991,8 @@ mod tests {
             max_river_level_ft: Some(12.0),
             ..default_criteria()
         });
-        let state = DomainState {
-            river: Some(river_gauge(14.5, 5000.0)),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(river_gauge(14.5, 5000.0)));
         let detail = evaluate_detail(&dest, &state, NOW);
         assert_eq!(detail.blockers.len(), 1);
         assert_eq!(detail.blockers[0].name, "River level");
@@ -1057,10 +1029,7 @@ mod tests {
     #[test]
     fn detail_unchecked_when_weather_stale() {
         let dest = make_dest(Some(50.0), None);
-        let state = DomainState {
-            weather: Some(weather_obs(65.0)),
-            ..Default::default()
-        };
+        let state = weather_state(65.0);
         let now = WEATHER_STALE_SECS + 1;
         let detail = evaluate_detail(&dest, &state, now);
         assert!(detail.blockers.is_empty());
@@ -1076,19 +1045,10 @@ mod tests {
         // timestamp = 100, now = 200 → age = 100
         let mut obs = weather_obs(65.0);
         obs.observation_time = 100;
-        let state = DomainState { weather: Some(obs), ..Default::default() };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(obs));
         let detail = evaluate_detail(&dest, &state, 200);
         assert_eq!(detail.source_age_secs.weather_secs, Some(100));
-    }
-
-    fn make_dest_with_signals(
-        criteria: TripCriteria,
-        signals: crate::domain::RelevantSignals,
-    ) -> Destination {
-        Destination {
-            name: "Test".to_string(),
-            signals,
-            criteria,
-        }
+        assert!(detail.source_age_secs.river_secs.is_none());
     }
 }

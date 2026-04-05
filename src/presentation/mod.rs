@@ -112,20 +112,20 @@ pub fn build_panels_with_destinations(
     now_secs: u64,
 ) -> Vec<Panel> {
     let mut panels = Vec::new();
-    if let Some(w) = &state.weather {
-        panels.push(format_weather(w));
+    if let Some(w) = state.weather() {
+        panels.push(format_weather(&w));
     }
-    if let Some(r) = &state.river {
-        panels.push(format_river(r));
+    if let Some(r) = state.river() {
+        panels.push(format_river(&r));
     }
-    if let Some(f) = &state.ferry {
-        panels.push(format_ferry(f));
+    if let Some(f) = state.ferry() {
+        panels.push(format_ferry(&f));
     }
-    if let Some(t) = &state.trail {
-        panels.push(format_trail(t));
+    if let Some(t) = state.trail() {
+        panels.push(format_trail(&t));
     }
-    if let Some(r) = &state.road {
-        panels.push(format_road(r));
+    if let Some(r) = state.road() {
+        panels.push(format_road(&r));
     }
     for dest in destinations {
         let decision = crate::evaluation::evaluate(dest, state, now_secs);
@@ -330,18 +330,14 @@ pub fn build_display_layout(
 ) -> DisplayLayout {
     let header = HeaderContent {
         app_name: "SKAGIT FLATS".to_string(),
-        river_site: state
-            .river
-            .as_ref()
-            .map(|r| shorten_site_name(&r.site_name)),
+        river_site: state.river().map(|r| shorten_site_name(&r.site_name)),
         last_updated: state
-            .river
-            .as_ref()
+            .river()
             .map(|r| fmt_time(r.timestamp))
-            .or_else(|| state.weather.as_ref().map(|w| fmt_time(w.observation_time))),
+            .or_else(|| state.weather().map(|w| fmt_time(w.observation_time))),
     };
 
-    let weather = state.weather.as_ref().map(|w| WeatherContent {
+    let weather = state.weather().map(|w| WeatherContent {
         icon: WeatherIcon::from_sky_condition(&w.sky_condition),
         temperature_f: w.temperature_f,
         sky_condition: w.sky_condition.clone(),
@@ -407,7 +403,7 @@ pub fn build_display_layout(
     let any_road = destinations.is_empty() || destinations.iter().any(|d| d.signals.road);
 
     let river = if any_river {
-        state.river.as_ref().map(|r| RiverContent {
+        state.river().map(|r| RiverContent {
             site_name: shorten_site_name(&r.site_name),
             level_ft: r.water_level_ft,
             flow_cfs: r.streamflow_cfs,
@@ -419,7 +415,7 @@ pub fn build_display_layout(
     };
 
     let ferry = if any_ferry {
-        state.ferry.as_ref().map(|f| FerryContent {
+        state.ferry().map(|f| FerryContent {
             route: f.route.clone(),
             vessel_name: f.vessel_name.clone(),
             departures: f
@@ -436,7 +432,7 @@ pub fn build_display_layout(
     let data = DataContent { river, ferry };
 
     let trail = if any_trail {
-        state.trail.as_ref().map(|t| TrailContent {
+        state.trail().map(|t| TrailContent {
             name: t.destination_name.clone(),
             condition: t.suitability_summary.clone(),
         })
@@ -445,7 +441,7 @@ pub fn build_display_layout(
     };
 
     let road = if any_road {
-        state.road.as_ref().map(|r| RoadContent {
+        state.road().map(|r| RoadContent {
             name: r.road_name.clone(),
             status: r.status.clone(),
             segment: r.affected_segment.clone(),
@@ -478,7 +474,8 @@ mod tests {
     use super::*;
     use crate::config::Destination;
     use crate::domain::{
-        FerryStatus, RiverGauge, RoadStatus, TrailCondition, TripCriteria, WeatherObservation,
+        DataPoint, DomainState, FerryStatus, RiverGauge, RoadStatus, TrailCondition, TripCriteria,
+        WeatherObservation,
     };
 
     fn sample_weather() -> WeatherObservation {
@@ -637,10 +634,8 @@ mod tests {
 
     #[test]
     fn build_panels_weather_only() {
-        let state = DomainState {
-            weather: Some(sample_weather()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(sample_weather()));
         let panels = build_panels(&state);
         assert_eq!(panels.len(), 1);
         assert_eq!(panels[0].title, "Weather");
@@ -648,23 +643,20 @@ mod tests {
 
     #[test]
     fn build_panels_all_sources() {
-        let state = DomainState {
-            weather: Some(sample_weather()),
-            river: Some(sample_river()),
-            ferry: Some(sample_ferry()),
-            trail: Some(sample_trail()),
-            road: Some(sample_road()),
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(sample_weather()));
+        state.apply(DataPoint::River(sample_river()));
+        state.apply(DataPoint::Ferry(sample_ferry()));
+        state.apply(DataPoint::Trail(sample_trail()));
+        state.apply(DataPoint::Road(sample_road()));
         let panels = build_panels(&state);
         assert_eq!(panels.len(), 5);
     }
 
     #[test]
     fn build_panels_with_destinations_adds_trip_panels() {
-        let state = DomainState {
-            weather: Some(sample_weather()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(sample_weather()));
         let destinations = vec![
             Destination {
                 name: "Skagit Loop".to_string(),
@@ -769,20 +761,16 @@ mod tests {
 
     #[test]
     fn build_display_layout_no_destinations_shows_all_go() {
-        let state = DomainState {
-            weather: Some(sample_weather()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(sample_weather()));
         let layout = build_display_layout(&state, &[], 0);
         assert!(matches!(layout.hero.decision, HeroDecision::AllGo));
     }
 
     #[test]
     fn build_display_layout_go_decision() {
-        let state = DomainState {
-            weather: Some(sample_weather()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(sample_weather()));
         let destinations = vec![Destination {
             name: "Test Loop".to_string(),
             signals: Default::default(),
@@ -797,10 +785,8 @@ mod tests {
 
     #[test]
     fn build_display_layout_nogo_decision() {
-        let state = DomainState {
-            weather: Some(sample_weather()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Weather(sample_weather()));
         let destinations = vec![Destination {
             name: "Cold Dest".to_string(),
             signals: Default::default(),
@@ -818,10 +804,8 @@ mod tests {
 
     #[test]
     fn build_display_layout_river_content() {
-        let state = DomainState {
-            river: Some(sample_river()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(sample_river()));
         let layout = build_display_layout(&state, &[], 0);
         let river = layout.data.river.expect("river should be present");
         assert!((river.level_ft - 11.87).abs() < 0.01);
@@ -831,10 +815,8 @@ mod tests {
 
     #[test]
     fn build_display_layout_ferry_departures() {
-        let state = DomainState {
-            ferry: Some(sample_ferry()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Ferry(sample_ferry()));
         let layout = build_display_layout(&state, &[], 0);
         let ferry = layout.data.ferry.expect("ferry should be present");
         assert_eq!(ferry.vessel_name, "MV Samish");
@@ -846,11 +828,9 @@ mod tests {
 
     #[test]
     fn build_display_layout_context_trail_road() {
-        let state = DomainState {
-            trail: Some(sample_trail()),
-            road: Some(sample_road()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Trail(sample_trail()));
+        state.apply(DataPoint::Road(sample_road()));
         let layout = build_display_layout(&state, &[], 0);
         let trail = layout.context.trail.expect("trail should be present");
         let road = layout.context.road.expect("road should be present");
@@ -871,10 +851,8 @@ mod tests {
     #[test]
     fn river_hidden_when_no_destination_has_river_relevant() {
         use crate::domain::RelevantSignals;
-        let state = DomainState {
-            river: Some(sample_river()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(sample_river()));
         let destinations = vec![Destination {
             name: "Island Trip".to_string(),
             signals: RelevantSignals {
@@ -894,10 +872,8 @@ mod tests {
     #[test]
     fn river_shown_when_any_destination_has_river_relevant() {
         use crate::domain::RelevantSignals;
-        let state = DomainState {
-            river: Some(sample_river()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(sample_river()));
         let destinations = vec![
             Destination {
                 name: "Island Trip".to_string(),
@@ -929,13 +905,11 @@ mod tests {
 
     #[test]
     fn all_signals_shown_when_no_destinations_configured() {
-        let state = DomainState {
-            river: Some(sample_river()),
-            ferry: Some(sample_ferry()),
-            trail: Some(sample_trail()),
-            road: Some(sample_road()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::River(sample_river()));
+        state.apply(DataPoint::Ferry(sample_ferry()));
+        state.apply(DataPoint::Trail(sample_trail()));
+        state.apply(DataPoint::Road(sample_road()));
         let layout = build_display_layout(&state, &[], 0);
         // no destinations → full dashboard mode → all signals shown
         assert!(layout.data.river.is_some());
@@ -947,10 +921,8 @@ mod tests {
     #[test]
     fn ferry_hidden_when_no_destination_has_ferry_relevant() {
         use crate::domain::RelevantSignals;
-        let state = DomainState {
-            ferry: Some(sample_ferry()),
-            ..Default::default()
-        };
+        let mut state = DomainState::default();
+        state.apply(DataPoint::Ferry(sample_ferry()));
         let destinations = vec![Destination {
             name: "Mountain Hike".to_string(),
             signals: RelevantSignals {

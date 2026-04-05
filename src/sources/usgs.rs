@@ -1,4 +1,4 @@
-use crate::domain::{DataPoint, RiverGauge};
+use crate::domain::RiverGauge;
 use crate::sources::{Source, SourceError};
 use serde::Deserialize;
 use std::time::Duration;
@@ -39,6 +39,10 @@ impl UsgsSource {
 }
 
 impl Source for UsgsSource {
+    fn id(&self) -> &str {
+        "river"
+    }
+
     fn name(&self) -> &str {
         "usgs-river"
     }
@@ -47,7 +51,7 @@ impl Source for UsgsSource {
         self.refresh
     }
 
-    fn fetch(&self) -> Result<DataPoint, SourceError> {
+    fn fetch(&self) -> Result<serde_json::Value, SourceError> {
         let response_text = if self.use_fixtures {
             FIXTURE_RESPONSE.to_string()
         } else {
@@ -164,8 +168,8 @@ struct Reading {
     date_time: String,
 }
 
-/// Parse an NWIS instantaneous values response into a DataPoint::River.
-fn parse_gauge(json: &str) -> Result<DataPoint, SourceError> {
+/// Parse an NWIS instantaneous values response into a serde_json::Value.
+fn parse_gauge(json: &str) -> Result<serde_json::Value, SourceError> {
     let resp: NwisResponse =
         serde_json::from_str(json).map_err(|e| SourceError::Parse(e.to_string()))?;
 
@@ -228,13 +232,15 @@ fn parse_gauge(json: &str) -> Result<DataPoint, SourceError> {
         }
     }
 
-    Ok(DataPoint::River(RiverGauge {
+    let gauge = RiverGauge {
         site_id,
         site_name,
         water_level_ft,
         streamflow_cfs,
         timestamp,
-    }))
+    };
+
+    serde_json::to_value(gauge).map_err(|e| SourceError::Parse(e.to_string()))
 }
 
 /// Parse NWIS datetime format "2026-03-28T12:45:00.000-07:00" to Unix epoch.
@@ -355,6 +361,7 @@ fn title_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::RiverGauge;
 
     #[test]
     fn parse_fixture_response() {
@@ -373,16 +380,12 @@ mod tests {
         let result = source.fetch();
         assert!(result.is_ok(), "fixture fetch should succeed: {:?}", result);
 
-        match result.unwrap() {
-            DataPoint::River(gauge) => {
-                assert_eq!(gauge.site_id, "12200500");
-                assert!(gauge.site_name.contains("Skagit River"));
-                assert!((gauge.water_level_ft - 11.87).abs() < 0.01);
-                assert!((gauge.streamflow_cfs - 8750.0).abs() < 1.0);
-                assert!(gauge.timestamp > 0);
-            }
-            other => panic!("expected DataPoint::River, got {:?}", other),
-        }
+        let gauge: RiverGauge = serde_json::from_value(result.unwrap()).unwrap();
+        assert_eq!(gauge.site_id, "12200500");
+        assert!(gauge.site_name.contains("Skagit River"));
+        assert!((gauge.water_level_ft - 11.87).abs() < 0.01);
+        assert!((gauge.streamflow_cfs - 8750.0).abs() < 1.0);
+        assert!(gauge.timestamp > 0);
     }
 
     #[test]
@@ -412,13 +415,9 @@ mod tests {
         let result = parse_gauge(json);
         assert!(result.is_ok());
 
-        match result.unwrap() {
-            DataPoint::River(gauge) => {
-                assert!((gauge.water_level_ft - 5.5).abs() < 0.01);
-                assert!((gauge.streamflow_cfs - 0.0).abs() < 0.01);
-            }
-            other => panic!("expected DataPoint::River, got {:?}", other),
-        }
+        let gauge: RiverGauge = serde_json::from_value(result.unwrap()).unwrap();
+        assert!((gauge.water_level_ft - 5.5).abs() < 0.01);
+        assert!((gauge.streamflow_cfs - 0.0).abs() < 0.01);
     }
 
     #[test]
@@ -469,8 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn source_name_and_interval() {
+    fn source_id_name_and_interval() {
         let source = UsgsSource::new("12200500", 300, false);
+        assert_eq!(source.id(), "river");
         assert_eq!(source.name(), "usgs-river");
         assert_eq!(source.refresh_interval(), Duration::from_secs(300));
     }

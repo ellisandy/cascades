@@ -1,5 +1,5 @@
 use crate::config::LocationConfig;
-use crate::domain::{DataPoint, WeatherObservation};
+use crate::domain::WeatherObservation;
 use crate::sources::{Source, SourceError};
 use serde::Deserialize;
 use std::time::Duration;
@@ -106,6 +106,10 @@ struct StationProperties {
 }
 
 impl Source for NoaaSource {
+    fn id(&self) -> &str {
+        "weather"
+    }
+
     fn name(&self) -> &str {
         "noaa-weather"
     }
@@ -114,7 +118,7 @@ impl Source for NoaaSource {
         self.refresh
     }
 
-    fn fetch(&self) -> Result<DataPoint, SourceError> {
+    fn fetch(&self) -> Result<serde_json::Value, SourceError> {
         let response_text = if self.use_fixtures {
             FIXTURE_RESPONSE.to_string()
         } else {
@@ -125,8 +129,8 @@ impl Source for NoaaSource {
     }
 }
 
-/// Parse an observation JSON response into a DataPoint.
-fn parse_observation(json: &str) -> Result<DataPoint, SourceError> {
+/// Parse an observation JSON response into a serde_json::Value.
+fn parse_observation(json: &str) -> Result<serde_json::Value, SourceError> {
     let obs: ObservationResponse =
         serde_json::from_str(json).map_err(|e| SourceError::Parse(e.to_string()))?;
 
@@ -163,14 +167,16 @@ fn parse_observation(json: &str) -> Result<DataPoint, SourceError> {
     // Parse ISO-8601 timestamp to Unix epoch (best effort).
     let observation_time = parse_iso8601_to_epoch(&props.timestamp);
 
-    Ok(DataPoint::Weather(WeatherObservation {
+    let weather = WeatherObservation {
         temperature_f: temp_f as f32,
         wind_speed_mph: wind_mph as f32,
         wind_direction: wind_dir,
         sky_condition: sky,
         precip_chance_pct: 0.0,
         observation_time,
-    }))
+    };
+
+    serde_json::to_value(weather).map_err(|e| SourceError::Parse(e.to_string()))
 }
 
 impl NoaaSource {
@@ -337,6 +343,7 @@ fn is_leap_year(y: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::WeatherObservation;
 
     #[test]
     fn parse_fixture_response() {
@@ -359,18 +366,15 @@ mod tests {
         let result = source.fetch();
         assert!(result.is_ok(), "fixture fetch should succeed: {:?}", result);
 
-        match result.unwrap() {
-            DataPoint::Weather(obs) => {
-                // 11.1°C = ~51.98°F
-                assert!((obs.temperature_f - 51.98).abs() < 1.0);
-                // 14.8 km/h = ~9.2 mph
-                assert!((obs.wind_speed_mph - 9.2).abs() < 1.0);
-                assert_eq!(obs.wind_direction, "SSW");
-                assert_eq!(obs.sky_condition, "Mostly Cloudy");
-                assert!(obs.observation_time > 0);
-            }
-            other => panic!("expected DataPoint::Weather, got {:?}", other),
-        }
+        let value = result.unwrap();
+        let obs: WeatherObservation = serde_json::from_value(value).unwrap();
+        // 11.1°C = ~51.98°F
+        assert!((obs.temperature_f - 51.98).abs() < 1.0);
+        // 14.8 km/h = ~9.2 mph
+        assert!((obs.wind_speed_mph - 9.2).abs() < 1.0);
+        assert_eq!(obs.wind_direction, "SSW");
+        assert_eq!(obs.sky_condition, "Mostly Cloudy");
+        assert!(obs.observation_time > 0);
     }
 
     #[test]
@@ -389,16 +393,12 @@ mod tests {
         let result = parse_observation(json);
         assert!(result.is_ok());
 
-        match result.unwrap() {
-            DataPoint::Weather(obs) => {
-                // 0°C = 32°F
-                assert!((obs.temperature_f - 32.0).abs() < 0.1);
-                assert!((obs.wind_speed_mph - 0.0).abs() < 0.1);
-                assert_eq!(obs.wind_direction, "Calm");
-                assert_eq!(obs.sky_condition, "Unknown");
-            }
-            other => panic!("expected DataPoint::Weather, got {:?}", other),
-        }
+        let obs: WeatherObservation = serde_json::from_value(result.unwrap()).unwrap();
+        // 0°C = 32°F
+        assert!((obs.temperature_f - 32.0).abs() < 0.1);
+        assert!((obs.wind_speed_mph - 0.0).abs() < 0.1);
+        assert_eq!(obs.wind_direction, "Calm");
+        assert_eq!(obs.sky_condition, "Unknown");
     }
 
     #[test]
@@ -439,13 +439,14 @@ mod tests {
     }
 
     #[test]
-    fn source_name_and_interval() {
+    fn source_id_name_and_interval() {
         let location = crate::config::LocationConfig {
             latitude: 48.4232,
             longitude: -122.3351,
             name: "Mount Vernon, WA".to_string(),
         };
         let source = NoaaSource::new(&location, 300, false);
+        assert_eq!(source.id(), "weather");
         assert_eq!(source.name(), "noaa-weather");
         assert_eq!(source.refresh_interval(), Duration::from_secs(300));
     }
