@@ -113,13 +113,15 @@ fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
 struct TestAppState {
     domain: Arc<RwLock<DomainState>>,
     destinations: Vec<Destination>,
+    display_width: u32,
+    display_height: u32,
 }
 
 async fn serve_image_handler(State(app): State<Arc<TestAppState>>) -> impl IntoResponse {
     let domain = app.domain.read().unwrap().clone();
     let now_secs = 0u64; // fixed timestamp for tests
     let layout = build_display_layout(&domain, &app.destinations, now_secs);
-    let buf = render_display(&layout);
+    let buf = render_display(&layout, app.display_width, app.display_height);
     let png = buf.to_png();
     ([(header::CONTENT_TYPE, "image/png")], png)
 }
@@ -129,6 +131,8 @@ fn make_test_app(domain: DomainState, destinations: Vec<Destination>) -> Router 
     let state = Arc::new(TestAppState {
         domain: Arc::new(RwLock::new(domain)),
         destinations,
+        display_width: 800,
+        display_height: 480,
     });
     Router::new()
         .route("/image.png", get(serve_image_handler))
@@ -140,7 +144,12 @@ fn make_test_app_with_state(
     domain: Arc<RwLock<DomainState>>,
     destinations: Vec<Destination>,
 ) -> Router {
-    let state = Arc::new(TestAppState { domain, destinations });
+    let state = Arc::new(TestAppState {
+        domain,
+        destinations,
+        display_width: 800,
+        display_height: 480,
+    });
     Router::new()
         .route("/image.png", get(serve_image_handler))
         .with_state(state)
@@ -291,17 +300,11 @@ async fn us3_get_image_response_is_valid_png() {
 ///
 /// Tracking: wave-3 fix must update render_display() signature to accept
 /// width/height, and update render_current_state() to pass config dimensions.
-#[ignore = "Wave 3: render_display ignores DisplayConfig dimensions (always 800×480)"]
 #[tokio::test]
 async fn us3_custom_display_dimensions_reflected_in_png() {
     // A hypothetical 400×240 display; the PNG should match.
-    // Build a layout and render it; if dimensions were respected the PNG would
-    // be 400×240.  Currently render_display() ignores the config and always
-    // produces 800×480, so this test fails until Wave-3 threading is done.
     let layout = build_display_layout(&DomainState::default(), &[], 0);
-    let buf = render_display(&layout);
-    // After the Wave-3 fix, render_display should accept dimensions.
-    // For now, buf is always 800×480.
+    let buf = render_display(&layout, 400, 240);
     let png = buf.to_png();
     let (w, h) = png_dimensions(&png);
     assert_eq!(w, 400, "PNG width should match config (400)");
@@ -468,7 +471,7 @@ fn us6_render_with_empty_state_does_not_panic() {
     // Direct render; simulates the server rendering after all sources failed.
     let state = DomainState::default();
     let layout = build_display_layout(&state, &[], 0);
-    let buf = render_display(&layout);
+    let buf = render_display(&layout, 800, 480);
     let png = buf.to_png();
     assert!(png.starts_with(b"\x89PNG"));
 }
@@ -527,7 +530,7 @@ fn us7_render_without_trail_data_is_valid_png() {
         timestamp: 100_000,
     }));
     let layout = build_display_layout(&state, &[], 0);
-    let buf = render_display(&layout);
+    let buf = render_display(&layout, 800, 480);
     let png = buf.to_png();
     assert!(png.starts_with(b"\x89PNG"));
 }
@@ -939,7 +942,7 @@ fn us12_domain_state_apply_is_reflected_immediately() {
 
     // Render before applying weather.
     let layout_before = build_display_layout(&state, &[], now_secs);
-    let buf_before = render_display(&layout_before);
+    let buf_before = render_display(&layout_before, 800, 480);
     let png_before = buf_before.to_png();
 
     // Apply weather data.
@@ -954,7 +957,7 @@ fn us12_domain_state_apply_is_reflected_immediately() {
 
     // Render after applying weather.
     let layout_after = build_display_layout(&state, &[], now_secs);
-    let buf_after = render_display(&layout_after);
+    let buf_after = render_display(&layout_after, 800, 480);
     let png_after = buf_after.to_png();
 
     // Both renders should succeed.
@@ -992,7 +995,7 @@ async fn concurrent_reads_on_shared_domain_state_do_not_panic() {
         handles.push(tokio::spawn(async move {
             let state = d.read().unwrap().clone();
             let layout = build_display_layout(&state, &[], 0);
-            let buf = render_display(&layout);
+            let buf = render_display(&layout, 800, 480);
             let png = buf.to_png();
             assert!(png.starts_with(b"\x89PNG"));
         }));
@@ -1035,7 +1038,7 @@ async fn concurrent_write_and_read_do_not_deadlock() {
             for _ in 0..5 {
                 let state = d.read().unwrap().clone();
                 let layout = build_display_layout(&state, &[], 0);
-                let _buf = render_display(&layout);
+                let _buf = render_display(&layout, 800, 480);
                 tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
             }
         }));

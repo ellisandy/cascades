@@ -44,7 +44,7 @@ pub fn render_current_state_with_destinations(
         .unwrap_or(0);
 
     let layout = presentation::build_display_layout(&state, destinations, now_secs);
-    render::render_display(&layout)
+    render::render_display(&layout, config.display.width, config.display.height)
 }
 
 pub fn build_sources(config: &Config, fixture_data: bool) -> Vec<Box<dyn Source>> {
