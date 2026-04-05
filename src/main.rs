@@ -38,11 +38,16 @@ async fn main() {
         .map(|d| d.destinations)
         .unwrap_or_default();
 
+    let fixture_mode = std::env::var("SKAGIT_FIXTURE_DATA").as_deref() == Ok("1");
+    if fixture_mode {
+        println!("Fixture mode enabled: sources return canned data (no live API calls)");
+    }
+
     let domain = Arc::new(RwLock::new(DomainState::default()));
 
     // Spawn one background task per data source. Each task fetches on its own
     // interval and applies the result to the shared DomainState.
-    for source in build_sources(&config, false) {
+    for source in build_sources(&config, fixture_mode) {
         let domain = Arc::clone(&domain);
         let interval = source.refresh_interval();
         tokio::spawn(async move {
