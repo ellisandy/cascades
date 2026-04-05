@@ -106,7 +106,7 @@ compatibility.
 | Component | Owns | Does NOT own |
 |---|---|---|
 | **Plugin Registry** | Plugin definitions, template strings, settings schemas, source binding | Source implementations, rendering logic |
-| **Scheduler** | Fetch timing, retry backoff, per-source goroutines | What to do with data, how to render |
+| **Scheduler** | Fetch timing, retry backoff, per-source Tokio tasks | What to do with data, how to render |
 | **Source Layer** | External API calls, parsing, `Source` trait impl | Domain state, display logic |
 | **Data Cache** | Last-good data per plugin, error state, timestamp | Rendering, fetching |
 | **Evaluation Engine** | Trip go/no-go logic, criterion registry | Data fetching, template rendering |
@@ -184,7 +184,9 @@ templates/
 ```
 
 Community plugins are a directory dropped into `plugins.d/` with their templates.
-No code changes. No restart required (hot-reload on file change).
+No code changes. Hot-reload is via filesystem event watching (`notify` Rust crate,
+with inotify on Linux / FSEvents on macOS); falls back to SIGHUP-triggered reload
+on platforms where filesystem events are unavailable.
 
 ### Plugin instance (runtime)
 
@@ -323,18 +325,24 @@ return PNG. It has no knowledge of plugins, templates, or data.
 ```rust
 pub struct LayoutSlot {
     pub plugin_instance_id: String,
+    /// Compositing geometry: where this slot's PNG is placed in the final frame.
     pub x: u32,
     pub y: u32,
     pub width: u32,
     pub height: u32,
-    pub layout_variant: LayoutVariant,   // Full | HalfHorizontal | HalfVertical | Quadrant
+    /// Template selection hint: which of the plugin's templates to render.
+    /// Derived from geometry when not explicitly set (800×480 → Full, etc.).
+    /// Geometry and variant are independent: variant controls template selection,
+    /// x/y/width/height controls compositing. A full-width half-height slot at
+    /// y=0 uses HalfHorizontal template dimensions but can be placed anywhere.
+    pub layout_variant: LayoutVariant,
 }
 
 pub enum LayoutVariant {
-    Full,             // 800×480
-    HalfHorizontal,   // 800×240
-    HalfVertical,     // 400×480
-    Quadrant,         // 400×240
+    Full,             // renders at 800×480 template size
+    HalfHorizontal,   // renders at 800×240 template size
+    HalfVertical,     // renders at 400×480 template size
+    Quadrant,         // renders at 400×240 template size
 }
 ```
 
