@@ -199,6 +199,7 @@ fn build_env() -> Environment<'static> {
     env.add_filter("default", filter_default);
     env.add_filter("pluralize", filter_pluralize);
     env.add_filter("days_ago", filter_days_ago);
+    env.add_filter("time_of_day", filter_time_of_day);
     env
 }
 
@@ -361,6 +362,20 @@ fn filter_days_ago(value: Value) -> Result<Value, Error> {
         1 => Value::from("1 day ago"),
         n => Value::from(format!("{n} days ago")),
     })
+}
+
+/// Format a Unix timestamp as "HH:MM" (UTC time of day).
+///
+/// Used as: `{{ data.departure_time | time_of_day }}`
+fn filter_time_of_day(value: Value) -> Result<Value, Error> {
+    let ts = match value.as_i64() {
+        Some(v) => v as u64,
+        None => return Ok(value),
+    };
+    let secs = ts % 86_400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    Ok(Value::from(format!("{h:02}:{m:02}")))
 }
 
 // ─── Minimal time helpers (no external crates) ────────────────────────────────
