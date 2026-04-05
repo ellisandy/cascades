@@ -48,7 +48,10 @@ const FIXTURE_HTML = `<!DOCTYPE html>
 
 async function pngDimensions(buf: Buffer): Promise<{ width: number; height: number }> {
   const meta = await sharp(buf).metadata();
-  return { width: meta.width!, height: meta.height! };
+  if (!meta.width || !meta.height) {
+    throw new Error(`sharp metadata missing dimensions: ${JSON.stringify(meta)}`);
+  }
+  return { width: meta.width, height: meta.height };
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

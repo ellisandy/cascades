@@ -38,6 +38,8 @@ async function getBrowser(): Promise<Browser> {
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
   });
+  // Clear the reference if Chromium crashes so the next call relaunches cleanly.
+  browser.on("disconnected", () => { browser = null; });
   return browser;
 }
 
@@ -79,7 +81,9 @@ async function ditherBuffer(raw: Buffer): Promise<Buffer> {
   const w = info.width;
   const h = info.height;
 
-  // Float32 for error accumulation; initialised from uint8 pixel values.
+  // Float32 for error accumulation. Buffer is a Uint8Array subtype, so
+  // Float32Array(data) copies values element-by-element (0–255 preserved as
+  // floats) — NOT a raw-byte reinterpretation.
   const px = new Float32Array(data);
 
   for (let y = 0; y < h; y++) {
