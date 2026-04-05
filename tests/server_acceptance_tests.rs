@@ -1019,6 +1019,7 @@ fn make_api_app(
             id: "default".to_string(),
             name: "default".to_string(),
             items: vec![],
+            updated_at: 0,
         })
         .expect("seed default layout");
 
@@ -1111,6 +1112,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
                 plugin_instance_id: "river".to_string(),
                 layout_variant: "full".to_string(),
             }],
+            updated_at: 0,
         })
         .unwrap();
 

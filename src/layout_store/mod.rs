@@ -51,6 +51,9 @@ pub struct LayoutConfig {
     pub name: String,
     /// Items composited back-to-front.
     pub items: Vec<LayoutItem>,
+    /// Unix timestamp (seconds) of last write.  Zero for layouts not yet persisted.
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 /// A single item in a layout.
@@ -197,19 +200,19 @@ impl LayoutStore {
     pub fn get_layout(&self, id: &str) -> Result<Option<LayoutConfig>, LayoutStoreError> {
         let conn = self.conn.lock().unwrap();
 
-        let name: String = {
+        let (name, updated_at): (String, i64) = {
             let mut stmt =
-                conn.prepare("SELECT name FROM display_layouts WHERE id = ?1")?;
+                conn.prepare("SELECT name, updated_at FROM display_layouts WHERE id = ?1")?;
             let mut rows = stmt.query(params![id])?;
             match rows.next()? {
-                Some(row) => row.get(0)?,
+                Some(row) => (row.get(0)?, row.get(1)?),
                 None => return Ok(None),
             }
         };
 
         let items = Self::fetch_items(&conn, id)?;
 
-        Ok(Some(LayoutConfig { id: id.to_string(), name, items }))
+        Ok(Some(LayoutConfig { id: id.to_string(), name, items, updated_at }))
     }
 
     fn fetch_items(
@@ -382,6 +385,7 @@ impl LayoutStore {
                 id: entry.name.clone(),
                 name: entry.name.clone(),
                 items,
+                updated_at: 0,
             };
             self.upsert_layout(&layout)?;
         }
@@ -447,6 +451,7 @@ mod tests {
             id: "default".to_string(),
             name: "Default".to_string(),
             items: vec![plugin_slot("s0", "river", 0)],
+            updated_at: 0,
         };
         store.upsert_layout(&layout).unwrap();
 
@@ -470,6 +475,7 @@ mod tests {
             id: "default".to_string(),
             name: "Default".to_string(),
             items: vec![plugin_slot("s0", "river", 0)],
+            updated_at: 0,
         };
         store.upsert_layout(&layout).unwrap();
 
@@ -480,6 +486,7 @@ mod tests {
                 plugin_slot("s0", "weather", 0),
                 plugin_slot("s1", "river", 1),
             ],
+            updated_at: 0,
         };
         store.upsert_layout(&updated).unwrap();
 
@@ -497,6 +504,7 @@ mod tests {
             id: "x".to_string(),
             name: "X".to_string(),
             items: vec![],
+            updated_at: 0,
         }).unwrap();
 
         assert!(store.has_any_layouts().unwrap());
@@ -510,6 +518,7 @@ mod tests {
                 id: name.to_string(),
                 name: name.to_string(),
                 items: vec![plugin_slot(&format!("{}-s0", name), "river", 0)],
+                updated_at: 0,
             }).unwrap();
         }
         let all = store.list_layouts().unwrap();
@@ -561,6 +570,7 @@ mod tests {
             id: "existing".to_string(),
             name: "Existing".to_string(),
             items: vec![],
+            updated_at: 0,
         }).unwrap();
 
         let toml = DisplayLayoutsConfig {
@@ -592,6 +602,7 @@ mod tests {
                 plugin_slot("s0", "river", 0),
                 plugin_slot("s1", "weather", 1),
             ],
+            updated_at: 0,
         };
         store.upsert_layout(&layout).unwrap();
         let got = store.get_layout("multi").unwrap().unwrap();
@@ -622,6 +633,7 @@ mod tests {
                     orientation: Some("horizontal".to_string()),
                 },
             ],
+            updated_at: 0,
         };
         store.upsert_layout(&layout).unwrap();
         let got = store.get_layout("static").unwrap().unwrap();
