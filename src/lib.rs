@@ -5,51 +5,11 @@ pub mod evaluation;
 pub mod instance_store;
 pub mod plugin_registry;
 pub mod presentation;
-pub mod render;
 pub mod sources;
 pub mod template;
 
-use config::{Config, Destination};
-use domain::DomainState;
-use render::PixelBuffer;
+use config::Config;
 use sources::Source;
-
-/// Fetch live data from all configured sources, evaluate conditions,
-/// build the display layout, and render to a PixelBuffer.
-///
-/// When `fixture_data` is true, each source returns canned responses from
-/// embedded JSON files instead of making network calls. Use this in tests
-/// and CI where live APIs are unavailable.
-///
-/// Returns an 800×480 1-bit PixelBuffer ready for display or PNG export.
-pub fn render_current_state(config: &Config, fixture_data: bool) -> PixelBuffer {
-    render_current_state_with_destinations(config, &[], fixture_data)
-}
-
-/// Like [`render_current_state`], but with explicit destinations for trip evaluation.
-pub fn render_current_state_with_destinations(
-    config: &Config,
-    destinations: &[Destination],
-    fixture_data: bool,
-) -> PixelBuffer {
-    let all_sources: Vec<Box<dyn Source>> = build_sources(config, fixture_data);
-
-    let mut state = DomainState::default();
-    for source in &all_sources {
-        match source.fetch() {
-            Ok(value) => state.apply_raw(source.id(), value),
-            Err(e) => log::warn!("source '{}' fetch failed: {}", source.name(), e),
-        }
-    }
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let layout = presentation::build_display_layout(&state, destinations, now_secs);
-    render::render_display(&layout, config.display.width, config.display.height)
-}
 
 pub fn build_sources(config: &Config, fixture_data: bool) -> Vec<Box<dyn Source>> {
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
