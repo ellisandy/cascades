@@ -1029,6 +1029,8 @@ fn make_api_app(
         image_cache,
         api_key: "test-bearer-key".to_string(),
         refresh_rate_secs: 42,
+        started_at: std::time::Instant::now(),
+        sidecar_url: "http://localhost:3001".to_string(),
     });
 
     let router = build_router(Arc::clone(&state));
@@ -1121,6 +1123,8 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         image_cache: Arc::clone(&image_cache),
         api_key: "key".to_string(),
         refresh_rate_secs: 60,
+        started_at: std::time::Instant::now(),
+        sidecar_url: "http://localhost:3001".to_string(),
     });
 
     let app = cascades::api::build_router(Arc::clone(&state));
