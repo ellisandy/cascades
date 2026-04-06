@@ -693,6 +693,7 @@ mod tests {
         let layout = crate::layout_store::LayoutConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
+            updated_at: 0,
             items: vec![
                 LayoutItem::PluginSlot {
                     id: "s0".to_string(),
@@ -729,6 +730,7 @@ mod tests {
         let layout = crate::layout_store::LayoutConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
+            updated_at: 0,
             items: vec![
                 LayoutItem::PluginSlot {
                     id: "s0".to_string(),
