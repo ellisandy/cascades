@@ -624,6 +624,7 @@ function setStatus(msg, isError) {
 
 function onApiKeyChange(val) {
   localStorage.setItem('cascades-api-key', val);
+  loadLayouts();
 }
 
 // ────────────────────────────────────────
@@ -1300,7 +1301,7 @@ function makeEl(item) {
 
 function itemLabel(item) {
   if (item.type === 'plugin_slot')    return (item.plugin_id || '?') + ' (' + (item.variant || 'full') + ')';
-  if (item.type === 'static_text')    return item.text || 'Text';
+  if (item.type === 'static_text')    return (item.text || 'Text') + ' (' + (item.font_size || 24) + 'px)';
   if (item.type === 'static_divider') return 'Divider (' + (item.orientation || 'horizontal') + ')';
   return item.type;
 }
@@ -1361,7 +1362,9 @@ function renderProps() {
 
 function updateProp(key, value) {
   const item = findItem(state.selectedId);
-  if (item) item[key] = value;
+  if (!item) return;
+  item[key] = value;
+  renderCanvas();
 }
 
 function updatePropRender(key, value) {
