@@ -3,11 +3,20 @@
 //! Implements target-architecture.md §5e:
 //!
 //! - [`LayoutVariant`] controls which template size is selected and rendered.
-//! - [`LayoutSlot`] binds a plugin instance to compositing geometry.
-//! - [`DisplayConfiguration`] is a named list of slots loaded from
-//!   `config/display.toml`.
-//! - [`Compositor`] orchestrates concurrent per-slot renders and composites
-//!   all slot PNGs into the final 800×480 frame.
+//! - [`LayoutSlot`] binds a plugin instance to compositing geometry (internal).
+//! - [`DisplayConfiguration`] is a named list of [`crate::layout_store::LayoutItem`]s
+//!   loaded from `config/display.toml` or the [`crate::layout_store::LayoutStore`].
+//! - [`Compositor`] orchestrates concurrent per-item renders and composites all
+//!   item PNGs into the final 800×480 frame.
+//!
+//! # Static element rendering
+//!
+//! - **[`crate::layout_store::LayoutItem::PluginSlot`]** — rendered via the Bun
+//!   sidecar using a Liquid template.
+//! - **[`crate::layout_store::LayoutItem::StaticText`]** — HTML snippet sent to
+//!   the sidecar; PNG blitted onto frame.
+//! - **[`crate::layout_store::LayoutItem::StaticDivider`]** — drawn directly as a
+//!   black rectangle; no sidecar round-trip needed.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -17,8 +26,9 @@ use image::{GrayImage, ImageEncoder};
 use thiserror::Error;
 use tokio::task;
 
-use crate::config::{DisplayConfigEntry, DisplaySlotEntry};
+use crate::config::DisplayConfigEntry;
 use crate::instance_store::InstanceStore;
+use crate::layout_store::LayoutItem;
 use crate::template::{NowContext, RenderContext, TemplateEngine};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -83,119 +93,90 @@ impl LayoutVariant {
     }
 }
 
-/// A single compositing slot: binds a plugin instance to a position in the
-/// 800×480 frame and selects a template variant for rendering.
+/// Internal render descriptor for a plugin slot.
+///
+/// Passed to [`render_slot`]; carries only the fields needed to select a
+/// template and call the sidecar.  Geometry is accessed directly from the
+/// originating [`LayoutItem`] during compositing.
 #[derive(Debug, Clone)]
-pub struct LayoutSlot {
+struct LayoutSlot {
     /// ID of the plugin instance to render (must exist in [`InstanceStore`]).
     pub plugin_instance_id: String,
-    /// X offset in the final 800×480 frame.
-    pub x: u32,
-    /// Y offset in the final 800×480 frame.
-    pub y: u32,
-    /// Width of this slot in the frame (pixels copied from slot PNG).
-    pub width: u32,
-    /// Height of this slot in the frame (pixels copied from slot PNG).
-    pub height: u32,
     /// Template variant — controls template selection and sidecar render size.
     pub layout_variant: LayoutVariant,
 }
 
-impl LayoutSlot {
-    /// Build from a TOML config entry.  Missing `x`/`y` default to 0;
-    /// missing `width`/`height` default to the variant's canonical dimensions.
-    /// Returns `None` if the variant string is not recognised.
-    pub fn from_config(entry: &DisplaySlotEntry) -> Option<Self> {
-        let variant = LayoutVariant::from_str(&entry.variant)?;
-        let (default_w, default_h) = variant.canonical_dimensions();
-        Some(LayoutSlot {
-            plugin_instance_id: entry.plugin.clone(),
-            x: entry.x.unwrap_or(0),
-            y: entry.y.unwrap_or(0),
-            width: entry.width.unwrap_or(default_w),
-            height: entry.height.unwrap_or(default_h),
-            layout_variant: variant,
-        })
-    }
-}
-
-/// A named display configuration: an ordered list of [`LayoutSlot`]s to
+/// A named display configuration: an ordered list of [`LayoutItem`]s to
 /// render and composite into the 800×480 frame.
+///
+/// Items are ordered by `z_index` (lowest first = rendered first = furthest back).
 #[derive(Debug, Clone)]
 pub struct DisplayConfiguration {
     /// Unique name (e.g. `"default"`, `"trip-planner"`).
     pub name: String,
-    /// Slots rendered in order; later slots are composited on top.
-    pub slots: Vec<LayoutSlot>,
+    /// Items rendered back-to-front (lowest z_index first).
+    pub items: Vec<LayoutItem>,
 }
 
 impl DisplayConfiguration {
     /// Build from a TOML config entry.
+    ///
+    /// Each slot entry is converted to a [`LayoutItem::PluginSlot`] with a
+    /// synthetic `id` and `z_index` derived from the entry's position.
+    /// Returns an error if any slot's variant string is not recognised.
     pub fn from_config(entry: &DisplayConfigEntry) -> Result<Self, CompositorError> {
-        let slots = entry
+        let items = entry
             .slots
             .iter()
-            .map(|s| {
-                LayoutSlot::from_config(s).ok_or_else(|| CompositorError::InvalidVariant {
-                    variant: s.variant.clone(),
+            .enumerate()
+            .map(|(i, s)| {
+                let variant = LayoutVariant::from_str(&s.variant).ok_or_else(|| {
+                    CompositorError::InvalidVariant { variant: s.variant.clone() }
+                })?;
+                let (default_w, default_h) = variant.canonical_dimensions();
+                Ok(LayoutItem::PluginSlot {
+                    id: format!("{}-{}", s.plugin, i),
+                    z_index: i as i32,
+                    x: s.x.unwrap_or(0) as i32,
+                    y: s.y.unwrap_or(0) as i32,
+                    width: s.width.unwrap_or(default_w) as i32,
+                    height: s.height.unwrap_or(default_h) as i32,
+                    plugin_instance_id: s.plugin.clone(),
+                    layout_variant: s.variant.clone(),
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(DisplayConfiguration {
-            name: entry.name.clone(),
-            slots,
-        })
+            .collect::<Result<Vec<_>, CompositorError>>()?;
+        Ok(DisplayConfiguration { name: entry.name.clone(), items })
     }
 
     /// Build from a [`crate::layout_store::LayoutConfig`].
     ///
-    /// Only [`crate::layout_store::LayoutItem::PluginSlot`] variants are
-    /// converted to [`LayoutSlot`]s; static elements are silently skipped
-    /// (they will be rendered directly once the Admin UI pipeline is complete).
+    /// All item types (`PluginSlot`, `StaticText`, `StaticDivider`) are included.
+    /// Items arrive pre-sorted by `z_index` from the store.
     ///
-    /// Items with an unrecognised `layout_variant` are also skipped with a
-    /// warning to prevent a single bad row from dropping the whole layout.
+    /// [`LayoutItem::PluginSlot`] entries with an unrecognised `layout_variant`
+    /// are skipped with a warning to prevent a single bad row from dropping the
+    /// whole layout.
     pub fn from_layout_config(layout: &crate::layout_store::LayoutConfig) -> Self {
-        use crate::layout_store::LayoutItem;
-        let slots = layout
+        let items = layout
             .items
             .iter()
-            .filter_map(|item| match item {
-                LayoutItem::PluginSlot {
-                    plugin_instance_id,
-                    x,
-                    y,
-                    width,
-                    height,
-                    layout_variant,
-                    ..
-                } => {
-                    let variant = match LayoutVariant::from_str(layout_variant) {
-                        Some(v) => v,
-                        None => {
-                            log::warn!(
-                                "layout '{}': unknown variant '{}' for slot '{}', skipping",
-                                layout.id,
-                                layout_variant,
-                                plugin_instance_id
-                            );
-                            return None;
-                        }
-                    };
-                    Some(LayoutSlot {
-                        plugin_instance_id: plugin_instance_id.clone(),
-                        x: (*x).max(0) as u32,
-                        y: (*y).max(0) as u32,
-                        width: (*width).max(0) as u32,
-                        height: (*height).max(0) as u32,
-                        layout_variant: variant,
-                    })
+            .filter_map(|item| {
+                if let LayoutItem::PluginSlot { layout_variant, plugin_instance_id, .. } = item {
+                    if LayoutVariant::from_str(layout_variant).is_none() {
+                        log::warn!(
+                            "layout '{}': unknown variant '{}' for slot '{}', skipping",
+                            layout.id,
+                            layout_variant,
+                            plugin_instance_id
+                        );
+                        return None;
+                    }
                 }
-                // StaticText and StaticDivider are not yet rendered by the compositor.
-                _ => None,
+                Some(item.clone())
             })
             .collect();
-        DisplayConfiguration { name: layout.name.clone(), slots }
+        DisplayConfiguration { name: layout.name.clone(), items }
     }
 }
 
@@ -255,37 +236,88 @@ impl Compositor {
         }
     }
 
-    /// Render all slots in `config` concurrently, then composite them into a
-    /// final 800×480 PNG.
+    /// Render all items in `config` and composite them into a final 800×480 PNG.
     ///
-    /// Each slot is rendered in a separate Tokio task.  All tasks are joined
-    /// before compositing begins.
+    /// - `PluginSlot` and `StaticText` items are rendered concurrently via the
+    ///   Bun sidecar (async HTTP).
+    /// - `StaticDivider` items are drawn directly as black rectangles (no I/O).
+    ///
+    /// All rendered items are composited in `z_index` order (lowest first).
     pub async fn compose(
         &self,
         config: &DisplayConfiguration,
     ) -> Result<Vec<u8>, CompositorError> {
-        // Spawn one task per slot — concurrent renders.
-        let handles: Vec<_> = config
-            .slots
-            .iter()
-            .map(|slot| {
-                let slot = slot.clone();
-                let engine = Arc::clone(&self.template_engine);
-                let store = Arc::clone(&self.instance_store);
-                let url = self.sidecar_url.clone();
-                task::spawn(async move { render_slot(slot, engine, store, url).await })
-            })
-            .collect();
+        // For each item, we either spawn an async render task or handle it inline.
+        // task_for_item[i] = Some(handle_index) if item i has an async task, else None.
+        let mut task_for_item: Vec<Option<usize>> = Vec::with_capacity(config.items.len());
+        let mut handles: Vec<task::JoinHandle<Result<Vec<u8>, CompositorError>>> = Vec::new();
 
-        // Join all tasks and collect (slot, png) pairs in original order.
-        let mut rendered: Vec<(LayoutSlot, Vec<u8>)> =
-            Vec::with_capacity(config.slots.len());
-        for (handle, slot) in handles.into_iter().zip(config.slots.iter()) {
-            let png = handle.await??;
-            rendered.push((slot.clone(), png));
+        for item in &config.items {
+            let maybe_task = match item {
+                LayoutItem::PluginSlot {
+                    plugin_instance_id,
+                    layout_variant,
+                    ..
+                } => match LayoutVariant::from_str(layout_variant) {
+                    None => {
+                        // Filtered by from_layout_config; warn and skip if somehow reached.
+                        log::warn!(
+                            "compose: unknown variant '{}' for '{}', skipping",
+                            layout_variant,
+                            plugin_instance_id
+                        );
+                        None
+                    }
+                    Some(variant) => {
+                        let slot = LayoutSlot {
+                            plugin_instance_id: plugin_instance_id.clone(),
+                            layout_variant: variant,
+                        };
+                        let engine = Arc::clone(&self.template_engine);
+                        let store = Arc::clone(&self.instance_store);
+                        let url = self.sidecar_url.clone();
+                        let idx = handles.len();
+                        handles.push(task::spawn(async move {
+                            render_slot(slot, engine, store, url).await
+                        }));
+                        Some(idx)
+                    }
+                },
+                LayoutItem::StaticText {
+                    id,
+                    width,
+                    height,
+                    text_content,
+                    font_size,
+                    ..
+                } => {
+                    let text = text_content.clone();
+                    let w = (*width).max(0) as u32;
+                    let h = (*height).max(0) as u32;
+                    let fs = *font_size;
+                    let url = self.sidecar_url.clone();
+                    let iid = id.clone();
+                    let idx = handles.len();
+                    handles.push(task::spawn(async move {
+                        render_static_text(&text, fs, w, h, &url, &iid).await
+                    }));
+                    Some(idx)
+                }
+                LayoutItem::StaticDivider { .. } => {
+                    // Drawn directly — no async task needed.
+                    None
+                }
+            };
+            task_for_item.push(maybe_task);
         }
 
-        composite_to_png(rendered)
+        // Join all async tasks in order.
+        let mut png_results: Vec<Vec<u8>> = Vec::with_capacity(handles.len());
+        for handle in handles {
+            png_results.push(handle.await??);
+        }
+
+        composite_to_png(&config.items, &task_for_item, &png_results)
     }
 }
 
@@ -352,6 +384,41 @@ fn json_object_to_map(
     }
 }
 
+// ─── Static text render ──────────────────────────────────────────────────────
+
+/// Render a static text element via the sidecar.
+///
+/// Generates a minimal self-contained HTML snippet and POSTs it to
+/// `{sidecar_url}/render` at the item's pixel dimensions.
+async fn render_static_text(
+    text: &str,
+    font_size: i32,
+    width: u32,
+    height: u32,
+    sidecar_url: &str,
+    item_id: &str,
+) -> Result<Vec<u8>, CompositorError> {
+    let safe = html_escape(text);
+    let html = format!(
+        "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
+         justify-content:center;font-family:sans-serif;font-size:{fs}px;\
+         color:#000;background:white;'>{text}</div>",
+        w = width,
+        h = height,
+        fs = font_size,
+        text = safe,
+    );
+    call_sidecar(sidecar_url, html, width, height, item_id).await
+}
+
+/// Escape `&`, `<`, `>`, and `"` for safe HTML embedding.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 // ─── Sidecar HTTP call ────────────────────────────────────────────────────────
 
 /// POST `{base_url}/render` with `{html, width, height, mode: "device"}`.
@@ -398,12 +465,20 @@ async fn call_sidecar(
 
 // ─── PNG compositing ─────────────────────────────────────────────────────────
 
-/// Composite rendered slot PNGs into a final 800×480 grayscale PNG.
+/// Composite all layout items into a final 800×480 grayscale PNG.
 ///
-/// Slots are blitted in order; later slots overwrite earlier ones at
-/// overlapping pixels.  The frame is initialised to white (255).
+/// Items are processed in the order they appear in `items` (z_index order,
+/// lowest first).  For each item:
+/// - `PluginSlot` / `StaticText`: decoded PNG from `png_results[task_for_item[i]]`
+///   is blitted at the item's (x, y) position.
+/// - `StaticDivider`: a solid black rectangle is drawn at (x, y, width, height).
+///
+/// Items whose `task_for_item` entry is `None` (skipped during rendering) are
+/// omitted silently.
 fn composite_to_png(
-    slot_pngs: Vec<(LayoutSlot, Vec<u8>)>,
+    items: &[LayoutItem],
+    task_for_item: &[Option<usize>],
+    png_results: &[Vec<u8>],
 ) -> Result<Vec<u8>, CompositorError> {
     // Allocate white frame.
     let pixels = vec![255u8; (FRAME_WIDTH * FRAME_HEIGHT) as usize];
@@ -411,23 +486,42 @@ fn composite_to_png(
         GrayImage::from_raw(FRAME_WIDTH, FRAME_HEIGHT, pixels)
             .expect("buffer size matches dimensions");
 
-    for (slot, png_bytes) in slot_pngs {
-        let slot_img = image::load_from_memory(&png_bytes)
-            .map_err(|_| CompositorError::InvalidPng {
-                slot: slot.plugin_instance_id.clone(),
-            })?
-            .to_luma8();
-
-        let copy_w = slot.width.min(slot_img.width());
-        let copy_h = slot.height.min(slot_img.height());
-
-        for py in 0..copy_h {
-            for px in 0..copy_w {
-                let dst_x = slot.x + px;
-                let dst_y = slot.y + py;
-                if dst_x < FRAME_WIDTH && dst_y < FRAME_HEIGHT {
-                    frame.put_pixel(dst_x, dst_y, *slot_img.get_pixel(px, py));
+    for (item, maybe_task) in items.iter().zip(task_for_item.iter()) {
+        match item {
+            LayoutItem::PluginSlot { x, y, width, height, plugin_instance_id, .. } => {
+                if let Some(idx) = maybe_task {
+                    blit_png(
+                        &mut frame,
+                        &png_results[*idx],
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                        plugin_instance_id,
+                    )?;
                 }
+            }
+            LayoutItem::StaticText { x, y, width, height, id, .. } => {
+                if let Some(idx) = maybe_task {
+                    blit_png(
+                        &mut frame,
+                        &png_results[*idx],
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                        id,
+                    )?;
+                }
+            }
+            LayoutItem::StaticDivider { x, y, width, height, .. } => {
+                draw_divider(
+                    &mut frame,
+                    (*x).max(0) as u32,
+                    (*y).max(0) as u32,
+                    (*width).max(0) as u32,
+                    (*height).max(0) as u32,
+                );
             }
         }
     }
@@ -446,11 +540,60 @@ fn composite_to_png(
     Ok(png_bytes)
 }
 
+/// Decode `png_bytes` and copy up to `(width × height)` pixels onto `frame`
+/// at offset `(x, y)`.
+fn blit_png(
+    frame: &mut GrayImage,
+    png_bytes: &[u8],
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    item_id: &str,
+) -> Result<(), CompositorError> {
+    let src = image::load_from_memory(png_bytes)
+        .map_err(|_| CompositorError::InvalidPng { slot: item_id.to_string() })?
+        .to_luma8();
+
+    let copy_w = width.min(src.width());
+    let copy_h = height.min(src.height());
+
+    for py in 0..copy_h {
+        for px in 0..copy_w {
+            let dst_x = x + px;
+            let dst_y = y + py;
+            if dst_x < FRAME_WIDTH && dst_y < FRAME_HEIGHT {
+                frame.put_pixel(dst_x, dst_y, *src.get_pixel(px, py));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fill a rectangle on `frame` with black (pixel value 0).
+///
+/// Used to render [`LayoutItem::StaticDivider`] without a sidecar round-trip.
+fn draw_divider(frame: &mut GrayImage, x: u32, y: u32, width: u32, height: u32) {
+    for py in 0..height {
+        for px in 0..width {
+            let dst_x = x + px;
+            let dst_y = y + py;
+            if dst_x < FRAME_WIDTH && dst_y < FRAME_HEIGHT {
+                frame.put_pixel(dst_x, dst_y, image::Luma([0u8]));
+            }
+        }
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DisplaySlotEntry;
+    use crate::layout_store::LayoutItem;
+
+    // ── LayoutVariant ─────────────────────────────────────────────────────────
 
     #[test]
     fn layout_variant_from_str_roundtrip() {
@@ -474,70 +617,170 @@ mod tests {
         assert_eq!(LayoutVariant::Quadrant.canonical_dimensions(), (400, 240));
     }
 
+    // ── DisplayConfiguration::from_config ────────────────────────────────────
+
     #[test]
-    fn layout_slot_from_config_defaults() {
-        let entry = DisplaySlotEntry {
-            plugin: "river".to_string(),
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            variant: "quadrant".to_string(),
+    fn display_config_from_config_defaults() {
+        let entry = crate::config::DisplayConfigEntry {
+            name: "test".to_string(),
+            slots: vec![DisplaySlotEntry {
+                plugin: "river".to_string(),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                variant: "quadrant".to_string(),
+            }],
         };
-        let slot = LayoutSlot::from_config(&entry).unwrap();
-        assert_eq!(slot.x, 0);
-        assert_eq!(slot.y, 0);
-        assert_eq!(slot.width, 400);
-        assert_eq!(slot.height, 240);
-        assert_eq!(slot.layout_variant, LayoutVariant::Quadrant);
+        let cfg = DisplayConfiguration::from_config(&entry).unwrap();
+        assert_eq!(cfg.items.len(), 1);
+        if let LayoutItem::PluginSlot { x, y, width, height, plugin_instance_id, layout_variant, .. } =
+            &cfg.items[0]
+        {
+            assert_eq!(*x, 0);
+            assert_eq!(*y, 0);
+            assert_eq!(*width, 400);
+            assert_eq!(*height, 240);
+            assert_eq!(plugin_instance_id, "river");
+            assert_eq!(layout_variant, "quadrant");
+        } else {
+            panic!("expected PluginSlot");
+        }
     }
 
     #[test]
-    fn layout_slot_from_config_explicit() {
-        let entry = DisplaySlotEntry {
-            plugin: "weather".to_string(),
-            x: Some(0),
-            y: Some(0),
-            width: Some(800),
-            height: Some(240),
-            variant: "half_horizontal".to_string(),
+    fn display_config_from_config_explicit() {
+        let entry = crate::config::DisplayConfigEntry {
+            name: "test".to_string(),
+            slots: vec![DisplaySlotEntry {
+                plugin: "weather".to_string(),
+                x: Some(0),
+                y: Some(0),
+                width: Some(800),
+                height: Some(240),
+                variant: "half_horizontal".to_string(),
+            }],
         };
-        let slot = LayoutSlot::from_config(&entry).unwrap();
-        assert_eq!(slot.width, 800);
-        assert_eq!(slot.height, 240);
-        assert_eq!(slot.layout_variant, LayoutVariant::HalfHorizontal);
+        let cfg = DisplayConfiguration::from_config(&entry).unwrap();
+        if let LayoutItem::PluginSlot { width, height, .. } = &cfg.items[0] {
+            assert_eq!(*width, 800);
+            assert_eq!(*height, 240);
+        } else {
+            panic!("expected PluginSlot");
+        }
     }
 
     #[test]
-    fn layout_slot_from_config_invalid_variant() {
-        let entry = DisplaySlotEntry {
-            plugin: "foo".to_string(),
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            variant: "not_a_variant".to_string(),
+    fn display_config_from_config_invalid_variant() {
+        let entry = crate::config::DisplayConfigEntry {
+            name: "test".to_string(),
+            slots: vec![DisplaySlotEntry {
+                plugin: "foo".to_string(),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                variant: "not_a_variant".to_string(),
+            }],
         };
-        assert!(LayoutSlot::from_config(&entry).is_none());
+        assert!(DisplayConfiguration::from_config(&entry).is_err());
     }
+
+    // ── DisplayConfiguration::from_layout_config ──────────────────────────────
+
+    #[test]
+    fn from_layout_config_includes_all_item_types() {
+        let layout = crate::layout_store::LayoutConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            items: vec![
+                LayoutItem::PluginSlot {
+                    id: "s0".to_string(),
+                    z_index: 0,
+                    x: 0, y: 0, width: 400, height: 240,
+                    plugin_instance_id: "river".to_string(),
+                    layout_variant: "quadrant".to_string(),
+                },
+                LayoutItem::StaticText {
+                    id: "t0".to_string(),
+                    z_index: 1,
+                    x: 10, y: 10, width: 200, height: 50,
+                    text_content: "Hello".to_string(),
+                    font_size: 24,
+                    orientation: None,
+                },
+                LayoutItem::StaticDivider {
+                    id: "d0".to_string(),
+                    z_index: 2,
+                    x: 0, y: 240, width: 800, height: 2,
+                    orientation: Some("horizontal".to_string()),
+                },
+            ],
+        };
+        let cfg = DisplayConfiguration::from_layout_config(&layout);
+        assert_eq!(cfg.items.len(), 3);
+        assert!(matches!(&cfg.items[0], LayoutItem::PluginSlot { .. }));
+        assert!(matches!(&cfg.items[1], LayoutItem::StaticText { .. }));
+        assert!(matches!(&cfg.items[2], LayoutItem::StaticDivider { .. }));
+    }
+
+    #[test]
+    fn from_layout_config_skips_plugin_slot_with_unknown_variant() {
+        let layout = crate::layout_store::LayoutConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            items: vec![
+                LayoutItem::PluginSlot {
+                    id: "s0".to_string(),
+                    z_index: 0,
+                    x: 0, y: 0, width: 400, height: 240,
+                    plugin_instance_id: "river".to_string(),
+                    layout_variant: "bogus_variant".to_string(),
+                },
+                LayoutItem::StaticDivider {
+                    id: "d0".to_string(),
+                    z_index: 1,
+                    x: 0, y: 240, width: 800, height: 2,
+                    orientation: None,
+                },
+            ],
+        };
+        let cfg = DisplayConfiguration::from_layout_config(&layout);
+        // Bad PluginSlot skipped; StaticDivider kept
+        assert_eq!(cfg.items.len(), 1);
+        assert!(matches!(&cfg.items[0], LayoutItem::StaticDivider { .. }));
+    }
+
+    // ── html_escape ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn html_escape_encodes_special_chars() {
+        assert_eq!(html_escape("<b>Me & \"you\"</b>"), "&lt;b&gt;Me &amp; &quot;you&quot;&lt;/b&gt;");
+    }
+
+    #[test]
+    fn html_escape_passthrough_plain() {
+        assert_eq!(html_escape("Hello World"), "Hello World");
+    }
+
+    // ── composite_to_png ─────────────────────────────────────────────────────
 
     #[test]
     fn composite_to_png_white_frame() {
-        // No slots → pure white 800×480 frame.
-        let png = composite_to_png(vec![]).unwrap();
+        // No items → pure white 800×480 frame.
+        let png = composite_to_png(&[], &[], &[]).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(img.width(), FRAME_WIDTH);
         assert_eq!(img.height(), FRAME_HEIGHT);
-        // All pixels should be white (255).
         for pixel in img.to_luma8().pixels() {
             assert_eq!(pixel.0[0], 255);
         }
     }
 
     #[test]
-    fn composite_to_png_single_slot_placed_correctly() {
-        // Create a small solid black PNG and composite it at (100, 50).
+    fn composite_to_png_plugin_slot_placed_correctly() {
+        // Create a small solid black PNG and composite it via a PluginSlot item.
         let slot_w = 10u32;
         let slot_h = 8u32;
         let black_pixels = vec![0u8; (slot_w * slot_h) as usize];
@@ -547,22 +790,134 @@ mod tests {
         ImageEncoder::write_image(enc, slot_img.as_raw(), slot_w, slot_h, image::ColorType::L8)
             .unwrap();
 
-        let slot = LayoutSlot {
+        let item = LayoutItem::PluginSlot {
+            id: "s0".to_string(),
+            z_index: 0,
+            x: 100, y: 50,
+            width: slot_w as i32, height: slot_h as i32,
             plugin_instance_id: "test".to_string(),
-            x: 100,
-            y: 50,
-            width: slot_w,
-            height: slot_h,
-            layout_variant: LayoutVariant::Quadrant,
+            layout_variant: "quadrant".to_string(),
         };
-        let png = composite_to_png(vec![(slot, slot_png)]).unwrap();
+
+        let task_for_item = vec![Some(0usize)];
+        let png_results = vec![slot_png];
+
+        let png = composite_to_png(&[item], &task_for_item, &png_results).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
-        // Pixel inside slot should be black.
         assert_eq!(frame.get_pixel(100, 50).0[0], 0);
         assert_eq!(frame.get_pixel(105, 54).0[0], 0);
-        // Pixel outside slot should be white.
         assert_eq!(frame.get_pixel(99, 50).0[0], 255);
         assert_eq!(frame.get_pixel(110, 58).0[0], 255);
+    }
+
+    #[test]
+    fn composite_to_png_static_divider_draws_black_rect() {
+        let item = LayoutItem::StaticDivider {
+            id: "d0".to_string(),
+            z_index: 0,
+            x: 0, y: 200,
+            width: 800, height: 2,
+            orientation: Some("horizontal".to_string()),
+        };
+
+        let task_for_item = vec![None];
+        let png = composite_to_png(&[item], &task_for_item, &[]).unwrap();
+        let frame = image::load_from_memory(&png).unwrap().to_luma8();
+
+        // Row 200 and 201 should be all black.
+        for x in 0..800u32 {
+            assert_eq!(frame.get_pixel(x, 200).0[0], 0, "pixel ({x}, 200) should be black");
+            assert_eq!(frame.get_pixel(x, 201).0[0], 0, "pixel ({x}, 201) should be black");
+        }
+        // Row 199 should be white.
+        assert_eq!(frame.get_pixel(400, 199).0[0], 255);
+        // Row 202 should be white.
+        assert_eq!(frame.get_pixel(400, 202).0[0], 255);
+    }
+
+    #[test]
+    fn composite_to_png_static_text_placed_correctly() {
+        // A StaticText item backed by a solid grey PNG at (50, 100).
+        let w = 200u32;
+        let h = 40u32;
+        let grey_pixels = vec![128u8; (w * h) as usize];
+        let img = GrayImage::from_raw(w, h, grey_pixels).unwrap();
+        let mut text_png = Vec::new();
+        let enc = image::codecs::png::PngEncoder::new(&mut text_png);
+        ImageEncoder::write_image(enc, img.as_raw(), w, h, image::ColorType::L8).unwrap();
+
+        let item = LayoutItem::StaticText {
+            id: "t0".to_string(),
+            z_index: 0,
+            x: 50, y: 100,
+            width: w as i32, height: h as i32,
+            text_content: "test".to_string(),
+            font_size: 16,
+            orientation: None,
+        };
+
+        let task_for_item = vec![Some(0usize)];
+        let png_results = vec![text_png];
+
+        let png = composite_to_png(&[item], &task_for_item, &png_results).unwrap();
+        let frame = image::load_from_memory(&png).unwrap().to_luma8();
+
+        // Inside the text area should be grey.
+        assert_eq!(frame.get_pixel(50, 100).0[0], 128);
+        assert_eq!(frame.get_pixel(150, 120).0[0], 128);
+        // Outside should be white.
+        assert_eq!(frame.get_pixel(49, 100).0[0], 255);
+    }
+
+    #[test]
+    fn composite_to_png_z_index_ordering_later_overwrites_earlier() {
+        // Two overlapping dividers: z_index 0 is white (255), z_index 1 is black (0).
+        // The second divider should overwrite the first at the overlap region.
+
+        // We use two PluginSlot items with synthetic PNGs instead of dividers
+        // to test z_index compositing.
+        let w = 20u32;
+        let h = 20u32;
+
+        let white_pixels = vec![255u8; (w * h) as usize];
+        let white_img = GrayImage::from_raw(w, h, white_pixels).unwrap();
+        let mut white_png = Vec::new();
+        ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut white_png),
+            white_img.as_raw(), w, h, image::ColorType::L8,
+        ).unwrap();
+
+        let black_pixels = vec![0u8; (w * h) as usize];
+        let black_img = GrayImage::from_raw(w, h, black_pixels).unwrap();
+        let mut black_png = Vec::new();
+        ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut black_png),
+            black_img.as_raw(), w, h, image::ColorType::L8,
+        ).unwrap();
+
+        // White slot at z=0, black slot at z=1, both at (0, 0).
+        let items = vec![
+            LayoutItem::PluginSlot {
+                id: "s0".to_string(), z_index: 0,
+                x: 0, y: 0, width: w as i32, height: h as i32,
+                plugin_instance_id: "white".to_string(),
+                layout_variant: "quadrant".to_string(),
+            },
+            LayoutItem::PluginSlot {
+                id: "s1".to_string(), z_index: 1,
+                x: 0, y: 0, width: w as i32, height: h as i32,
+                plugin_instance_id: "black".to_string(),
+                layout_variant: "quadrant".to_string(),
+            },
+        ];
+        let task_for_item = vec![Some(0usize), Some(1usize)];
+        let png_results = vec![white_png, black_png];
+
+        let png = composite_to_png(&items, &task_for_item, &png_results).unwrap();
+        let frame = image::load_from_memory(&png).unwrap().to_luma8();
+
+        // Black (z=1) overwrote white (z=0).
+        assert_eq!(frame.get_pixel(10, 10).0[0], 0);
     }
 }

@@ -22,9 +22,10 @@ use axum::{
     Router,
 };
 use cascades::{
-    compositor::{Compositor, DisplayConfiguration, LayoutSlot, LayoutVariant},
+    compositor::{Compositor, DisplayConfiguration},
     config::load_display_layouts,
     instance_store::{seed_from_config, InstanceStore},
+    layout_store::LayoutItem,
     template::TemplateEngine,
 };
 use image::{GrayImage, ImageEncoder};
@@ -133,13 +134,15 @@ async fn default_config_composite_returns_800x480_png() {
 
     let config = DisplayConfiguration {
         name: "default".to_string(),
-        slots: vec![LayoutSlot {
-            plugin_instance_id: "river".to_string(),
+        items: vec![LayoutItem::PluginSlot {
+            id: "s0".to_string(),
+            z_index: 0,
             x: 0,
             y: 0,
             width: 800,
             height: 480,
-            layout_variant: LayoutVariant::Full,
+            plugin_instance_id: "river".to_string(),
+            layout_variant: "full".to_string(),
         }],
     };
 
@@ -165,30 +168,27 @@ async fn trip_planner_config_composite_returns_800x480_png() {
 
     let config = DisplayConfiguration {
         name: "trip-planner".to_string(),
-        slots: vec![
-            LayoutSlot {
+        items: vec![
+            LayoutItem::PluginSlot {
+                id: "s0".to_string(),
+                z_index: 0,
+                x: 0, y: 0, width: 800, height: 240,
                 plugin_instance_id: "weather".to_string(),
-                x: 0,
-                y: 0,
-                width: 800,
-                height: 240,
-                layout_variant: LayoutVariant::HalfHorizontal,
+                layout_variant: "half_horizontal".to_string(),
             },
-            LayoutSlot {
+            LayoutItem::PluginSlot {
+                id: "s1".to_string(),
+                z_index: 1,
+                x: 0, y: 240, width: 400, height: 240,
                 plugin_instance_id: "river".to_string(),
-                x: 0,
-                y: 240,
-                width: 400,
-                height: 240,
-                layout_variant: LayoutVariant::Quadrant,
+                layout_variant: "quadrant".to_string(),
             },
-            LayoutSlot {
+            LayoutItem::PluginSlot {
+                id: "s2".to_string(),
+                z_index: 2,
+                x: 400, y: 240, width: 400, height: 240,
                 plugin_instance_id: "ferry".to_string(),
-                x: 400,
-                y: 240,
-                width: 400,
-                height: 240,
-                layout_variant: LayoutVariant::Quadrant,
+                layout_variant: "quadrant".to_string(),
             },
         ],
     };
@@ -265,21 +265,24 @@ async fn compositor_runs_slots_concurrently_and_joins() {
 
     let config = DisplayConfiguration {
         name: "trip-planner".to_string(),
-        slots: vec![
-            LayoutSlot {
-                plugin_instance_id: "weather".to_string(),
+        items: vec![
+            LayoutItem::PluginSlot {
+                id: "s0".to_string(), z_index: 0,
                 x: 0, y: 0, width: 800, height: 240,
-                layout_variant: LayoutVariant::HalfHorizontal,
+                plugin_instance_id: "weather".to_string(),
+                layout_variant: "half_horizontal".to_string(),
             },
-            LayoutSlot {
-                plugin_instance_id: "river".to_string(),
+            LayoutItem::PluginSlot {
+                id: "s1".to_string(), z_index: 1,
                 x: 0, y: 240, width: 400, height: 240,
-                layout_variant: LayoutVariant::Quadrant,
+                plugin_instance_id: "river".to_string(),
+                layout_variant: "quadrant".to_string(),
             },
-            LayoutSlot {
-                plugin_instance_id: "ferry".to_string(),
+            LayoutItem::PluginSlot {
+                id: "s2".to_string(), z_index: 2,
                 x: 400, y: 240, width: 400, height: 240,
-                layout_variant: LayoutVariant::Quadrant,
+                plugin_instance_id: "ferry".to_string(),
+                layout_variant: "quadrant".to_string(),
             },
         ],
     };
@@ -300,11 +303,118 @@ async fn display_configuration_from_config_roundtrip() {
     let layouts = load_display_layouts(Path::new("config/display.toml"))
         .expect("load display.toml");
 
-    // Both configs should parse without error.
+    // Both configs should parse without error; item count equals slot count.
     for entry in &layouts.displays {
         let config = DisplayConfiguration::from_config(entry)
             .unwrap_or_else(|e| panic!("from_config failed for '{}': {}", entry.name, e));
         assert_eq!(config.name, entry.name);
-        assert_eq!(config.slots.len(), entry.slots.len());
+        assert_eq!(config.items.len(), entry.slots.len());
     }
+}
+
+// ─── Acceptance test: static elements rendered correctly ─────────────────────
+
+#[tokio::test]
+async fn static_divider_composited_without_sidecar() {
+    // A layout with only a StaticDivider requires no sidecar call.
+    // The mock sidecar never gets hit, but we don't even need it running.
+    let (store, _dir) = seeded_store();
+    let engine = Arc::new(
+        TemplateEngine::new(Path::new("templates")).expect("load templates"),
+    );
+    // Point at a non-existent port — dividers must NOT hit the sidecar.
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), "http://127.0.0.1:1");
+
+    let config = DisplayConfiguration {
+        name: "divider-only".to_string(),
+        items: vec![LayoutItem::StaticDivider {
+            id: "d0".to_string(),
+            z_index: 0,
+            x: 0, y: 240,
+            width: 800, height: 2,
+            orientation: Some("horizontal".to_string()),
+        }],
+    };
+
+    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    assert_eq!(img.width(), 800);
+    assert_eq!(img.height(), 480);
+    // Divider row should be black.
+    assert_eq!(img.get_pixel(400, 240).0[0], 0, "divider row should be black");
+    assert_eq!(img.get_pixel(400, 241).0[0], 0, "divider row+1 should be black");
+    // Surrounding rows should be white.
+    assert_eq!(img.get_pixel(400, 239).0[0], 255, "row above divider should be white");
+    assert_eq!(img.get_pixel(400, 242).0[0], 255, "row below divider should be white");
+}
+
+#[tokio::test]
+async fn static_text_renders_via_sidecar() {
+    let sidecar_url = start_mock_sidecar().await;
+    let (store, _dir) = seeded_store();
+    let engine = Arc::new(
+        TemplateEngine::new(Path::new("templates")).expect("load templates"),
+    );
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+
+    let config = DisplayConfiguration {
+        name: "text-only".to_string(),
+        items: vec![LayoutItem::StaticText {
+            id: "t0".to_string(),
+            z_index: 0,
+            x: 100, y: 100,
+            width: 200, height: 50,
+            text_content: "Hello".to_string(),
+            font_size: 18,
+            orientation: None,
+        }],
+    };
+
+    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let img = image::load_from_memory(&png).unwrap();
+    assert_eq!(img.width(), 800);
+    assert_eq!(img.height(), 480);
+}
+
+#[tokio::test]
+async fn mixed_layout_plugin_text_divider_composited_correctly() {
+    // Layout: PluginSlot (z=0) + StaticText (z=1) + StaticDivider (z=2).
+    // The divider draws black at y=240..242.  The sidecar returns white PNGs.
+    let sidecar_url = start_mock_sidecar().await;
+    let (store, _dir) = seeded_store();
+    let engine = Arc::new(
+        TemplateEngine::new(Path::new("templates")).expect("load templates"),
+    );
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+
+    let config = DisplayConfiguration {
+        name: "mixed".to_string(),
+        items: vec![
+            LayoutItem::PluginSlot {
+                id: "s0".to_string(), z_index: 0,
+                x: 0, y: 0, width: 800, height: 240,
+                plugin_instance_id: "weather".to_string(),
+                layout_variant: "half_horizontal".to_string(),
+            },
+            LayoutItem::StaticText {
+                id: "t0".to_string(), z_index: 1,
+                x: 10, y: 10, width: 200, height: 40,
+                text_content: "Skagit".to_string(),
+                font_size: 20,
+                orientation: None,
+            },
+            LayoutItem::StaticDivider {
+                id: "d0".to_string(), z_index: 2,
+                x: 0, y: 240, width: 800, height: 2,
+                orientation: Some("horizontal".to_string()),
+            },
+        ],
+    };
+
+    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    assert_eq!(img.width(), 800);
+    assert_eq!(img.height(), 480);
+    // Divider at y=240 should be black.
+    assert_eq!(img.get_pixel(400, 240).0[0], 0, "divider row should be black");
 }
