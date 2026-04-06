@@ -604,7 +604,7 @@ function toCanvas(e) {
 // API helpers
 // ────────────────────────────────────────
 function apiKey() {
-  return document.getElementById('api-key-input').value;
+  return localStorage.getItem('cascades-api-key') || '';
 }
 
 function apiFetch(url, opts) {
@@ -901,9 +901,16 @@ async function loadLayout(id) {
 async function loadPlugins() {
   try {
     const res = await apiFetch('/api/admin/plugins');
-    if (!res.ok) return;
+    if (!res.ok) {
+      document.getElementById('plugin-list').innerHTML =
+        '<p class="no-sel" style="color:red">Failed to load plugins (' + res.status + ') — check API key</p>';
+      return;
+    }
     buildPalette(await res.json());
-  } catch {}
+  } catch (e) {
+    document.getElementById('plugin-list').innerHTML =
+      '<p class="no-sel" style="color:red">Error loading plugins: ' + e.message + '</p>';
+  }
 }
 
 function onLayoutChange(id) { loadLayout(id); }
