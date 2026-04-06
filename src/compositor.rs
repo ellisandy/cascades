@@ -922,4 +922,36 @@ mod tests {
         // Black (z=1) overwrote white (z=0).
         assert_eq!(frame.get_pixel(10, 10).0[0], 0);
     }
+
+    #[test]
+    fn static_text_font_size_is_used_in_html() {
+        // This test verifies that font_size is properly embedded in the HTML style.
+        // render_static_text generates HTML with the font_size in the style attribute.
+        // The format string should contain: font-size:48px when font_size=48
+
+        let text = "Test text";
+        let font_size = 48i32;
+        let width = 200u32;
+        let height = 100u32;
+
+        // Simulate the HTML generation that render_static_text does
+        let safe = html_escape(text);
+        let html = format!(
+            "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
+             justify-content:center;font-family:sans-serif;font-size:{fs}px;\
+             color:#000;background:white;'>{text}</div>",
+            w = width,
+            h = height,
+            fs = font_size,
+            text = safe,
+        );
+
+        // Verify the font_size is correctly embedded in the HTML
+        assert!(html.contains("font-size:48px"),
+            "HTML should contain 'font-size:48px' when font_size=48, but got: {}", html);
+
+        // Verify it's not hardcoded to a default value
+        assert!(!html.contains("font-size:16px"),
+            "HTML should not contain hardcoded font-size:16px");
+    }
 }

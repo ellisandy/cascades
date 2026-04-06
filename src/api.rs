@@ -1527,4 +1527,150 @@ mod tests {
             if text_content == "New"
         ));
     }
+
+    #[tokio::test]
+    async fn put_layout_roundtrips_font_size() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+
+        // PUT a layout with a static_text item with font_size=48
+        let body = serde_json::json!({
+            "name": "FontSizeTest",
+            "items": [
+                {
+                    "id": "item-1",
+                    "item_type": "static_text",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 800, "height": 480,
+                    "text_content": "Test text",
+                    "font_size": 48
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Verify the returned layout has font_size=48, not 16 (the unwrap_or default)
+        let items = resp["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["font_size"], 48, "font_size should roundtrip as 48, not default to 16");
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_returns_200_with_valid_key() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Updated",
+            "items": [
+                {
+                    "id": "item-1",
+                    "item_type": "plugin_slot",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 800, "height": 480,
+                    "plugin_instance_id": "river",
+                    "layout_variant": "full"
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "PUT with valid x-api-key should return 200");
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_returns_401_without_key() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Updated",
+            "items": []
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "PUT without x-api-key should return 401");
+    }
+
+    #[tokio::test]
+    async fn admin_post_preview_returns_png_content_type() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/preview/default")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "POST preview with valid key should return 200");
+
+        let content_type = response.headers().get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "image/png", "preview response should have content-type: image/png");
+    }
+
+    #[tokio::test]
+    async fn admin_list_plugins_requires_auth() {
+        let state = make_test_state();
+        let app = build_router(Arc::clone(&state));
+
+        // Without key
+        let req = Request::builder()
+            .uri("/api/admin/plugins")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "GET /api/admin/plugins without key should return 401");
+    }
+
+    #[tokio::test]
+    async fn admin_list_plugins_returns_200_with_valid_key() {
+        let state = make_test_state();
+        let app = build_router(Arc::clone(&state));
+
+        // With valid key
+        let req = Request::builder()
+            .uri("/api/admin/plugins")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "GET /api/admin/plugins with valid key should return 200");
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = body.as_array().unwrap();
+        assert!(!arr.is_empty(), "should list seeded instances");
+
+        // Verify response structure matches what frontend expects
+        let first = &arr[0];
+        assert!(first["id"].is_string(), "each item should have id field");
+        assert!(first["name"].is_string(), "each item should have name field");
+        assert!(first["supported_variants"].is_array(), "each item should have supported_variants field");
+    }
 }
