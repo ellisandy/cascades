@@ -76,6 +76,70 @@
       white-space: nowrap;
     }
     .grid-label input { cursor: pointer; }
+    .snap-label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: #8b949e;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .snap-label input { cursor: pointer; }
+    .layout-name-editor {
+      display: inline-block;
+      padding: 4px 6px;
+      color: #58a6ff;
+      cursor: pointer;
+      border-radius: 3px;
+      border: 1px solid transparent;
+    }
+    .layout-name-editor:hover {
+      border-color: #58a6ff;
+    }
+    .layout-name-editor.editing {
+      border-color: #58a6ff;
+      padding: 2px 4px;
+    }
+    .layout-name-editor input {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 12px;
+      width: 150px;
+    }
+    .layout-name-editor input:focus {
+      outline: none;
+      border-color: #58a6ff;
+    }
+
+    /* ── Toast Notifications ── */
+    #toast-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: none;
+      z-index: 5000;
+    }
+    .toast {
+      background: #161b22;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-left: 3px solid #1f6feb;
+      padding: 12px 16px;
+      border-radius: 4px;
+      font-size: 12px;
+      pointer-events: auto;
+      animation: slideIn 0.3s ease-out;
+    }
+    .toast.success { border-left-color: #3fb950; }
+    .toast.error { border-left-color: #f85149; }
+    @keyframes slideIn { from { transform: translateX(400px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
     /* ── Main ── */
     #main {
@@ -191,6 +255,7 @@
     }
     .canvas-item:hover { outline: 1px dashed rgba(88,166,255,0.6); }
     .canvas-item.selected { outline: 2px solid #58a6ff !important; }
+    .canvas-item.collision { outline: 2px solid #f85149 !important; background-color: rgba(248, 81, 73, 0.1) !important; }
     .item-label {
       font-size: 11px;
       text-align: center;
@@ -333,13 +398,23 @@
 <!-- ── Toolbar ── -->
 <div id="toolbar">
   <label>Layout:</label>
-  <select id="layout-select" onchange="onLayoutChange(this.value)"></select>
+  <div id="layout-name-editor" class="layout-name-editor" onclick="startEditLayoutName()"></div>
+  <button class="btn" onclick="newLayout()" title="Create new layout">New</button>
+  <button class="btn" onclick="duplicateLayout()" title="Duplicate current layout">Dup</button>
+  <button class="btn btn-danger" onclick="deleteLayout()" title="Delete layout">Del</button>
   <button class="btn btn-primary" onclick="onPreview()">Preview</button>
+  <button class="btn btn-primary" onclick="pushToDevice()" title="Save and push to device">Push</button>
   <button class="btn btn-primary" onclick="onSave()">Save</button>
   <button class="btn" onclick="onReset()">Reset</button>
+  <button class="btn" onclick="undo()" title="Undo (Ctrl+Z)">↶</button>
+  <button class="btn" onclick="redo()" title="Redo (Ctrl+Y)">↷</button>
   <label class="grid-label">
     <input type="checkbox" id="grid-toggle" onchange="toggleGrid(this.checked)">
     Grid
+  </label>
+  <label class="snap-label">
+    <input type="checkbox" id="snap-toggle" onchange="toggleSnap(this.checked)">
+    Snap
   </label>
   <div class="toolbar-sep"></div>
   <label>API Key:</label>
@@ -395,6 +470,9 @@
   </div>
 </div>
 
+<!-- ── Toast notifications ── -->
+<div id="toast-container"></div>
+
 <!-- ── Preview overlay ── -->
 <div id="preview-area" class="hidden">
   <div id="preview-box">
@@ -437,6 +515,9 @@ const state = {
   items: [],
   selectedId: null,
   pendingDrop: null,
+  history: [],
+  historyIndex: -1,
+  snapToGrid: false,
 };
 
 let canvasScale = 1;
@@ -455,6 +536,44 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') submitTextModal();
     if (e.key === 'Escape') cancelTextModal();
   });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    // Ctrl+S or Cmd+S = Save
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      onSave();
+    }
+    // Ctrl+Z or Cmd+Z = Undo
+    else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+    }
+    // Ctrl+Y or Cmd+Shift+Z = Redo
+    else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
+      e.preventDefault();
+      redo();
+    }
+    // Delete = Delete selected element
+    else if (e.key === 'Delete' && state.selectedId && !isEditingText()) {
+      e.preventDefault();
+      deleteSelected();
+    }
+    // Escape = Deselect
+    else if (e.key === 'Escape' && state.selectedId) {
+      e.preventDefault();
+      state.selectedId = null;
+      renderCanvas();
+      renderProps();
+    }
+  });
+
+  // Touch support for mobile/tablet
+  const canvas = document.getElementById('canvas');
+  canvas.addEventListener('touchstart', onCanvasTouchStart, false);
+  canvas.addEventListener('touchmove', onCanvasTouchMove, false);
+  canvas.addEventListener('touchend', onCanvasTouchEnd, false);
+
   loadLayouts();
 });
 
@@ -508,6 +627,238 @@ function onApiKeyChange(val) {
 }
 
 // ────────────────────────────────────────
+// Toast notifications
+// ────────────────────────────────────────
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + (type === 'error' ? 'error' : type === 'success' ? 'success' : '');
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = 'slideIn 0.3s ease-out reverse';
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
+}
+
+function isEditingText() {
+  const modal = document.getElementById('text-modal');
+  return !modal.classList.contains('hidden');
+}
+
+// ────────────────────────────────────────
+// History / Undo-Redo
+// ────────────────────────────────────────
+function saveHistory() {
+  // Remove any future history if we're not at the end
+  state.history.splice(state.historyIndex + 1);
+  // Save current state (deep copy)
+  state.history.push(JSON.parse(JSON.stringify(state.items)));
+  // Keep only last 10 states
+  if (state.history.length > 10) state.history.shift();
+  else state.historyIndex++;
+}
+
+function undo() {
+  if (state.historyIndex <= 0) {
+    showToast('Nothing to undo', 'info');
+    return;
+  }
+  state.historyIndex--;
+  state.items = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
+  renderCanvas();
+  renderProps();
+  showToast('Undone', 'success');
+}
+
+function redo() {
+  if (state.historyIndex >= state.history.length - 1) {
+    showToast('Nothing to redo', 'info');
+    return;
+  }
+  state.historyIndex++;
+  state.items = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
+  renderCanvas();
+  renderProps();
+  showToast('Redone', 'success');
+}
+
+// ────────────────────────────────────────
+// Collision detection
+// ────────────────────────────────────────
+function detectCollisions() {
+  const collisions = new Set();
+  for (let i = 0; i < state.items.length; i++) {
+    for (let j = i + 1; j < state.items.length; j++) {
+      const a = state.items[i];
+      const b = state.items[j];
+      // Check if rectangles overlap
+      if (a.x < b.x + b.w && a.x + a.w > b.x &&
+          a.y < b.y + b.h && a.y + a.h > b.y) {
+        collisions.add(a.id);
+        collisions.add(b.id);
+      }
+    }
+  }
+  return collisions;
+}
+
+function updateCollisionIndicators() {
+  const collisions = detectCollisions();
+  state.items.forEach(item => {
+    const el = document.querySelector('#canvas [data-id="' + item.id + '"]');
+    if (el) {
+      el.classList.toggle('collision', collisions.has(item.id));
+    }
+  });
+}
+
+function toggleSnap(on) {
+  state.snapToGrid = on;
+}
+
+// ────────────────────────────────────────
+// Layout management
+// ────────────────────────────────────────
+async function newLayout() {
+  const name = prompt('Layout name:', 'New Layout');
+  if (!name) return;
+  try {
+    const res = await apiFetch('/api/admin/layout', {
+      method: 'POST',
+      body: JSON.stringify({ name: name, items: [] }),
+    });
+    if (!res.ok) {
+      showToast('Failed to create layout', 'error');
+      return;
+    }
+    const layout = await res.json();
+    state.layouts.push(layout);
+    await loadLayout(layout.id);
+    updateLayoutSelector();
+    showToast('Layout created', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function duplicateLayout() {
+  if (!state.currentLayoutId) return;
+  try {
+    const name = prompt('New layout name:', state.currentLayoutName + ' (copy)');
+    if (!name) return;
+    const res = await apiFetch('/api/admin/layout', {
+      method: 'POST',
+      body: JSON.stringify({ name: name, items: itemsToPayload(state.items) }),
+    });
+    if (!res.ok) {
+      showToast('Failed to duplicate layout', 'error');
+      return;
+    }
+    const layout = await res.json();
+    state.layouts.push(layout);
+    updateLayoutSelector();
+    showToast('Layout duplicated', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function deleteLayout() {
+  if (!state.currentLayoutId) return;
+  if (!confirm('Delete this layout? This cannot be undone.')) return;
+  try {
+    const res = await apiFetch('/api/admin/layout/' + encodeURIComponent(state.currentLayoutId), {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      showToast('Failed to delete layout', 'error');
+      return;
+    }
+    state.layouts = state.layouts.filter(l => l.id !== state.currentLayoutId);
+    updateLayoutSelector();
+    if (state.layouts.length) await loadLayout(state.layouts[0].id);
+    showToast('Layout deleted', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+function updateLayoutSelector() {
+  const sel = document.getElementById('layout-select');
+  sel.innerHTML = state.layouts.map(l =>
+    '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>'
+  ).join('');
+  if (state.layouts.length) {
+    sel.value = state.currentLayoutId;
+  }
+  updateLayoutNameEditor();
+}
+
+function updateLayoutNameEditor() {
+  const ed = document.getElementById('layout-name-editor');
+  if (state.currentLayoutName) {
+    ed.textContent = state.currentLayoutName;
+  }
+}
+
+function startEditLayoutName() {
+  const ed = document.getElementById('layout-name-editor');
+  ed.classList.add('editing');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = state.currentLayoutName || '';
+  ed.textContent = '';
+  ed.appendChild(input);
+  input.focus();
+  input.select();
+
+  function finishEdit(save) {
+    ed.classList.remove('editing');
+    if (save && input.value.trim()) {
+      state.currentLayoutName = input.value.trim();
+      onSave();
+    }
+    ed.textContent = state.currentLayoutName || '';
+  }
+
+  input.addEventListener('blur', () => finishEdit(true));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') finishEdit(true);
+    if (e.key === 'Escape') finishEdit(false);
+  });
+}
+
+// ────────────────────────────────────────
+// Push to device
+// ────────────────────────────────────────
+async function pushToDevice() {
+  if (!state.currentLayoutId) return;
+  try {
+    await onSave();
+    showToast('Pushing to device...', 'info');
+    const res = await apiFetch('/api/admin/layout/' + encodeURIComponent(state.currentLayoutId), {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: state.currentLayoutName || state.currentLayoutId,
+        items: itemsToPayload(state.items),
+      }),
+    });
+    if (!res.ok) {
+      showToast('Push failed: ' + res.status, 'error');
+      return;
+    }
+    // Trigger render on device
+    const renderRes = await apiFetch('/api/image/' + encodeURIComponent(state.currentLayoutId), {
+      method: 'GET',
+    });
+    showToast('Pushed to device!', 'success');
+  } catch (e) {
+    showToast('Push error: ' + e.message, 'error');
+  }
+}
+
+// ────────────────────────────────────────
 // Load layouts + plugins
 // ────────────────────────────────────────
 async function loadLayouts() {
@@ -535,6 +886,10 @@ async function loadLayout(id) {
     state.currentLayoutName = layout.name;
     state.items = apiToItems(layout.items || []);
     state.selectedId = null;
+    // Reset history for new layout
+    state.history = [JSON.parse(JSON.stringify(state.items))];
+    state.historyIndex = 0;
+    updateLayoutNameEditor();
     renderCanvas();
     renderProps();
     setStatus('');
@@ -764,16 +1119,25 @@ function onDragMove(e) {
   const c = toCanvas(e);
   const item = findItem(dragCtx.itemId);
   if (!item) return;
-  item.x = clamp(dragCtx.ox + c.x - dragCtx.sx, 0, CANVAS_W - item.w);
-  item.y = clamp(dragCtx.oy + c.y - dragCtx.sy, 0, CANVAS_H - item.h);
+  let x = clamp(dragCtx.ox + c.x - dragCtx.sx, 0, CANVAS_W - item.w);
+  let y = clamp(dragCtx.oy + c.y - dragCtx.sy, 0, CANVAS_H - item.h);
+  // Apply snap-to-grid if enabled
+  if (state.snapToGrid) {
+    x = Math.round(x / 10) * 10;
+    y = Math.round(y / 10) * 10;
+  }
+  item.x = x;
+  item.y = y;
   const el = document.querySelector('#canvas [data-id="' + dragCtx.itemId + '"]');
   if (el) { el.style.left = item.x + 'px'; el.style.top = item.y + 'px'; }
 }
 
 function onDragUp() {
+  saveHistory();
   dragCtx = null;
   document.removeEventListener('mousemove', onDragMove);
   document.removeEventListener('mouseup', onDragUp);
+  updateCollisionIndicators();
   renderProps();
 }
 
@@ -807,9 +1171,11 @@ function onResizeMove(e) {
 }
 
 function onResizeUp() {
+  saveHistory();
   resizeCtx = null;
   document.removeEventListener('mousemove', onResizeMove);
   document.removeEventListener('mouseup', onResizeUp);
+  updateCollisionIndicators();
   renderCanvas();
   renderProps();
 }
@@ -821,6 +1187,67 @@ function selectItem(id) {
 }
 
 // ────────────────────────────────────────
+// Touch events (mobile/tablet support)
+// ────────────────────────────────────────
+let touchCtx = null;
+
+function onCanvasTouchStart(e) {
+  if (e.touches.length !== 1) return;
+  const touch = e.touches[0];
+  const itemEl = document.elementFromPoint(touch.clientX, touch.clientY).closest('.canvas-item');
+  if (!itemEl) {
+    // Touch on empty canvas — deselect
+    state.selectedId = null;
+    renderCanvas();
+    renderProps();
+    return;
+  }
+  const itemId = itemEl.dataset.id;
+  if (!itemId) return;
+  e.preventDefault();
+  selectItem(itemId);
+  const item = findItem(itemId);
+  if (!item) return;
+  const c = toucCanvasCoords(touch);
+  touchCtx = { itemId: itemId, sx: c.x, sy: c.y, ox: item.x, oy: item.y };
+}
+
+function onCanvasTouchMove(e) {
+  if (!touchCtx || e.touches.length !== 1) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  const c = toucCanvasCoords(touch);
+  const item = findItem(touchCtx.itemId);
+  if (!item) return;
+  let x = clamp(touchCtx.ox + c.x - touchCtx.sx, 0, CANVAS_W - item.w);
+  let y = clamp(touchCtx.oy + c.y - touchCtx.sy, 0, CANVAS_H - item.h);
+  if (state.snapToGrid) {
+    x = Math.round(x / 10) * 10;
+    y = Math.round(y / 10) * 10;
+  }
+  item.x = x;
+  item.y = y;
+  const el = document.querySelector('#canvas [data-id="' + touchCtx.itemId + '"]');
+  if (el) { el.style.left = item.x + 'px'; el.style.top = item.y + 'px'; }
+}
+
+function onCanvasTouchEnd(e) {
+  if (!touchCtx) return;
+  saveHistory();
+  touchCtx = null;
+  updateCollisionIndicators();
+  renderProps();
+}
+
+function toucCanvasCoords(touch) {
+  const rect = document.getElementById('canvas').getBoundingClientRect();
+  return {
+    x: Math.round((touch.clientX - rect.left) / canvasScale),
+    y: Math.round((touch.clientY - rect.top) / canvasScale),
+  };
+}
+
+// ────────────────────────────────────────
 // Canvas rendering
 // ────────────────────────────────────────
 function renderCanvas() {
@@ -828,6 +1255,7 @@ function renderCanvas() {
   canvas.innerHTML = '';
   const sorted = state.items.slice().sort(function(a, b) { return a.z_index - b.z_index; });
   sorted.forEach(function(item) { canvas.appendChild(makeEl(item)); });
+  updateCollisionIndicators();
 }
 
 const COLORS = {
@@ -917,8 +1345,10 @@ function renderProps() {
       '<label>z-index</label><input type="number" value="' + item.z_index + '" onchange="updatePropRender(\'z_index\',+this.value)">' +
       typeFields +
     '</div>' +
-    '<div style="margin-top:10px">' +
-      '<button class="btn btn-danger" onclick="deleteSelected()">Delete element</button>' +
+    '<div style="margin-top:10px; display: flex; gap: 8px;">' +
+      '<button class="btn" onclick="bringForward()" title="Bring forward (z-index)">↑ Front</button>' +
+      '<button class="btn" onclick="sendBack()" title="Send back (z-index)">↓ Back</button>' +
+      '<button class="btn btn-danger" onclick="deleteSelected()" style="flex: 1;">Delete</button>' +
     '</div>';
 }
 
@@ -930,13 +1360,36 @@ function updateProp(key, value) {
 function updatePropRender(key, value) {
   const item = findItem(state.selectedId);
   if (!item) return;
+  saveHistory();
   item[key] = value;
+  updateCollisionIndicators();
   renderCanvas();
 }
 
 function deleteSelected() {
+  saveHistory();
   state.items = state.items.filter(function(i) { return i.id !== state.selectedId; });
   state.selectedId = null;
+  updateCollisionIndicators();
+  renderCanvas();
+  renderProps();
+}
+
+function bringForward() {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  saveHistory();
+  const maxZ = Math.max.apply(null, state.items.map(function(i) { return i.z_index; })) || 0;
+  item.z_index = Math.max(item.z_index + 1, maxZ + 1);
+  renderCanvas();
+  renderProps();
+}
+
+function sendBack() {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  saveHistory();
+  item.z_index = Math.max(0, item.z_index - 1);
   renderCanvas();
   renderProps();
 }
@@ -985,6 +1438,7 @@ function nextZ() {
 }
 
 function pushItem(item) {
+  saveHistory();
   state.items.push(item);
   renderCanvas();
 }

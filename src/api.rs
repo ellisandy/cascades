@@ -76,8 +76,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Admin routes — all require X-Api-Key header
         .route("/admin", get(get_admin_ui))
         .route("/api/admin/layouts", get(admin_list_layouts))
+        .route("/api/admin/layout", post(admin_post_layout))
         .route("/api/admin/layout/{id}", get(admin_get_layout))
         .route("/api/admin/layout/{id}", put(admin_put_layout))
+        .route("/api/admin/layout/{id}", delete(admin_delete_layout))
         .route("/api/admin/preview/{id}", post(admin_post_preview))
         .route("/api/admin/plugins", get(admin_list_plugins))
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
@@ -641,6 +643,72 @@ async fn admin_put_layout(
         Ok(Some(saved)) => Json(saved).into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// `POST /api/admin/layout` — create a new layout.
+async fn admin_post_layout(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<LayoutPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Generate a new unique ID (simple timestamp-based)
+    let id = format!("layout-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis());
+
+    let items: Result<Vec<LayoutItem>, String> =
+        payload.items.into_iter().map(|p| p.into_layout_item()).collect();
+
+    let items = match items {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"error": e})).unwrap(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let layout = LayoutConfig { id: id.clone(), name: payload.name, items, updated_at: 0 };
+
+    if let Err(e) = app.layout_store.upsert_layout(&layout) {
+        log::error!("admin_post_layout '{}': {}", id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    match app.layout_store.get_layout(&id) {
+        Ok(Some(saved)) => (StatusCode::CREATED, Json(saved)).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `DELETE /api/admin/layout/{id}` — delete a layout.
+async fn admin_delete_layout(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    if let Err(e) = app.layout_store.delete_layout(&id) {
+        log::error!("admin_delete_layout '{}': {}", id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Invalidate image cache
+    app.image_cache.write().unwrap().remove(&id);
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /api/admin/preview/{id}` — render layout to PNG.
