@@ -553,23 +553,7 @@ async fn get_admin_ui() -> impl IntoResponse {
     )
 }
 
-const ADMIN_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Cascades Admin</title>
-  <style>
-    body{background:#0d1117;color:#c9d1d9;font-family:'Courier New',Courier,monospace;font-size:14px;padding:2rem}
-    h1{color:#58a6ff}
-    p{color:#8b949e}
-  </style>
-</head>
-<body>
-  <h1>Cascades Admin UI</h1>
-  <p>The visual layout editor is coming soon.</p>
-  <p>API endpoints are available at <code>/api/admin/</code>.</p>
-</body>
-</html>"#;
+const ADMIN_HTML: &str = include_str!("../templates/admin.html");
 
 /// `GET /api/admin/layouts` — list all layout summaries.
 async fn admin_list_layouts(

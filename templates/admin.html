@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cascades Admin</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Toolbar ── */
+    #toolbar {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    #toolbar label { color: #8b949e; white-space: nowrap; }
+    #layout-select {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    .btn {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #30363d; }
+    .btn-primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    .btn-primary:hover { background: #388bfd; }
+    .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
+    .btn-danger:hover { background: #f85149; }
+    .toolbar-sep { flex: 1; min-width: 4px; }
+    #api-key-input {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 4px 8px;
+      border-radius: 4px;
+      width: 160px;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    #status-msg { font-size: 12px; min-width: 80px; }
+    .grid-label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: #8b949e;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .grid-label input { cursor: pointer; }
+
+    /* ── Main ── */
+    #main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ── Palette ── */
+    #palette {
+      width: 190px;
+      min-width: 190px;
+      background: #0d1117;
+      border-right: 1px solid #30363d;
+      overflow-y: auto;
+      padding: 8px;
+      flex-shrink: 0;
+    }
+    .palette-section-header {
+      color: #8b949e;
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      padding: 6px 4px 4px;
+      border-bottom: 1px solid #21262d;
+      margin-bottom: 6px;
+    }
+    .palette-item {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+      cursor: grab;
+      user-select: none;
+    }
+    .palette-item:hover { border-color: #58a6ff; }
+    .palette-item:active { cursor: grabbing; }
+    .palette-item-name {
+      font-weight: bold;
+      color: #58a6ff;
+      margin-bottom: 4px;
+      font-size: 12px;
+    }
+    .palette-variants {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+    }
+    .variant-btn {
+      background: #21262d;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      padding: 1px 5px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+    }
+    .variant-btn:hover { color: #c9d1d9; border-color: #58a6ff; }
+
+    /* ── Right area ── */
+    #right {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    /* ── Canvas area ── */
+    #canvas-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #161b22;
+      overflow: hidden;
+      position: relative;
+      min-height: 0;
+    }
+    #canvas-outer {
+      position: relative;
+      flex-shrink: 0;
+    }
+    #canvas {
+      width: 800px;
+      height: 480px;
+      background: #1c2128;
+      position: relative;
+      overflow: hidden;
+      border: 1px solid #30363d;
+      cursor: default;
+      transform-origin: top left;
+    }
+    #canvas.drag-over { border-color: #58a6ff; }
+    #canvas.grid-on {
+      background-image:
+        linear-gradient(rgba(48,54,61,0.6) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(48,54,61,0.6) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+
+    /* ── Canvas items ── */
+    .canvas-item {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: move;
+      user-select: none;
+      overflow: hidden;
+    }
+    .canvas-item:hover { outline: 1px dashed rgba(88,166,255,0.6); }
+    .canvas-item.selected { outline: 2px solid #58a6ff !important; }
+    .item-label {
+      font-size: 11px;
+      text-align: center;
+      padding: 2px 4px;
+      pointer-events: none;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
+      color: rgba(201,209,217,0.9);
+    }
+
+    /* Resize handles */
+    .resize-handle {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      background: #58a6ff;
+      border: 1px solid #0d1117;
+      border-radius: 1px;
+    }
+    .resize-nw { top: -4px; left: -4px; cursor: nw-resize; }
+    .resize-n  { top: -4px; left: calc(50% - 4px); cursor: n-resize; }
+    .resize-ne { top: -4px; right: -4px; cursor: ne-resize; }
+    .resize-e  { top: calc(50% - 4px); right: -4px; cursor: e-resize; }
+    .resize-se { bottom: -4px; right: -4px; cursor: se-resize; }
+    .resize-s  { bottom: -4px; left: calc(50% - 4px); cursor: s-resize; }
+    .resize-sw { bottom: -4px; left: -4px; cursor: sw-resize; }
+    .resize-w  { top: calc(50% - 4px); left: -4px; cursor: w-resize; }
+
+    /* ── Properties panel ── */
+    #properties {
+      height: 210px;
+      min-height: 210px;
+      background: #0d1117;
+      border-top: 1px solid #30363d;
+      padding: 10px 14px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .prop-header {
+      font-weight: bold;
+      color: #58a6ff;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .prop-grid {
+      display: grid;
+      grid-template-columns: 70px 1fr;
+      gap: 4px 8px;
+      align-items: center;
+    }
+    .prop-grid label { color: #8b949e; font-size: 12px; }
+    .prop-grid input,
+    .prop-grid select {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 12px;
+      width: 100%;
+    }
+    .prop-grid input:focus,
+    .prop-grid select:focus { outline: none; border-color: #58a6ff; }
+    .no-sel { color: #8b949e; font-size: 12px; padding: 4px 0; }
+
+    /* ── Preview overlay ── */
+    #preview-area {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    #preview-area.hidden { display: none; }
+    #preview-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 16px;
+      max-width: 90vw;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #preview-img {
+      display: block;
+      max-width: 100%;
+      max-height: calc(90vh - 60px);
+    }
+    #preview-close { display: flex; justify-content: center; }
+
+    /* ── Text modal ── */
+    #text-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1001;
+    }
+    #text-modal.hidden { display: none; }
+    #text-modal-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 20px;
+      width: 320px;
+    }
+    #text-modal-box h3 { margin-bottom: 12px; color: #58a6ff; font-size: 14px; }
+    #text-modal-box label {
+      display: block;
+      color: #8b949e;
+      font-size: 12px;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+    #text-modal-box input {
+      width: 100%;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 6px 8px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    #text-modal-box input:focus { outline: none; border-color: #58a6ff; }
+    .modal-btns { display: flex; gap: 8px; margin-top: 14px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Toolbar ── -->
+<div id="toolbar">
+  <label>Layout:</label>
+  <select id="layout-select" onchange="onLayoutChange(this.value)"></select>
+  <button class="btn btn-primary" onclick="onPreview()">Preview</button>
+  <button class="btn btn-primary" onclick="onSave()">Save</button>
+  <button class="btn" onclick="onReset()">Reset</button>
+  <label class="grid-label">
+    <input type="checkbox" id="grid-toggle" onchange="toggleGrid(this.checked)">
+    Grid
+  </label>
+  <div class="toolbar-sep"></div>
+  <label>API Key:</label>
+  <input type="password" id="api-key-input" placeholder="x-api-key"
+         oninput="onApiKeyChange(this.value)">
+  <span id="status-msg"></span>
+</div>
+
+<!-- ── Main ── -->
+<div id="main">
+
+  <!-- Left palette panel -->
+  <div id="palette">
+    <div class="palette-section-header">PLUGINS</div>
+    <div id="plugin-list"><p class="no-sel">Loading...</p></div>
+    <div class="palette-section-header" style="margin-top:12px">STATIC</div>
+    <div id="static-list">
+      <div class="palette-item"
+           draggable="true"
+           ondragstart="onPaletteDragStart(event, {type:'title'})"
+           onclick="onStaticClick('title')">
+        <div class="palette-item-name">Title</div>
+      </div>
+      <div class="palette-item"
+           draggable="true"
+           ondragstart="onPaletteDragStart(event, {type:'divider'})"
+           onclick="onStaticClick('divider')">
+        <div class="palette-item-name">Divider</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right area -->
+  <div id="right">
+
+    <!-- Canvas area -->
+    <div id="canvas-area">
+      <div id="canvas-outer">
+        <div id="canvas"
+             ondragover="onCanvasDragOver(event)"
+             ondragleave="onCanvasDragLeave(event)"
+             ondrop="onCanvasDrop(event)"
+             onmousedown="onCanvasMouseDown(event)">
+        </div>
+      </div>
+    </div>
+
+    <!-- Properties panel -->
+    <div id="properties">
+      <p class="no-sel">No element selected. Click an element on the canvas.</p>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Preview overlay ── -->
+<div id="preview-area" class="hidden">
+  <div id="preview-box">
+    <img id="preview-img" alt="Layout preview">
+    <div id="preview-close">
+      <button class="btn" onclick="closePreview()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Text modal ── -->
+<div id="text-modal" class="hidden">
+  <div id="text-modal-box">
+    <h3>Add Text Element</h3>
+    <label>Text content</label>
+    <input type="text" id="modal-text" placeholder="Enter text...">
+    <label>Font size (px)</label>
+    <input type="number" id="modal-fontsize" value="24" min="8" max="200">
+    <div class="modal-btns">
+      <button class="btn btn-primary" onclick="submitTextModal()">Add</button>
+      <button class="btn" onclick="cancelTextModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ────────────────────────────────────────
+// Constants
+// ────────────────────────────────────────
+const CANVAS_W = 800;
+const CANVAS_H = 480;
+
+// ────────────────────────────────────────
+// State
+// ────────────────────────────────────────
+const state = {
+  layouts: [],
+  currentLayoutId: null,
+  currentLayoutName: null,
+  items: [],
+  selectedId: null,
+  pendingDrop: null,
+};
+
+let canvasScale = 1;
+let dragCtx = null;
+let resizeCtx = null;
+
+// ────────────────────────────────────────
+// Init
+// ────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('api-key-input').value =
+    localStorage.getItem('cascades-api-key') || '';
+  computeScale();
+  window.addEventListener('resize', () => { computeScale(); });
+  document.getElementById('modal-text').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitTextModal();
+    if (e.key === 'Escape') cancelTextModal();
+  });
+  loadLayouts();
+});
+
+// ────────────────────────────────────────
+// Canvas scaling
+// ────────────────────────────────────────
+function computeScale() {
+  const area = document.getElementById('canvas-area');
+  const pw = area.clientWidth - 40;
+  const ph = area.clientHeight - 40;
+  canvasScale = Math.min(pw / CANVAS_W, ph / CANVAS_H, 1);
+  const canvas = document.getElementById('canvas');
+  canvas.style.transform = `scale(${canvasScale})`;
+  const outer = document.getElementById('canvas-outer');
+  outer.style.width  = Math.round(CANVAS_W * canvasScale) + 'px';
+  outer.style.height = Math.round(CANVAS_H * canvasScale) + 'px';
+}
+
+function toCanvas(e) {
+  const rect = document.getElementById('canvas').getBoundingClientRect();
+  return {
+    x: Math.round((e.clientX - rect.left) / canvasScale),
+    y: Math.round((e.clientY - rect.top)  / canvasScale),
+  };
+}
+
+// ────────────────────────────────────────
+// API helpers
+// ────────────────────────────────────────
+function apiKey() {
+  return document.getElementById('api-key-input').value;
+}
+
+function apiFetch(url, opts) {
+  const o = opts || {};
+  const headers = Object.assign({ 'x-api-key': apiKey(), 'Content-Type': 'application/json' }, o.headers || {});
+  return fetch(url, Object.assign({}, o, { headers }));
+}
+
+let statusTimer = null;
+function setStatus(msg, isError) {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  el.style.color = isError ? '#f85149' : '#56d364';
+  clearTimeout(statusTimer);
+  if (msg) statusTimer = setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+function onApiKeyChange(val) {
+  localStorage.setItem('cascades-api-key', val);
+}
+
+// ────────────────────────────────────────
+// Load layouts + plugins
+// ────────────────────────────────────────
+async function loadLayouts() {
+  try {
+    const res = await apiFetch('/api/admin/layouts');
+    if (!res.ok) { setStatus('Layouts: ' + res.status, true); return; }
+    state.layouts = await res.json();
+    const sel = document.getElementById('layout-select');
+    sel.innerHTML = state.layouts.map(l =>
+      '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>'
+    ).join('');
+    if (state.layouts.length) await loadLayout(state.layouts[0].id);
+    loadPlugins();
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+async function loadLayout(id) {
+  try {
+    const res = await apiFetch('/api/admin/layout/' + encodeURIComponent(id));
+    if (!res.ok) { setStatus('Layout: ' + res.status, true); return; }
+    const layout = await res.json();
+    state.currentLayoutId = layout.id;
+    state.currentLayoutName = layout.name;
+    state.items = apiToItems(layout.items || []);
+    state.selectedId = null;
+    renderCanvas();
+    renderProps();
+    setStatus('');
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+async function loadPlugins() {
+  try {
+    const res = await apiFetch('/api/admin/plugins');
+    if (!res.ok) return;
+    buildPalette(await res.json());
+  } catch {}
+}
+
+function onLayoutChange(id) { loadLayout(id); }
+
+// ────────────────────────────────────────
+// Item conversion
+// ────────────────────────────────────────
+function apiToItems(apiItems) {
+  return apiItems.map(function(item) {
+    return {
+      id:          item.id,
+      type:        item.type,
+      z_index:     item.z_index  != null ? item.z_index : 0,
+      x:           item.x        != null ? item.x       : 0,
+      y:           item.y        != null ? item.y       : 0,
+      w:           item.width    != null ? item.width   : 100,
+      h:           item.height   != null ? item.height  : 100,
+      plugin_id:   item.plugin_instance_id  || '',
+      variant:     item.layout_variant      || 'full',
+      text:        item.text_content        || '',
+      font_size:   item.font_size           || 24,
+      orientation: item.orientation         || 'horizontal',
+    };
+  });
+}
+
+function itemsToPayload(items) {
+  return items.map(function(item) {
+    return {
+      id:                  item.id,
+      item_type:           item.type,
+      z_index:             item.z_index,
+      x:                   item.x,
+      y:                   item.y,
+      width:               item.w,
+      height:              item.h,
+      plugin_instance_id:  item.type === 'plugin_slot'   ? item.plugin_id  : null,
+      layout_variant:      item.type === 'plugin_slot'   ? item.variant    : null,
+      text_content:        item.type === 'static_text'   ? item.text       : null,
+      font_size:           item.type === 'static_text'   ? item.font_size  : null,
+      orientation:         (item.type === 'static_divider' || item.type === 'static_text')
+                             ? item.orientation : null,
+    };
+  });
+}
+
+// ────────────────────────────────────────
+// Toolbar actions
+// ────────────────────────────────────────
+async function onSave() {
+  if (!state.currentLayoutId) return;
+  try {
+    const body = { name: state.currentLayoutName || state.currentLayoutId, items: itemsToPayload(state.items) };
+    const res = await apiFetch('/api/admin/layout/' + encodeURIComponent(state.currentLayoutId), {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+    if (res.ok) setStatus('Saved');
+    else setStatus('Save failed: ' + res.status, true);
+  } catch (e) { setStatus(e.message, true); }
+}
+
+async function onReset() {
+  if (state.currentLayoutId) await loadLayout(state.currentLayoutId);
+}
+
+async function onPreview() {
+  if (!state.currentLayoutId) return;
+  await onSave();
+  try {
+    const res = await apiFetch('/api/admin/preview/' + encodeURIComponent(state.currentLayoutId), { method: 'POST' });
+    if (!res.ok) { setStatus('Preview failed: ' + res.status, true); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const img = document.getElementById('preview-img');
+    if (img.src) URL.revokeObjectURL(img.src);
+    img.src = url;
+    document.getElementById('preview-area').classList.remove('hidden');
+  } catch (e) { setStatus(e.message, true); }
+}
+
+function closePreview() {
+  document.getElementById('preview-area').classList.add('hidden');
+}
+
+function toggleGrid(on) {
+  document.getElementById('canvas').classList.toggle('grid-on', on);
+}
+
+// ────────────────────────────────────────
+// Plugin palette
+// ────────────────────────────────────────
+function buildPalette(plugins) {
+  const ABBREV = { full: 'full', half_horizontal: 'h\u00bd', half_vertical: 'v\u00bd', quadrant: 'q' };
+  document.getElementById('plugin-list').innerHTML = plugins.map(function(p) {
+    const safeName = esc(p.name || p.id);
+    const safeId = esc(p.id);
+    const variants = (p.supported_variants || ['full']).map(function(v) {
+      return '<button class="variant-btn" onclick="event.stopPropagation();quickAdd(\'' +
+        safeId + '\',\'' + v + '\')" title="Add ' + safeId + ' (' + v + ')">' +
+        (ABBREV[v] || v) + '</button>';
+    }).join('');
+    return '<div class="palette-item" draggable="true"' +
+      ' ondragstart="onPaletteDragStart(event,{type:\'plugin\',id:\'' + safeId + '\',variant:\'full\'})">' +
+      '<div class="palette-item-name">' + safeName + '</div>' +
+      '<div class="palette-variants">' + variants + '</div></div>';
+  }).join('');
+}
+
+function quickAdd(pluginId, variant) {
+  const x = Math.max(0, Math.min(CANVAS_W - 200, 20 + state.items.length * 10));
+  const y = Math.max(0, Math.min(CANVAS_H - 150, 20 + state.items.length * 10));
+  pushItem({ id: uid(), type: 'plugin_slot', z_index: nextZ(), x: x, y: y, w: 200, h: 150,
+             plugin_id: pluginId, variant: variant, text: '', font_size: 24, orientation: 'horizontal' });
+  selectItem(state.items[state.items.length - 1].id);
+}
+
+// ────────────────────────────────────────
+// Palette drag events
+// ────────────────────────────────────────
+function onPaletteDragStart(e, data) {
+  e.dataTransfer.setData('application/json', JSON.stringify(data));
+  e.dataTransfer.effectAllowed = 'copy';
+}
+
+function onCanvasDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  document.getElementById('canvas').classList.add('drag-over');
+}
+
+function onCanvasDragLeave() {
+  document.getElementById('canvas').classList.remove('drag-over');
+}
+
+function onCanvasDrop(e) {
+  e.preventDefault();
+  document.getElementById('canvas').classList.remove('drag-over');
+  let data;
+  try { data = JSON.parse(e.dataTransfer.getData('application/json') || 'null'); } catch { return; }
+  if (!data) return;
+  const c = toCanvas(e);
+  if (data.type === 'plugin') {
+    pushItem({ id: uid(), type: 'plugin_slot', z_index: nextZ(), x: c.x, y: c.y, w: 200, h: 150,
+               plugin_id: data.id, variant: data.variant || 'full', text: '', font_size: 24, orientation: 'horizontal' });
+    selectItem(state.items[state.items.length - 1].id);
+  } else if (data.type === 'title') {
+    state.pendingDrop = c;
+    showTextModal();
+  } else if (data.type === 'divider') {
+    pushItem({ id: uid(), type: 'static_divider', z_index: nextZ(), x: 0, y: c.y, w: CANVAS_W, h: 4,
+               plugin_id: '', variant: 'full', text: '', font_size: 24, orientation: 'horizontal' });
+    selectItem(state.items[state.items.length - 1].id);
+  }
+}
+
+function onStaticClick(type) {
+  const cx = Math.floor(CANVAS_W / 2 - 150);
+  const cy = Math.floor(CANVAS_H / 2 - 30);
+  if (type === 'title') {
+    state.pendingDrop = { x: cx, y: cy };
+    showTextModal();
+  } else {
+    pushItem({ id: uid(), type: 'static_divider', z_index: nextZ(), x: 0, y: cy, w: CANVAS_W, h: 4,
+               plugin_id: '', variant: 'full', text: '', font_size: 24, orientation: 'horizontal' });
+    selectItem(state.items[state.items.length - 1].id);
+  }
+}
+
+// ────────────────────────────────────────
+// Canvas mouse events
+// ────────────────────────────────────────
+function onCanvasMouseDown(e) {
+  if (e.target.classList.contains('resize-handle')) {
+    const itemEl = e.target.closest('.canvas-item');
+    const itemId = itemEl && itemEl.dataset.id;
+    const handle = e.target.dataset.handle;
+    if (!itemId || !handle) return;
+    const item = findItem(itemId);
+    if (!item) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const c = toCanvas(e);
+    resizeCtx = { itemId: itemId, handle: handle, sx: c.x, sy: c.y, ox: item.x, oy: item.y, ow: item.w, oh: item.h };
+    document.addEventListener('mousemove', onResizeMove);
+    document.addEventListener('mouseup', onResizeUp);
+    return;
+  }
+
+  const itemEl = e.target.closest && e.target.closest('.canvas-item');
+  if (itemEl) {
+    const itemId = itemEl.dataset.id;
+    if (!itemId) return;
+    e.preventDefault();
+    selectItem(itemId);
+    const item = findItem(itemId);
+    if (!item) return;
+    const c = toCanvas(e);
+    dragCtx = { itemId: itemId, sx: c.x, sy: c.y, ox: item.x, oy: item.y };
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragUp);
+    return;
+  }
+
+  // Click on empty canvas — deselect
+  state.selectedId = null;
+  renderCanvas();
+  renderProps();
+}
+
+function onDragMove(e) {
+  if (!dragCtx) return;
+  const c = toCanvas(e);
+  const item = findItem(dragCtx.itemId);
+  if (!item) return;
+  item.x = clamp(dragCtx.ox + c.x - dragCtx.sx, 0, CANVAS_W - item.w);
+  item.y = clamp(dragCtx.oy + c.y - dragCtx.sy, 0, CANVAS_H - item.h);
+  const el = document.querySelector('#canvas [data-id="' + dragCtx.itemId + '"]');
+  if (el) { el.style.left = item.x + 'px'; el.style.top = item.y + 'px'; }
+}
+
+function onDragUp() {
+  dragCtx = null;
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('mouseup', onDragUp);
+  renderProps();
+}
+
+function onResizeMove(e) {
+  if (!resizeCtx) return;
+  const c = toCanvas(e);
+  const dx = c.x - resizeCtx.sx;
+  const dy = c.y - resizeCtx.sy;
+  const item = findItem(resizeCtx.itemId);
+  if (!item) return;
+  const h = resizeCtx.handle;
+  if (h.indexOf('e') >= 0) { item.w = Math.max(10, resizeCtx.ow + dx); }
+  if (h.indexOf('s') >= 0) { item.h = Math.max(10, resizeCtx.oh + dy); }
+  if (h.indexOf('w') >= 0) {
+    const nw = Math.max(10, resizeCtx.ow - dx);
+    item.x = resizeCtx.ox + resizeCtx.ow - nw;
+    item.w = nw;
+  }
+  if (h.indexOf('n') >= 0) {
+    const nh = Math.max(10, resizeCtx.oh - dy);
+    item.y = resizeCtx.oy + resizeCtx.oh - nh;
+    item.h = nh;
+  }
+  const el = document.querySelector('#canvas [data-id="' + resizeCtx.itemId + '"]');
+  if (el) {
+    el.style.left   = item.x + 'px';
+    el.style.top    = item.y + 'px';
+    el.style.width  = item.w + 'px';
+    el.style.height = item.h + 'px';
+  }
+}
+
+function onResizeUp() {
+  resizeCtx = null;
+  document.removeEventListener('mousemove', onResizeMove);
+  document.removeEventListener('mouseup', onResizeUp);
+  renderCanvas();
+  renderProps();
+}
+
+function selectItem(id) {
+  state.selectedId = id;
+  renderCanvas();
+  renderProps();
+}
+
+// ────────────────────────────────────────
+// Canvas rendering
+// ────────────────────────────────────────
+function renderCanvas() {
+  const canvas = document.getElementById('canvas');
+  canvas.innerHTML = '';
+  const sorted = state.items.slice().sort(function(a, b) { return a.z_index - b.z_index; });
+  sorted.forEach(function(item) { canvas.appendChild(makeEl(item)); });
+}
+
+const COLORS = {
+  plugin_slot:   { bg: 'rgba(31,107,235,0.22)',  border: '#1f6feb' },
+  static_text:   { bg: 'rgba(63,185,80,0.18)',   border: '#3fb950' },
+  static_divider:{ bg: 'rgba(210,153,34,0.22)',  border: '#d29922' },
+};
+
+function makeEl(item) {
+  const el = document.createElement('div');
+  el.className = 'canvas-item' + (item.id === state.selectedId ? ' selected' : '');
+  el.dataset.id = item.id;
+  const col = COLORS[item.type] || { bg: '#21262d', border: '#30363d' };
+  el.style.cssText =
+    'left:' + item.x + 'px;top:' + item.y + 'px;' +
+    'width:' + item.w + 'px;height:' + item.h + 'px;' +
+    'z-index:' + item.z_index + ';' +
+    'background:' + col.bg + ';border:1px solid ' + col.border + ';';
+
+  const label = document.createElement('span');
+  label.className = 'item-label';
+  label.textContent = itemLabel(item);
+  el.appendChild(label);
+
+  if (item.id === state.selectedId) {
+    ['nw','n','ne','e','se','s','sw','w'].forEach(function(h) {
+      const handle = document.createElement('div');
+      handle.className = 'resize-handle resize-' + h;
+      handle.dataset.handle = h;
+      el.appendChild(handle);
+    });
+  }
+  return el;
+}
+
+function itemLabel(item) {
+  if (item.type === 'plugin_slot')    return (item.plugin_id || '?') + ' (' + (item.variant || 'full') + ')';
+  if (item.type === 'static_text')    return item.text || 'Text';
+  if (item.type === 'static_divider') return 'Divider (' + (item.orientation || 'horizontal') + ')';
+  return item.type;
+}
+
+// ────────────────────────────────────────
+// Properties panel
+// ────────────────────────────────────────
+function renderProps() {
+  const panel = document.getElementById('properties');
+  const item = findItem(state.selectedId);
+  if (!item) {
+    panel.innerHTML = '<p class="no-sel">No element selected. Click an element on the canvas.</p>';
+    return;
+  }
+
+  let typeFields = '';
+  if (item.type === 'plugin_slot') {
+    const opts = ['full','half_horizontal','half_vertical','quadrant'].map(function(v) {
+      return '<option value="' + v + '"' + (v === item.variant ? ' selected' : '') + '>' + v + '</option>';
+    }).join('');
+    typeFields =
+      '<label>Variant</label>' +
+      '<select onchange="updateProp(\'variant\',this.value)">' + opts + '</select>' +
+      '<label>Plugin ID</label>' +
+      '<input type="text" value="' + esc(item.plugin_id) + '" oninput="updateProp(\'plugin_id\',this.value)">';
+  } else if (item.type === 'static_text') {
+    typeFields =
+      '<label>Text</label>' +
+      '<input type="text" value="' + esc(item.text) + '" oninput="updateProp(\'text\',this.value)">' +
+      '<label>Font size</label>' +
+      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">';
+  } else if (item.type === 'static_divider') {
+    const opts = ['horizontal','vertical'].map(function(o) {
+      return '<option value="' + o + '"' + ((item.orientation || 'horizontal') === o ? ' selected' : '') + '>' + o + '</option>';
+    }).join('');
+    typeFields =
+      '<label>Orientation</label>' +
+      '<select onchange="updateProp(\'orientation\',this.value)">' + opts + '</select>';
+  }
+
+  const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
+  panel.innerHTML =
+    '<div class="prop-header">Element: ' + esc(label) + '</div>' +
+    '<div class="prop-grid">' +
+      '<label>x</label><input type="number" value="' + item.x + '" onchange="updatePropRender(\'x\',+this.value)">' +
+      '<label>y</label><input type="number" value="' + item.y + '" onchange="updatePropRender(\'y\',+this.value)">' +
+      '<label>w</label><input type="number" value="' + item.w + '" min="1" onchange="updatePropRender(\'w\',+this.value)">' +
+      '<label>h</label><input type="number" value="' + item.h + '" min="1" onchange="updatePropRender(\'h\',+this.value)">' +
+      '<label>z-index</label><input type="number" value="' + item.z_index + '" onchange="updatePropRender(\'z_index\',+this.value)">' +
+      typeFields +
+    '</div>' +
+    '<div style="margin-top:10px">' +
+      '<button class="btn btn-danger" onclick="deleteSelected()">Delete element</button>' +
+    '</div>';
+}
+
+function updateProp(key, value) {
+  const item = findItem(state.selectedId);
+  if (item) item[key] = value;
+}
+
+function updatePropRender(key, value) {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  item[key] = value;
+  renderCanvas();
+}
+
+function deleteSelected() {
+  state.items = state.items.filter(function(i) { return i.id !== state.selectedId; });
+  state.selectedId = null;
+  renderCanvas();
+  renderProps();
+}
+
+// ────────────────────────────────────────
+// Text modal
+// ────────────────────────────────────────
+function showTextModal() {
+  document.getElementById('text-modal').classList.remove('hidden');
+  document.getElementById('modal-text').value = '';
+  document.getElementById('modal-fontsize').value = '24';
+  setTimeout(function() { document.getElementById('modal-text').focus(); }, 0);
+}
+
+function submitTextModal() {
+  const text = document.getElementById('modal-text').value.trim();
+  const fontSize = parseInt(document.getElementById('modal-fontsize').value, 10) || 24;
+  cancelTextModal();
+  if (!text) return;
+  const pos = state.pendingDrop || { x: 10, y: 10 };
+  state.pendingDrop = null;
+  pushItem({
+    id: uid(), type: 'static_text', z_index: nextZ(),
+    x: pos.x, y: pos.y, w: 300, h: Math.max(40, fontSize + 20),
+    plugin_id: '', variant: 'full',
+    text: text, font_size: fontSize, orientation: 'horizontal',
+  });
+  selectItem(state.items[state.items.length - 1].id);
+}
+
+function cancelTextModal() {
+  document.getElementById('text-modal').classList.add('hidden');
+}
+
+// ────────────────────────────────────────
+// Helpers
+// ────────────────────────────────────────
+function uid() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+function nextZ() {
+  if (!state.items.length) return 0;
+  return Math.max.apply(null, state.items.map(function(i) { return i.z_index; })) + 1;
+}
+
+function pushItem(item) {
+  state.items.push(item);
+  renderCanvas();
+}
+
+function findItem(id) {
+  if (!id) return null;
+  for (var i = 0; i < state.items.length; i++) {
+    if (state.items[i].id === id) return state.items[i];
+  }
+  return null;
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+</script>
+</body>
+</html>
