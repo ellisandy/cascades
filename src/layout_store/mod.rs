@@ -354,6 +354,27 @@ impl LayoutStore {
         Ok(())
     }
 
+    /// Delete a layout by ID (and all its items).
+    pub fn delete_layout(&self, id: &str) -> Result<(), LayoutStoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        // Delete all items for this layout
+        tx.execute(
+            "DELETE FROM layout_items WHERE layout_id = ?1",
+            params![id],
+        )?;
+
+        // Delete the layout itself
+        tx.execute(
+            "DELETE FROM display_layouts WHERE id = ?1",
+            params![id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Seed from TOML display config.  No-op if layouts already exist.
     ///
     /// Converts each `[[display]]` entry to a `LayoutConfig` with
