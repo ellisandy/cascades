@@ -27,8 +27,10 @@ use thiserror::Error;
 use tokio::task;
 
 use crate::config::DisplayConfigEntry;
+use crate::format::apply_format;
 use crate::instance_store::InstanceStore;
-use crate::layout_store::LayoutItem;
+use crate::jsonpath::{jsonpath_extract, value_to_string};
+use crate::layout_store::{LayoutItem, LayoutStore};
 use crate::template::{NowContext, RenderContext, TemplateEngine};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -215,6 +217,7 @@ pub enum CompositorError {
 pub struct Compositor {
     template_engine: Arc<TemplateEngine>,
     instance_store: Arc<InstanceStore>,
+    layout_store: Arc<LayoutStore>,
     /// Base URL of the Bun render sidecar, e.g. `"http://localhost:3001"`.
     sidecar_url: String,
 }
@@ -227,11 +230,13 @@ impl Compositor {
     pub fn new(
         template_engine: Arc<TemplateEngine>,
         instance_store: Arc<InstanceStore>,
+        layout_store: Arc<LayoutStore>,
         sidecar_url: impl Into<String>,
     ) -> Self {
         Compositor {
             template_engine,
             instance_store,
+            layout_store,
             sidecar_url: sidecar_url.into(),
         }
     }
@@ -329,13 +334,40 @@ impl Compositor {
                     }));
                     Some(idx)
                 }
+                LayoutItem::DataField {
+                    id,
+                    width,
+                    height,
+                    field_mapping_id,
+                    font_size,
+                    format_string,
+                    label,
+                    ..
+                } => {
+                    let w = (*width).max(0) as u32;
+                    let h = (*height).max(0) as u32;
+                    let fs = *font_size;
+                    let url = self.sidecar_url.clone();
+                    let iid = id.clone();
+                    let mode = render_mode.to_string();
+                    let fmid = field_mapping_id.clone();
+                    let fmt_str = format_string.clone();
+                    let lbl = label.clone();
+                    let layout_store = Arc::clone(&self.layout_store);
+                    let instance_store = Arc::clone(&self.instance_store);
+                    let idx = handles.len();
+                    handles.push(task::spawn(async move {
+                        render_data_field(
+                            &fmid, &fmt_str, lbl.as_deref(), fs, w, h,
+                            &url, &iid, &mode,
+                            layout_store, instance_store,
+                        )
+                        .await
+                    }));
+                    Some(idx)
+                }
                 LayoutItem::StaticDivider { .. } => {
                     // Drawn directly — no async task needed.
-                    None
-                }
-                LayoutItem::DataField { .. } => {
-                    // TODO(cs-dae): Phase 1b will render DataField via sidecar.
-                    // For now, skip — the item occupies space but renders nothing.
                     None
                 }
             };
@@ -481,6 +513,95 @@ async fn render_static_datetime(
     call_sidecar(sidecar_url, html, width, height, item_id, mode).await
 }
 
+// ─── Data field render ──────────────────────────────────────────────────────
+
+/// Render a data field element via the sidecar.
+///
+/// Looks up the field mapping, extracts the value from cached data via JSONPath,
+/// applies the format string, and renders the result as HTML through the sidecar.
+/// Falls back to `[no data]` if the field mapping is missing or JSONPath fails.
+async fn render_data_field(
+    field_mapping_id: &str,
+    format_string: &str,
+    label: Option<&str>,
+    font_size: i32,
+    width: u32,
+    height: u32,
+    sidecar_url: &str,
+    item_id: &str,
+    mode: &str,
+    layout_store: Arc<LayoutStore>,
+    instance_store: Arc<InstanceStore>,
+) -> Result<Vec<u8>, CompositorError> {
+    let fmid = field_mapping_id.to_string();
+    let ls = Arc::clone(&layout_store);
+    let mapping = task::spawn_blocking(move || ls.get_field_mapping(&fmid))
+        .await?
+        .map_err(|e| CompositorError::Sidecar {
+            slot: item_id.to_string(),
+            message: format!("field mapping lookup failed: {e}"),
+        })?;
+
+    let display_text = match mapping {
+        Some(mapping) => {
+            // Look up the cached data from the plugin instance
+            let source_id = mapping.data_source_id.clone();
+            let is = Arc::clone(&instance_store);
+            let instance =
+                task::spawn_blocking(move || is.get_instance(&source_id)).await??;
+
+            match instance {
+                Some(inst) => {
+                    let cached = inst
+                        .cached_data
+                        .unwrap_or(serde_json::Value::Null);
+                    match jsonpath_extract(&cached, &mapping.json_path) {
+                        Ok(val) => {
+                            let raw = value_to_string(val);
+                            apply_format(format_string, &raw)
+                        }
+                        Err(_) => "[no data]".to_string(),
+                    }
+                }
+                None => "[no data]".to_string(),
+            }
+        }
+        None => "[no data]".to_string(),
+    };
+
+    // Build HTML with optional label
+    let safe_value = html_escape(&display_text);
+    let label_font_size = (font_size as f32 * 0.6) as i32;
+    let content = match label {
+        Some(lbl) if !lbl.is_empty() => {
+            let safe_label = html_escape(lbl);
+            format!(
+                "<div style='font-size:{lfs}px;color:#666;margin-bottom:2px;'>{lbl}</div>\
+                 <div style='font-size:{fs}px;'>{val}</div>",
+                lfs = label_font_size,
+                lbl = safe_label,
+                fs = font_size,
+                val = safe_value,
+            )
+        }
+        _ => format!(
+            "<div style='font-size:{fs}px;'>{val}</div>",
+            fs = font_size,
+            val = safe_value,
+        ),
+    };
+
+    let html = format!(
+        "<div style='width:{w}px;height:{h}px;display:flex;flex-direction:column;\
+         align-items:center;justify-content:center;font-family:sans-serif;\
+         color:#000;background:white;'>{content}</div>",
+        w = width,
+        h = height,
+        content = content,
+    );
+    call_sidecar(sidecar_url, html, width, height, item_id, mode).await
+}
+
 /// Escape `&`, `<`, `>`, and `"` for safe HTML embedding.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -602,6 +723,19 @@ fn composite_to_png(
                     )?;
                 }
             }
+            LayoutItem::DataField { x, y, width, height, id, .. } => {
+                if let Some(idx) = maybe_task {
+                    blit_png(
+                        &mut frame,
+                        &png_results[*idx],
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                        id,
+                    )?;
+                }
+            }
             LayoutItem::StaticDivider { x, y, width, height, .. } => {
                 draw_divider(
                     &mut frame,
@@ -610,9 +744,6 @@ fn composite_to_png(
                     (*width).max(0) as u32,
                     (*height).max(0) as u32,
                 );
-            }
-            LayoutItem::DataField { .. } => {
-                // TODO(cs-dae): Phase 1b renders DataField items.
             }
         }
     }

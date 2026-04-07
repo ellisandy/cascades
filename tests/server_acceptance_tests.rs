@@ -1010,6 +1010,7 @@ fn make_api_app(
     let compositor = Arc::new(Compositor::new(
         Arc::clone(&template_engine),
         Arc::clone(&instance_store),
+        Arc::clone(&layout_store),
         "http://localhost:9999", // no sidecar — compositor produces empty-slot PNGs
     ));
 
@@ -1095,6 +1096,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
     let compositor = Arc::new(cascades::compositor::Compositor::new(
         Arc::clone(&template_engine),
         Arc::clone(&instance_store),
+        Arc::clone(&layout_store),
         "http://localhost:9999",
     ));
 

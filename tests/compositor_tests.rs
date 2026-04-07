@@ -25,7 +25,7 @@ use cascades::{
     compositor::{Compositor, DisplayConfiguration},
     config::load_display_layouts,
     instance_store::{seed_from_config, InstanceStore},
-    layout_store::LayoutItem,
+    layout_store::{LayoutItem, LayoutStore},
     template::TemplateEngine,
 };
 use image::{GrayImage, ImageEncoder};
@@ -111,13 +111,14 @@ fn minimal_config() -> cascades::config::Config {
 }
 
 /// Create a temp instance store seeded with the 5 well-known plugin instances.
-fn seeded_store() -> (Arc<InstanceStore>, TempDir) {
+fn seeded_store() -> (Arc<InstanceStore>, Arc<LayoutStore>, TempDir) {
     let dir = TempDir::new().expect("temp dir");
     let db = dir.path().join("test.db");
     let store = InstanceStore::open(&db).expect("open store");
+    let layout_store = LayoutStore::open(&db).expect("open layout store");
     let config = minimal_config();
     seed_from_config(&store, &config).expect("seed store");
-    (Arc::new(store), dir)
+    (Arc::new(store), Arc::new(layout_store), dir)
 }
 
 // ─── Acceptance test: 'default' display config ────────────────────────────────
@@ -125,12 +126,12 @@ fn seeded_store() -> (Arc<InstanceStore>, TempDir) {
 #[tokio::test]
 async fn default_config_composite_returns_800x480_png() {
     let sidecar_url = start_mock_sidecar().await;
-    let (store, _dir) = seeded_store();
+    let (store, layout_store, _dir) = seeded_store();
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
 
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
 
     let config = DisplayConfiguration {
         name: "default".to_string(),
@@ -159,12 +160,12 @@ async fn default_config_composite_returns_800x480_png() {
 #[tokio::test]
 async fn trip_planner_config_composite_returns_800x480_png() {
     let sidecar_url = start_mock_sidecar().await;
-    let (store, _dir) = seeded_store();
+    let (store, layout_store, _dir) = seeded_store();
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
 
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
 
     let config = DisplayConfiguration {
         name: "trip-planner".to_string(),
@@ -256,12 +257,12 @@ async fn compositor_runs_slots_concurrently_and_joins() {
     // The mock sidecar returns white PNGs; the frame stays white everywhere.
     // We only need to verify the compositor doesn't deadlock or drop tasks.
     let sidecar_url = start_mock_sidecar().await;
-    let (store, _dir) = seeded_store();
+    let (store, layout_store, _dir) = seeded_store();
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
 
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
 
     let config = DisplayConfiguration {
         name: "trip-planner".to_string(),
@@ -318,12 +319,12 @@ async fn display_configuration_from_config_roundtrip() {
 async fn static_divider_composited_without_sidecar() {
     // A layout with only a StaticDivider requires no sidecar call.
     // The mock sidecar never gets hit, but we don't even need it running.
-    let (store, _dir) = seeded_store();
+    let (store, layout_store, _dir) = seeded_store();
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
     // Point at a non-existent port — dividers must NOT hit the sidecar.
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), "http://127.0.0.1:1");
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), "http://127.0.0.1:1");
 
     let config = DisplayConfiguration {
         name: "divider-only".to_string(),
@@ -351,11 +352,11 @@ async fn static_divider_composited_without_sidecar() {
 #[tokio::test]
 async fn static_text_renders_via_sidecar() {
     let sidecar_url = start_mock_sidecar().await;
-    let (store, _dir) = seeded_store();
+    let (store, layout_store, _dir) = seeded_store();
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
 
     let config = DisplayConfiguration {
         name: "text-only".to_string(),
@@ -381,11 +382,11 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
     // Layout: PluginSlot (z=0) + StaticText (z=1) + StaticDivider (z=2).
     // The divider draws black at y=240..242.  The sidecar returns white PNGs.
     let sidecar_url = start_mock_sidecar().await;
-    let (store, _dir) = seeded_store();
+    let (store, layout_store, _dir) = seeded_store();
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), &sidecar_url);
+    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
 
     let config = DisplayConfiguration {
         name: "mixed".to_string(),
@@ -417,4 +418,180 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
     assert_eq!(img.height(), 480);
     // Divider at y=240 should be black.
     assert_eq!(img.get_pixel(400, 240).0[0], 0, "divider row should be black");
+}
+
+// ─── DataField integration tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn data_field_renders_extracted_value_via_sidecar() {
+    // Create a field mapping pointing at the "river" plugin instance,
+    // set cached_data with a known JSON, then verify the compositor
+    // renders a DataField item without error.
+    let sidecar_url = start_mock_sidecar().await;
+    let (store, layout_store, _dir) = seeded_store();
+    let engine = Arc::new(
+        TemplateEngine::new(Path::new("templates")).expect("load templates"),
+    );
+
+    // Seed cached_data for the "river" plugin instance
+    store
+        .update_cached_data(
+            "river",
+            &serde_json::json!({
+                "water_level_ft": 11.87,
+                "streamflow_cfs": 8750.0,
+                "site_name": "Skagit River"
+            }),
+            1000,
+        )
+        .expect("update cached data");
+
+    // Create a field mapping for water_level_ft
+    layout_store
+        .create_field_mapping(
+            "fm-water-level",
+            "river",
+            "builtin",
+            "Water Level",
+            "$.water_level_ft",
+        )
+        .expect("create field mapping");
+
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+    );
+
+    let config = DisplayConfiguration {
+        name: "data-field-test".to_string(),
+        items: vec![LayoutItem::DataField {
+            id: "df0".to_string(),
+            z_index: 0,
+            x: 50,
+            y: 50,
+            width: 200,
+            height: 60,
+            field_mapping_id: "fm-water-level".to_string(),
+            font_size: 24,
+            format_string: "{{value}} ft".to_string(),
+            label: None,
+            orientation: None,
+        }],
+    };
+
+    let png = compositor
+        .compose(&config, "einkPreview")
+        .await
+        .expect("compose with DataField should succeed");
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    assert_eq!(img.width(), 800);
+    assert_eq!(img.height(), 480);
+    // The sidecar returns white PNGs, so the DataField region is white (rendered).
+    assert_eq!(img.get_pixel(100, 70).0[0], 255, "data field region should be rendered");
+}
+
+#[tokio::test]
+async fn data_field_missing_mapping_renders_placeholder() {
+    // When the field mapping doesn't exist, the compositor should render
+    // "[no data]" as a placeholder instead of failing.
+    let sidecar_url = start_mock_sidecar().await;
+    let (store, layout_store, _dir) = seeded_store();
+    let engine = Arc::new(
+        TemplateEngine::new(Path::new("templates")).expect("load templates"),
+    );
+
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+    );
+
+    let config = DisplayConfiguration {
+        name: "missing-mapping-test".to_string(),
+        items: vec![LayoutItem::DataField {
+            id: "df-missing".to_string(),
+            z_index: 0,
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 60,
+            field_mapping_id: "nonexistent-mapping".to_string(),
+            font_size: 16,
+            format_string: "{{value}}".to_string(),
+            label: Some("Water Level".to_string()),
+            orientation: None,
+        }],
+    };
+
+    let png = compositor
+        .compose(&config, "einkPreview")
+        .await
+        .expect("compose with missing mapping should not fail");
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    assert_eq!(img.width(), 800);
+    assert_eq!(img.height(), 480);
+}
+
+#[tokio::test]
+async fn data_field_with_label_renders_successfully() {
+    let sidecar_url = start_mock_sidecar().await;
+    let (store, layout_store, _dir) = seeded_store();
+    let engine = Arc::new(
+        TemplateEngine::new(Path::new("templates")).expect("load templates"),
+    );
+
+    store
+        .update_cached_data(
+            "river",
+            &serde_json::json!({
+                "streamflow_cfs": 8750.3
+            }),
+            1000,
+        )
+        .expect("update cached data");
+
+    layout_store
+        .create_field_mapping(
+            "fm-flow",
+            "river",
+            "builtin",
+            "Streamflow",
+            "$.streamflow_cfs",
+        )
+        .expect("create field mapping");
+
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+    );
+
+    let config = DisplayConfiguration {
+        name: "label-test".to_string(),
+        items: vec![LayoutItem::DataField {
+            id: "df-flow".to_string(),
+            z_index: 0,
+            x: 100,
+            y: 200,
+            width: 250,
+            height: 80,
+            field_mapping_id: "fm-flow".to_string(),
+            font_size: 32,
+            format_string: "{{value | round(0) | number_with_delimiter}} cfs".to_string(),
+            label: Some("Streamflow".to_string()),
+            orientation: None,
+        }],
+    };
+
+    let png = compositor
+        .compose(&config, "einkPreview")
+        .await
+        .expect("compose with label should succeed");
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    assert_eq!(img.width(), 800);
+    assert_eq!(img.height(), 480);
 }

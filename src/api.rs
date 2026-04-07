@@ -1278,6 +1278,7 @@ mod tests {
         let compositor = Arc::new(Compositor::new(
             Arc::clone(&template_engine),
             Arc::clone(&instance_store),
+            Arc::clone(&layout_store),
             "http://localhost:3001".to_string(),
         ));
 
@@ -1451,6 +1452,7 @@ mod tests {
         let compositor = Arc::new(Compositor::new(
             Arc::clone(&template_engine),
             Arc::clone(&instance_store),
+            Arc::clone(&layout_store),
             "http://localhost:3001".to_string(),
         ));
 

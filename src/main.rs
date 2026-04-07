@@ -63,6 +63,7 @@ async fn main() {
     let compositor = Arc::new(Compositor::new(
         Arc::clone(&template_engine),
         Arc::clone(&instance_store),
+        Arc::clone(&layout_store),
         sidecar_url.clone(),
     ));
 
