@@ -15,6 +15,8 @@
 //! - `PUT  /api/admin/layout/{id}`                      — replace full layout, returns updated layout
 //! - `POST /api/admin/preview/{id}`                     — render layout to PNG
 //! - `GET  /api/admin/plugins`                          — list plugin instances `[{id, name, supported_variants}]`
+//! - `GET  /api/admin/active-layout`                     — get active layout ID
+//! - `PUT  /api/admin/active-layout`                     — set which layout drives `/image.png`
 //! - `POST /api/admin/layout/{id}/item`                 — add item to layout
 //! - `PUT  /api/admin/layout/{id}/item/{item_id}`       — update single item
 //! - `DELETE /api/admin/layout/{id}/item/{item_id}`     — remove item
@@ -81,6 +83,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/layout/{id}", get(admin_get_layout))
         .route("/api/admin/layout/{id}", put(admin_put_layout))
         .route("/api/admin/layout/{id}", delete(admin_delete_layout))
+        .route("/api/admin/active-layout", get(admin_get_active_layout))
+        .route("/api/admin/active-layout", put(admin_set_active_layout))
         .route("/api/admin/preview/{id}", post(admin_post_preview))
         .route("/api/admin/plugins", get(admin_list_plugins))
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
@@ -260,9 +264,15 @@ nps_api_key       = "your-nps-key"     # trail conditions (National Park Service
 </body>
 </html>"#;
 
-/// `GET /image.png` — legacy endpoint, aliases to the default display.
+/// `GET /image.png` — legacy endpoint, renders the active layout (or "default" fallback).
 async fn serve_image_legacy(State(app): State<Arc<AppState>>) -> impl IntoResponse {
-    match render_for_display(&app, "default").await {
+    let layout_id = app
+        .layout_store
+        .get_active_layout_id()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "default".to_string());
+    match render_for_display(&app, &layout_id).await {
         Some(png) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
         None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -528,6 +538,12 @@ impl ItemPayload {
 struct LayoutPayload {
     name: String,
     items: Vec<ItemPayload>,
+}
+
+/// Body for `PUT /api/admin/active-layout`.
+#[derive(Debug, Deserialize)]
+struct ActiveLayoutPayload {
+    layout_id: String,
 }
 
 /// Summary entry returned by `GET /api/admin/layouts`.
@@ -810,6 +826,55 @@ async fn admin_delete_layout(
     app.image_cache.write().unwrap().remove(&id);
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /api/admin/active-layout` — get the active layout ID.
+async fn admin_get_active_layout(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let active_id = app
+        .layout_store
+        .get_active_layout_id()
+        .ok()
+        .flatten();
+
+    Json(serde_json::json!({ "layout_id": active_id })).into_response()
+}
+
+/// `PUT /api/admin/active-layout` — set which layout drives `/image.png`.
+async fn admin_set_active_layout(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<ActiveLayoutPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Verify the layout exists
+    match app.layout_store.get_layout(&payload.layout_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_set_active_layout: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    if let Err(e) = app.layout_store.set_active_layout_id(&payload.layout_id) {
+        log::error!("admin_set_active_layout: {}", e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Invalidate image cache for the legacy endpoint
+    app.image_cache.write().unwrap().clear();
+
+    Json(serde_json::json!({ "layout_id": payload.layout_id })).into_response()
 }
 
 /// `POST /api/admin/preview/{id}` — render layout to PNG.
@@ -1985,5 +2050,102 @@ mod tests {
                 || clear_str.contains("expires=Thu, 01 Jan 1970"),
             "logout should expire the session cookie, got: {clear_str}"
         );
+    }
+
+    // ── Active layout API tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_get_active_layout_returns_null_when_unset() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/active-layout")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["layout_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn admin_set_active_layout_succeeds() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/active-layout")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"layout_id":"default"}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["layout_id"], "default");
+    }
+
+    #[tokio::test]
+    async fn admin_set_active_layout_rejects_missing_layout() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/active-layout")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"layout_id":"nonexistent"}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_set_active_layout_requires_auth() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/active-layout")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"layout_id":"default"}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_get_active_layout_reflects_set() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+
+        // Set active layout
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/active-layout")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"layout_id":"default"}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Get active layout
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/active-layout")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["layout_id"], "default");
     }
 }

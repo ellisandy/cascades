@@ -55,6 +55,10 @@
     .btn-primary:hover { background: #388bfd; }
     .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
     .btn-danger:hover { background: #f85149; }
+    .active-badge {
+      background: #238636; color: #fff; font-size: 10px; font-weight: bold;
+      padding: 2px 6px; border-radius: 3px; letter-spacing: 0.5px;
+    }
     .toolbar-sep { flex: 1; min-width: 4px; }
     #status-msg { font-size: 12px; min-width: 80px; }
     .grid-label {
@@ -388,13 +392,15 @@
 <!-- ── Toolbar ── -->
 <div id="toolbar">
   <label>Layout:</label>
+  <select id="layout-select" onchange="onLayoutChange(this.value)"></select>
   <div id="layout-name-editor" class="layout-name-editor" onclick="startEditLayoutName()"></div>
+  <span id="active-badge" class="active-badge" style="display:none">ACTIVE</span>
   <button class="btn" onclick="newLayout()" title="Create new layout">New</button>
   <button class="btn" onclick="duplicateLayout()" title="Duplicate current layout">Dup</button>
   <button class="btn btn-danger" onclick="deleteLayout()" title="Delete layout">Del</button>
   <button class="btn btn-primary" onclick="onPreview()">Preview</button>
-  <button class="btn btn-primary" onclick="pushToDevice()" title="Save and push to device">Push</button>
   <button class="btn btn-primary" onclick="onSave()">Save</button>
+  <button class="btn btn-primary" id="deploy-btn" onclick="deployLayout()" title="Set as active layout for /image.png">Deploy</button>
   <button class="btn" onclick="onReset()">Reset</button>
   <button class="btn" onclick="undo()" title="Undo (Ctrl+Z)">↶</button>
   <button class="btn" onclick="redo()" title="Redo (Ctrl+Y)">↷</button>
@@ -499,6 +505,7 @@ const state = {
   layouts: [],
   currentLayoutId: null,
   currentLayoutName: null,
+  activeLayoutId: null,
   items: [],
   selectedId: null,
   pendingDrop: null,
@@ -764,12 +771,15 @@ async function deleteLayout() {
 function updateLayoutSelector() {
   const sel = document.getElementById('layout-select');
   sel.innerHTML = state.layouts.map(l =>
-    '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>'
+    '<option value="' + esc(l.id) + '">' +
+      esc(l.name) + (l.id === state.activeLayoutId ? ' \u2713' : '') +
+    '</option>'
   ).join('');
   if (state.layouts.length) {
     sel.value = state.currentLayoutId;
   }
   updateLayoutNameEditor();
+  updateActiveBadge();
 }
 
 function updateLayoutNameEditor() {
@@ -807,31 +817,42 @@ function startEditLayoutName() {
 }
 
 // ────────────────────────────────────────
-// Push to device
+// Deploy (set active layout)
 // ────────────────────────────────────────
-async function pushToDevice() {
+async function deployLayout() {
   if (!state.currentLayoutId) return;
   try {
     await onSave();
-    showToast('Pushing to device...', 'info');
-    const res = await apiFetch('/api/admin/layout/' + encodeURIComponent(state.currentLayoutId), {
+    const res = await apiFetch('/api/admin/active-layout', {
       method: 'PUT',
-      body: JSON.stringify({
-        name: state.currentLayoutName || state.currentLayoutId,
-        items: itemsToPayload(state.items),
-      }),
+      body: JSON.stringify({ layout_id: state.currentLayoutId }),
     });
     if (!res.ok) {
-      showToast('Push failed: ' + res.status, 'error');
+      showToast('Deploy failed: ' + res.status, 'error');
       return;
     }
-    // Trigger render on device
-    const renderRes = await apiFetch('/api/image/' + encodeURIComponent(state.currentLayoutId), {
-      method: 'GET',
-    });
-    showToast('Pushed to device!', 'success');
+    state.activeLayoutId = state.currentLayoutId;
+    updateActiveBadge();
+    updateLayoutSelector();
+    showToast('Layout deployed to display!', 'success');
   } catch (e) {
-    showToast('Push error: ' + e.message, 'error');
+    showToast('Deploy error: ' + e.message, 'error');
+  }
+}
+
+function updateActiveBadge() {
+  const badge = document.getElementById('active-badge');
+  const deployBtn = document.getElementById('deploy-btn');
+  if (state.currentLayoutId && state.currentLayoutId === state.activeLayoutId) {
+    badge.style.display = '';
+    deployBtn.textContent = 'Deployed';
+    deployBtn.classList.remove('btn-primary');
+    deployBtn.classList.add('btn');
+  } else {
+    badge.style.display = 'none';
+    deployBtn.textContent = 'Deploy';
+    deployBtn.classList.remove('btn');
+    deployBtn.classList.add('btn-primary');
   }
 }
 
@@ -840,13 +861,17 @@ async function pushToDevice() {
 // ────────────────────────────────────────
 async function loadLayouts() {
   try {
-    const res = await apiFetch('/api/admin/layouts');
-    if (!res.ok) { setStatus('Layouts: ' + res.status, true); return; }
-    state.layouts = await res.json();
-    const sel = document.getElementById('layout-select');
-    sel.innerHTML = state.layouts.map(l =>
-      '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>'
-    ).join('');
+    const [layoutsRes, activeRes] = await Promise.all([
+      apiFetch('/api/admin/layouts'),
+      apiFetch('/api/admin/active-layout'),
+    ]);
+    if (!layoutsRes.ok) { setStatus('Layouts: ' + layoutsRes.status, true); return; }
+    state.layouts = await layoutsRes.json();
+    if (activeRes.ok) {
+      const activeData = await activeRes.json();
+      state.activeLayoutId = activeData.layout_id || null;
+    }
+    updateLayoutSelector();
     if (state.layouts.length) await loadLayout(state.layouts[0].id);
     loadPlugins();
   } catch (e) {
@@ -866,7 +891,11 @@ async function loadLayout(id) {
     // Reset history for new layout
     state.history = [JSON.parse(JSON.stringify(state.items))];
     state.historyIndex = 0;
+    // Update selector to reflect current layout
+    const sel = document.getElementById('layout-select');
+    if (sel) sel.value = layout.id;
     updateLayoutNameEditor();
+    updateActiveBadge();
     renderCanvas();
     renderProps();
     setStatus('');

@@ -165,6 +165,10 @@ impl LayoutStore {
                 text_content        TEXT,
                 font_size           INTEGER,
                 orientation         TEXT
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
         Ok(())
@@ -372,6 +376,29 @@ impl LayoutStore {
         )?;
 
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Get the active layout ID (the layout served by `GET /image.png`).
+    pub fn get_active_layout_id(&self) -> Result<Option<String>, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT value FROM settings WHERE key = 'active_layout_id'")?;
+        let mut rows = stmt.query([])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Set the active layout ID.
+    pub fn set_active_layout_id(&self, id: &str) -> Result<(), LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('active_layout_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -675,5 +702,26 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, LayoutItem::PluginSlot { plugin_instance_id, .. } if plugin_instance_id == "river"));
+    }
+
+    #[test]
+    fn active_layout_id_defaults_to_none() {
+        let (store, _dir) = open_store();
+        assert!(store.get_active_layout_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_and_get_active_layout_id() {
+        let (store, _dir) = open_store();
+        store.set_active_layout_id("my-layout").unwrap();
+        assert_eq!(store.get_active_layout_id().unwrap().unwrap(), "my-layout");
+    }
+
+    #[test]
+    fn set_active_layout_id_overwrites_previous() {
+        let (store, _dir) = open_store();
+        store.set_active_layout_id("first").unwrap();
+        store.set_active_layout_id("second").unwrap();
+        assert_eq!(store.get_active_layout_id().unwrap().unwrap(), "second");
     }
 }
