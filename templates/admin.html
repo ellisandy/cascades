@@ -385,6 +385,33 @@
       font-size: 13px;
     }
     #text-modal-box input:focus { outline: none; border-color: #58a6ff; }
+    #datafield-modal-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 20px;
+      width: 320px;
+    }
+    #datafield-modal-box h3 { margin-bottom: 12px; color: #58a6ff; font-size: 14px; }
+    #datafield-modal-box label {
+      display: block;
+      color: #8b949e;
+      font-size: 12px;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+    #datafield-modal-box input,
+    #datafield-modal-box select {
+      width: 100%;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 6px 8px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    #datafield-modal-box input:focus { outline: none; border-color: #58a6ff; }
     .modal-btns { display: flex; gap: 8px; margin-top: 14px; }
   </style>
 </head>
@@ -444,6 +471,12 @@
            onclick="onStaticClick('divider')">
         <div class="palette-item-name">Divider</div>
       </div>
+      <div class="palette-item"
+           draggable="true"
+           ondragstart="onPaletteDragStart(event, {type:'data_field'})"
+           onclick="onStaticClick('data_field')">
+        <div class="palette-item-name">Data Field</div>
+      </div>
     </div>
   </div>
 
@@ -494,6 +527,27 @@
     <div class="modal-btns">
       <button class="btn btn-primary" onclick="submitTextModal()">Add</button>
       <button class="btn" onclick="cancelTextModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Data field modal ── -->
+<div id="datafield-modal" class="hidden">
+  <div id="datafield-modal-box">
+    <h3>Add Data Field</h3>
+    <label>Source</label>
+    <select id="df-source"></select>
+    <label>JSONPath</label>
+    <input type="text" id="df-jsonpath" placeholder="$.water_level_ft">
+    <label>Format string</label>
+    <input type="text" id="df-format" placeholder="{{value}} ft">
+    <label>Label (optional)</label>
+    <input type="text" id="df-label" placeholder="Water Level">
+    <label>Font size (px)</label>
+    <input type="number" id="df-fontsize" value="16" min="8" max="200">
+    <div class="modal-btns">
+      <button class="btn btn-primary" onclick="submitDataFieldModal()">Add</button>
+      <button class="btn" onclick="cancelDataFieldModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -934,19 +988,22 @@ function onLayoutChange(id) { loadLayout(id); }
 function apiToItems(apiItems) {
   return apiItems.map(function(item) {
     return {
-      id:          item.id,
-      type:        item.type,
-      z_index:     item.z_index  != null ? item.z_index : 0,
-      x:           item.x        != null ? item.x       : 0,
-      y:           item.y        != null ? item.y       : 0,
-      w:           item.width    != null ? item.width   : 100,
-      h:           item.height   != null ? item.height  : 100,
-      plugin_id:   item.plugin_instance_id  || '',
-      variant:     item.layout_variant      || 'full',
-      text:        item.text_content        || '',
-      font_size:   item.font_size           || 24,
-      format:      item.text_content        || '',
-      orientation: item.orientation         || 'horizontal',
+      id:               item.id,
+      type:             item.type,
+      z_index:          item.z_index  != null ? item.z_index : 0,
+      x:                item.x        != null ? item.x       : 0,
+      y:                item.y        != null ? item.y       : 0,
+      w:                item.width    != null ? item.width   : 100,
+      h:                item.height   != null ? item.height  : 100,
+      plugin_id:        item.plugin_instance_id  || '',
+      variant:          item.layout_variant      || 'full',
+      text:             item.text_content        || '',
+      font_size:        item.font_size           || 24,
+      format:           item.text_content        || '',
+      orientation:      item.orientation         || 'horizontal',
+      field_mapping_id: item.field_mapping_id    || '',
+      format_string:    item.format_string       || '',
+      df_label:         item.label               || '',
     };
   });
 }
@@ -965,10 +1022,13 @@ function itemsToPayload(items) {
       layout_variant:      item.type === 'plugin_slot'   ? item.variant    : null,
       text_content:        item.type === 'static_text'   ? item.text
                            : item.type === 'static_datetime' ? item.format : null,
-      font_size:           (item.type === 'static_text' || item.type === 'static_datetime')
+      font_size:           (item.type === 'static_text' || item.type === 'static_datetime' || item.type === 'data_field')
                              ? item.font_size : null,
-      orientation:         (item.type === 'static_divider' || item.type === 'static_text' || item.type === 'static_datetime')
+      orientation:         (item.type === 'static_divider' || item.type === 'static_text' || item.type === 'static_datetime' || item.type === 'data_field')
                              ? item.orientation : null,
+      field_mapping_id:    item.type === 'data_field' ? item.field_mapping_id : null,
+      format_string:       item.type === 'data_field' ? item.format_string : null,
+      label:               item.type === 'data_field' ? item.df_label : null,
     };
   });
 }
@@ -1084,6 +1144,9 @@ function onCanvasDrop(e) {
     pushItem({ id: uid(), type: 'static_divider', z_index: nextZ(), x: 0, y: c.y, w: CANVAS_W, h: 4,
                plugin_id: '', variant: 'full', text: '', font_size: 24, orientation: 'horizontal' });
     selectItem(state.items[state.items.length - 1].id);
+  } else if (data.type === 'data_field') {
+    state.pendingDrop = c;
+    showDataFieldModal();
   }
 }
 
@@ -1097,10 +1160,13 @@ function onStaticClick(type) {
     pushItem({ id: uid(), type: 'static_datetime', z_index: nextZ(), x: cx, y: cy, w: 200, h: 40,
                plugin_id: '', variant: 'full', text: '', font_size: 16, format: '', orientation: 'horizontal' });
     selectItem(state.items[state.items.length - 1].id);
-  } else {
+  } else if (type === 'divider') {
     pushItem({ id: uid(), type: 'static_divider', z_index: nextZ(), x: 0, y: cy, w: CANVAS_W, h: 4,
                plugin_id: '', variant: 'full', text: '', font_size: 24, orientation: 'horizontal' });
     selectItem(state.items[state.items.length - 1].id);
+  } else if (type === 'data_field') {
+    state.pendingDrop = { x: cx, y: cy };
+    showDataFieldModal();
   }
 }
 
@@ -1294,6 +1360,7 @@ const COLORS = {
   static_text:     { bg: 'rgba(63,185,80,0.18)',   border: '#3fb950' },
   static_datetime: { bg: 'rgba(136,100,232,0.22)', border: '#8864e8' },
   static_divider:  { bg: 'rgba(210,153,34,0.22)',  border: '#d29922' },
+  data_field:      { bg: 'rgba(56,180,210,0.22)',   border: '#38b4d2' },
 };
 
 function makeEl(item) {
@@ -1312,6 +1379,8 @@ function makeEl(item) {
   if (item.type === 'static_text') {
     label.style.fontSize = (item.font_size || 24) + 'px';
   } else if (item.type === 'static_datetime') {
+    label.style.fontSize = (item.font_size || 16) + 'px';
+  } else if (item.type === 'data_field') {
     label.style.fontSize = (item.font_size || 16) + 'px';
   }
   label.textContent = itemLabel(item);
@@ -1333,6 +1402,10 @@ function itemLabel(item) {
   if (item.type === 'static_text')    return (item.text || 'Text') + ' (' + (item.font_size || 24) + 'px)';
   if (item.type === 'static_datetime') return '\u{1F552} DateTime (' + (item.font_size || 16) + 'px)';
   if (item.type === 'static_divider') return 'Divider (' + (item.orientation || 'horizontal') + ')';
+  if (item.type === 'data_field') {
+    var lbl = item.df_label || item.format_string || 'Data Field';
+    return lbl + ' (' + (item.font_size || 16) + 'px)';
+  }
   return item.type;
 }
 
@@ -1376,6 +1449,16 @@ function renderProps() {
     typeFields =
       '<label>Orientation</label>' +
       '<select onchange="updateProp(\'orientation\',this.value)">' + opts + '</select>';
+  } else if (item.type === 'data_field') {
+    typeFields =
+      '<label>Field mapping</label>' +
+      '<input type="text" value="' + esc(item.field_mapping_id) + '" readonly style="opacity:0.6">' +
+      '<label>Format string</label>' +
+      '<input type="text" value="' + esc(item.format_string) + '" oninput="updateProp(\'format_string\',this.value)">' +
+      '<label>Label</label>' +
+      '<input type="text" value="' + esc(item.df_label) + '" oninput="updateProp(\'df_label\',this.value)">' +
+      '<label>Font size</label>' +
+      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">';
   }
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
@@ -1438,6 +1521,84 @@ function sendBack() {
   item.z_index = Math.max(0, item.z_index - 1);
   renderCanvas();
   renderProps();
+}
+
+// ────────────────────────────────────────
+// Data field modal
+// ────────────────────────────────────────
+async function showDataFieldModal() {
+  const modal = document.getElementById('datafield-modal');
+  const sel = document.getElementById('df-source');
+  // Populate source dropdown from plugin instances.
+  try {
+    const res = await apiFetch('/api/admin/plugins');
+    if (res.ok) {
+      const plugins = await res.json();
+      sel.innerHTML = plugins.map(function(p) {
+        return '<option value="' + esc(p.id) + '">' + esc(p.name) + ' (' + esc(p.id) + ')</option>';
+      }).join('');
+    } else {
+      sel.innerHTML = '<option value="">No sources available</option>';
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="">Error loading sources</option>';
+  }
+  document.getElementById('df-jsonpath').value = '';
+  document.getElementById('df-format').value = '';
+  document.getElementById('df-label').value = '';
+  document.getElementById('df-fontsize').value = '16';
+  modal.classList.remove('hidden');
+  setTimeout(function() { document.getElementById('df-jsonpath').focus(); }, 0);
+}
+
+async function submitDataFieldModal() {
+  const sourceId = document.getElementById('df-source').value;
+  const jsonPath = document.getElementById('df-jsonpath').value.trim();
+  const formatStr = document.getElementById('df-format').value.trim();
+  const labelVal = document.getElementById('df-label').value.trim();
+  const fontSize = parseInt(document.getElementById('df-fontsize').value, 10) || 16;
+  cancelDataFieldModal();
+
+  if (!sourceId || !jsonPath) {
+    showToast('Source and JSONPath are required', 'error');
+    return;
+  }
+
+  // Create field mapping via API.
+  var fieldMappingId = '';
+  try {
+    const res = await apiFetch('/api/admin/sources/' + encodeURIComponent(sourceId) + '/fields', {
+      method: 'POST',
+      body: JSON.stringify({ name: labelVal || jsonPath, json_path: jsonPath }),
+    });
+    if (res.ok) {
+      const mapping = await res.json();
+      fieldMappingId = mapping.id;
+    } else {
+      showToast('Failed to create field mapping', 'error');
+      return;
+    }
+  } catch (e) {
+    showToast('Error creating field mapping: ' + e.message, 'error');
+    return;
+  }
+
+  const pos = state.pendingDrop || { x: 10, y: 10 };
+  state.pendingDrop = null;
+  pushItem({
+    id: uid(), type: 'data_field', z_index: nextZ(),
+    x: pos.x, y: pos.y, w: 200, h: Math.max(40, fontSize + 20),
+    plugin_id: '', variant: 'full', text: '', font_size: fontSize,
+    format: '', orientation: 'horizontal',
+    field_mapping_id: fieldMappingId,
+    format_string: formatStr,
+    df_label: labelVal,
+  });
+  selectItem(state.items[state.items.length - 1].id);
+}
+
+function cancelDataFieldModal() {
+  document.getElementById('datafield-modal').classList.add('hidden');
 }
 
 // ────────────────────────────────────────

@@ -108,6 +108,20 @@ pub enum LayoutItem {
         height: i32,
         orientation: Option<String>,
     },
+    /// A data field extracted from a data source via JSONPath.
+    DataField {
+        id: String,
+        z_index: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        field_mapping_id: String,
+        font_size: i32,
+        format_string: String,
+        label: Option<String>,
+        orientation: Option<String>,
+    },
 }
 
 impl LayoutItem {
@@ -117,6 +131,7 @@ impl LayoutItem {
             Self::StaticText { id, .. } => id,
             Self::StaticDateTime { id, .. } => id,
             Self::StaticDivider { id, .. } => id,
+            Self::DataField { id, .. } => id,
         }
     }
 
@@ -126,6 +141,7 @@ impl LayoutItem {
             Self::StaticText { z_index, .. } => *z_index,
             Self::StaticDateTime { z_index, .. } => *z_index,
             Self::StaticDivider { z_index, .. } => *z_index,
+            Self::DataField { z_index, .. } => *z_index,
         }
     }
 }
@@ -184,8 +200,31 @@ impl LayoutStore {
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS data_source_fields (
+                id              TEXT PRIMARY KEY,
+                data_source_id  TEXT NOT NULL,
+                source_type     TEXT NOT NULL DEFAULT 'generic',
+                name            TEXT NOT NULL,
+                json_path       TEXT NOT NULL,
+                created_at      INTEGER NOT NULL
             );",
         )?;
+
+        // Add columns for DataField items (SQLite ignores if already present).
+        for col in &[
+            "ALTER TABLE layout_items ADD COLUMN field_mapping_id TEXT",
+            "ALTER TABLE layout_items ADD COLUMN format_string TEXT",
+            "ALTER TABLE layout_items ADD COLUMN label TEXT",
+        ] {
+            // "duplicate column name" is harmless — the column already exists.
+            match conn.execute_batch(col) {
+                Ok(()) => {}
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         Ok(())
     }
 
@@ -240,7 +279,8 @@ impl LayoutStore {
     ) -> Result<Vec<LayoutItem>, LayoutStoreError> {
         let mut stmt = conn.prepare(
             "SELECT id, item_type, z_index, x, y, width, height,
-                    plugin_instance_id, layout_variant, text_content, font_size, orientation
+                    plugin_instance_id, layout_variant, text_content, font_size, orientation,
+                    field_mapping_id, format_string, label
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -260,13 +300,17 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<i32>>(10)?,
                 row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut items = Vec::with_capacity(rows.len());
         for (item_id, item_type, z_index, x, y, width, height,
-             plugin_instance_id, layout_variant, text_content, font_size, orientation) in rows
+             plugin_instance_id, layout_variant, text_content, font_size, orientation,
+             field_mapping_id, format_string, label) in rows
         {
             let item = match item_type.as_str() {
                 "plugin_slot" => LayoutItem::PluginSlot {
@@ -309,6 +353,19 @@ impl LayoutStore {
                     y,
                     width,
                     height,
+                    orientation,
+                },
+                "data_field" => LayoutItem::DataField {
+                    id: item_id,
+                    z_index,
+                    x,
+                    y,
+                    width,
+                    height,
+                    field_mapping_id: field_mapping_id.unwrap_or_default(),
+                    font_size: font_size.unwrap_or(16),
+                    format_string: format_string.unwrap_or_default(),
+                    label,
                     orientation,
                 },
                 other => {
@@ -389,6 +446,21 @@ impl LayoutStore {
                          (id, layout_id, item_type, z_index, x, y, width, height, orientation)
                          VALUES (?1, ?2, 'static_divider', ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![id, layout.id, z_index, x, y, width, height, orientation],
+                    )?;
+                }
+                LayoutItem::DataField {
+                    id, z_index, x, y, width, height,
+                    field_mapping_id, font_size, format_string, label, orientation,
+                } => {
+                    tx.execute(
+                        "INSERT INTO layout_items
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          field_mapping_id, font_size, format_string, label, orientation)
+                         VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![
+                            id, layout.id, z_index, x, y, width, height,
+                            field_mapping_id, font_size, format_string, label, orientation
+                        ],
                     )?;
                 }
             }
@@ -479,6 +551,108 @@ impl LayoutStore {
         }
 
         Ok(())
+    }
+}
+
+/// A field mapping that extracts a single value from a data source via JSONPath.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldMapping {
+    pub id: String,
+    pub data_source_id: String,
+    pub source_type: String,
+    pub name: String,
+    pub json_path: String,
+    pub created_at: i64,
+}
+
+impl LayoutStore {
+    /// Create a new field mapping.
+    pub fn create_field_mapping(&self, mapping: &FieldMapping) -> Result<(), LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO data_source_fields (id, data_source_id, source_type, name, json_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                mapping.id,
+                mapping.data_source_id,
+                mapping.source_type,
+                mapping.name,
+                mapping.json_path,
+                mapping.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a field mapping by ID.
+    pub fn get_field_mapping(&self, id: &str) -> Result<Option<FieldMapping>, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, data_source_id, source_type, name, json_path, created_at
+             FROM data_source_fields WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(FieldMapping {
+                id: row.get(0)?,
+                data_source_id: row.get(1)?,
+                source_type: row.get(2)?,
+                name: row.get(3)?,
+                json_path: row.get(4)?,
+                created_at: row.get(5)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// List all field mappings for a given data source.
+    pub fn list_field_mappings(
+        &self,
+        data_source_id: &str,
+    ) -> Result<Vec<FieldMapping>, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, data_source_id, source_type, name, json_path, created_at
+             FROM data_source_fields WHERE data_source_id = ?1
+             ORDER BY name",
+        )?;
+        let rows = stmt.query_map(params![data_source_id], |row| {
+            Ok(FieldMapping {
+                id: row.get(0)?,
+                data_source_id: row.get(1)?,
+                source_type: row.get(2)?,
+                name: row.get(3)?,
+                json_path: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Update a field mapping (name and json_path).
+    pub fn update_field_mapping(
+        &self,
+        id: &str,
+        name: &str,
+        json_path: &str,
+    ) -> Result<bool, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE data_source_fields SET name = ?1, json_path = ?2 WHERE id = ?3",
+            params![name, json_path, id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Delete a field mapping by ID.
+    pub fn delete_field_mapping(&self, id: &str) -> Result<bool, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM data_source_fields WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(deleted > 0)
     }
 }
 
@@ -742,6 +916,76 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, LayoutItem::PluginSlot { plugin_instance_id, .. } if plugin_instance_id == "river"));
+    }
+
+    #[test]
+    fn data_field_roundtrip() {
+        let (store, _dir) = open_store();
+        let layout = LayoutConfig {
+            id: "df-test".to_string(),
+            name: "DataField Test".to_string(),
+            items: vec![
+                LayoutItem::DataField {
+                    id: "df-0".to_string(),
+                    z_index: 0,
+                    x: 10, y: 20, width: 200, height: 40,
+                    field_mapping_id: "fm-123".to_string(),
+                    font_size: 24,
+                    format_string: "{{value}} ft".to_string(),
+                    label: Some("Water Level".to_string()),
+                    orientation: None,
+                },
+            ],
+            updated_at: 0,
+        };
+        store.upsert_layout(&layout).unwrap();
+        let got = store.get_layout("df-test").unwrap().unwrap();
+        assert_eq!(got.items.len(), 1);
+        match &got.items[0] {
+            LayoutItem::DataField { field_mapping_id, format_string, label, font_size, .. } => {
+                assert_eq!(field_mapping_id, "fm-123");
+                assert_eq!(format_string, "{{value}} ft");
+                assert_eq!(label.as_deref(), Some("Water Level"));
+                assert_eq!(*font_size, 24);
+            }
+            other => panic!("expected DataField, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn field_mapping_crud() {
+        let (store, _dir) = open_store();
+
+        // Create
+        let mapping = FieldMapping {
+            id: "fm-1".to_string(),
+            data_source_id: "river".to_string(),
+            source_type: "builtin".to_string(),
+            name: "Water Level".to_string(),
+            json_path: "$.water_level_ft".to_string(),
+            created_at: 1000,
+        };
+        store.create_field_mapping(&mapping).unwrap();
+
+        // Get
+        let got = store.get_field_mapping("fm-1").unwrap().unwrap();
+        assert_eq!(got.name, "Water Level");
+        assert_eq!(got.json_path, "$.water_level_ft");
+
+        // List
+        let list = store.list_field_mappings("river").unwrap();
+        assert_eq!(list.len(), 1);
+
+        // Update
+        assert!(store.update_field_mapping("fm-1", "River Level", "$.level").unwrap());
+        let updated = store.get_field_mapping("fm-1").unwrap().unwrap();
+        assert_eq!(updated.name, "River Level");
+        assert_eq!(updated.json_path, "$.level");
+
+        // Delete
+        assert!(store.delete_field_mapping("fm-1").unwrap());
+        assert!(store.get_field_mapping("fm-1").unwrap().is_none());
+        assert!(!store.delete_field_mapping("fm-1").unwrap()); // already deleted
     }
 
     #[test]

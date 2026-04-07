@@ -333,6 +333,11 @@ impl Compositor {
                     // Drawn directly — no async task needed.
                     None
                 }
+                LayoutItem::DataField { .. } => {
+                    // Phase 1b will wire up DataField rendering.
+                    // For now, render nothing (placeholder).
+                    None
+                }
             };
             task_for_item.push(maybe_task);
         }
@@ -605,6 +610,9 @@ fn composite_to_png(
                     (*width).max(0) as u32,
                     (*height).max(0) as u32,
                 );
+            }
+            LayoutItem::DataField { .. } => {
+                // Phase 1b will wire up DataField rendering via sidecar.
             }
         }
     }
