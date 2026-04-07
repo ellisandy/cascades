@@ -56,16 +56,6 @@
     .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
     .btn-danger:hover { background: #f85149; }
     .toolbar-sep { flex: 1; min-width: 4px; }
-    #api-key-input {
-      background: #21262d;
-      color: #c9d1d9;
-      border: 1px solid #30363d;
-      padding: 4px 8px;
-      border-radius: 4px;
-      width: 160px;
-      font-family: inherit;
-      font-size: 12px;
-    }
     #status-msg { font-size: 12px; min-width: 80px; }
     .grid-label {
       display: flex;
@@ -417,9 +407,6 @@
     Snap
   </label>
   <div class="toolbar-sep"></div>
-  <label>API Key:</label>
-  <input type="password" id="api-key-input" placeholder="x-api-key"
-         oninput="onApiKeyChange(this.value)">
   <span id="status-msg"></span>
 </div>
 
@@ -528,8 +515,6 @@ let resizeCtx = null;
 // Init
 // ────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('api-key-input').value =
-    localStorage.getItem('cascades-api-key') || '';
   computeScale();
   window.addEventListener('resize', () => { computeScale(); });
   document.getElementById('modal-text').addEventListener('keydown', e => {
@@ -603,14 +588,10 @@ function toCanvas(e) {
 // ────────────────────────────────────────
 // API helpers
 // ────────────────────────────────────────
-function apiKey() {
-  return localStorage.getItem('cascades-api-key') || '';
-}
-
 function apiFetch(url, opts) {
   const o = opts || {};
-  const headers = Object.assign({ 'x-api-key': apiKey(), 'Content-Type': 'application/json' }, o.headers || {});
-  return fetch(url, Object.assign({}, o, { headers }));
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, o.headers || {});
+  return fetch(url, Object.assign({}, o, { headers, credentials: 'same-origin' }));
 }
 
 let statusTimer = null;
@@ -620,11 +601,6 @@ function setStatus(msg, isError) {
   el.style.color = isError ? '#f85149' : '#56d364';
   clearTimeout(statusTimer);
   if (msg) statusTimer = setTimeout(() => { el.textContent = ''; }, 3000);
-}
-
-function onApiKeyChange(val) {
-  localStorage.setItem('cascades-api-key', val);
-  loadLayouts();
 }
 
 // ────────────────────────────────────────

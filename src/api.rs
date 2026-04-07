@@ -73,8 +73,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/display", get(get_display))
         .route("/api/image/{display_id}", get(get_image))
         .route("/api/status", get(get_status))
-        // Admin routes — all require X-Api-Key header
+        // Admin routes — all require X-Api-Key header or session cookie
         .route("/admin", get(get_admin_ui))
+        .route("/admin/login", post(post_admin_login))
         .route("/api/admin/layouts", get(admin_list_layouts))
         .route("/api/admin/layout", post(admin_post_layout))
         .route("/api/admin/layout/{id}", get(admin_get_layout))
@@ -547,15 +548,115 @@ struct PluginInstanceSummary {
 
 // ─── Admin handlers ───────────────────────────────────────────────────────────
 
-/// `GET /admin` — serve the admin UI HTML.
-async fn get_admin_ui() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        ADMIN_HTML,
-    )
+/// `GET /admin` — serve the admin UI if authenticated (session cookie), else the login page.
+async fn get_admin_ui(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if is_admin_cookie_valid(&headers, &app.api_key) {
+        (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            ADMIN_HTML,
+        )
+            .into_response()
+    } else {
+        (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            ADMIN_LOGIN_HTML,
+        )
+            .into_response()
+    }
+}
+
+/// `POST /admin/login` — validate API key, set session cookie, redirect to admin.
+async fn post_admin_login(
+    State(app): State<Arc<AppState>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    // Parse form body: key=<value> (application/x-www-form-urlencoded)
+    let body_str = String::from_utf8_lossy(&body);
+    let mut submitted_key = String::new();
+    for pair in body_str.split('&') {
+        if let Some(val) = pair.strip_prefix("key=") {
+            // Decode percent-encoding for the key value
+            submitted_key = percent_decode(val);
+        }
+    }
+
+    if submitted_key == app.api_key {
+        Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(header::LOCATION, "/admin")
+            .header(
+                header::SET_COOKIE,
+                format!(
+                    "cascades_admin_key={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+                    submitted_key,
+                ),
+            )
+            .body(Body::empty())
+            .unwrap()
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(ADMIN_LOGIN_HTML.replace(
+                "<!--LOGIN_ERROR-->",
+                r#"<p class="error">Invalid API key.</p>"#,
+            )))
+            .unwrap()
+    }
 }
 
 const ADMIN_HTML: &str = include_str!("../templates/admin.html");
+
+const ADMIN_LOGIN_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cascades Admin — Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d1117; color: #c9d1d9;
+      font-family: 'Courier New', Courier, monospace;
+      display: flex; align-items: center; justify-content: center;
+      height: 100vh;
+    }
+    .login-box {
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      padding: 32px; width: 340px; text-align: center;
+    }
+    .login-box h1 { font-size: 18px; margin-bottom: 8px; color: #e6edf3; }
+    .login-box p.sub { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
+    .login-box input[type="password"] {
+      width: 100%; padding: 8px 10px; margin-bottom: 12px;
+      background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+      color: #c9d1d9; font-family: inherit; font-size: 13px;
+    }
+    .login-box input[type="password"]:focus {
+      outline: none; border-color: #58a6ff;
+    }
+    .login-box button {
+      width: 100%; padding: 8px; background: #238636; border: none;
+      border-radius: 4px; color: #fff; font-family: inherit;
+      font-size: 13px; cursor: pointer;
+    }
+    .login-box button:hover { background: #2ea043; }
+    .error { color: #f85149; font-size: 12px; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <form class="login-box" method="POST" action="/admin/login">
+    <h1>Cascades Admin</h1>
+    <p class="sub">Enter your API key to continue.</p>
+    <!--LOGIN_ERROR-->
+    <input type="password" name="key" placeholder="API Key" autofocus required>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>"#;
 
 /// `GET /api/admin/layouts` — list all layout summaries.
 async fn admin_list_layouts(
@@ -923,11 +1024,59 @@ fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
 }
 
 fn is_admin_authorized(headers: &HeaderMap, api_key: &str) -> bool {
-    headers
+    // Check x-api-key header first (existing API clients)
+    let header_ok = headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
         .map(|v| v == api_key)
+        .unwrap_or(false);
+    if header_ok {
+        return true;
+    }
+    // Fall back to session cookie (browser admin UI)
+    is_admin_cookie_valid(headers, api_key)
+}
+
+/// Check whether the `cascades_admin_key` cookie matches the API key.
+fn is_admin_cookie_valid(headers: &HeaderMap, api_key: &str) -> bool {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix("cascades_admin_key=")
+            })
+        })
+        .map(|v| v == api_key)
         .unwrap_or(false)
+}
+
+/// Minimal percent-decoding for form values (+ → space, %XX → byte).
+fn percent_decode(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let mut bytes = input.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hi = bytes.next().unwrap_or(b'0');
+                let lo = bytes.next().unwrap_or(b'0');
+                let hex = [hi, lo];
+                if let Ok(s) = std::str::from_utf8(&hex) {
+                    if let Ok(val) = u8::from_str_radix(s, 16) {
+                        out.push(val);
+                        continue;
+                    }
+                }
+                out.push(b'%');
+                out.push(hi);
+                out.push(lo);
+            }
+            _ => out.push(b),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn unix_now_secs() -> u64 {
