@@ -1822,4 +1822,168 @@ mod tests {
         assert!(first["name"].is_string(), "each item should have name field");
         assert!(first["supported_variants"].is_array(), "each item should have supported_variants field");
     }
+
+    // ── Admin auth gate tests (cs-0os) ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_page_without_auth_serves_login_page() {
+        let app = build_router(make_test_state());
+        let req = Request::builder().uri("/admin").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response.headers().get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()).unwrap_or("");
+        assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        // Login page should contain a form for entering the API key
+        assert!(
+            body.contains("<form") || body.contains("<input"),
+            "unauthenticated GET /admin should show a login form"
+        );
+        // Should NOT contain the full admin UI (apiFetch is only in the admin app)
+        assert!(
+            !body.contains("apiFetch"),
+            "unauthenticated GET /admin should not expose the full admin UI"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_login_wrong_key_returns_401() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/admin/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("api_key=wrong-key"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "POST /admin/login with wrong key should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_login_correct_key_sets_cookie_and_redirects() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/admin/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("api_key=test-key"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert!(
+            response.status() == StatusCode::SEE_OTHER || response.status() == StatusCode::FOUND,
+            "POST /admin/login with correct key should redirect, got {}",
+            response.status()
+        );
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .expect("login response should set a session cookie");
+        let cookie_str = set_cookie.to_str().unwrap();
+        assert!(!cookie_str.is_empty(), "set-cookie header should not be empty");
+    }
+
+    #[tokio::test]
+    async fn admin_page_with_session_cookie_returns_full_ui() {
+        // Step 1: log in to obtain the session cookie
+        let state = make_test_state();
+        let app = build_router(Arc::clone(&state));
+        let login_req = Request::builder()
+            .method("POST")
+            .uri("/admin/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("api_key=test-key"))
+            .unwrap();
+        let login_resp = app.oneshot(login_req).await.unwrap();
+        let set_cookie = login_resp
+            .headers()
+            .get("set-cookie")
+            .expect("login should set session cookie")
+            .to_str()
+            .unwrap();
+        // Extract the cookie name=value portion (before any attributes like Path, HttpOnly)
+        let cookie_nv = set_cookie.split(';').next().unwrap();
+
+        // Step 2: GET /admin with the session cookie
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/admin")
+            .header("cookie", cookie_nv)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        // Authenticated view should contain the full admin UI
+        assert!(
+            body.contains("apiFetch") || body.contains("id=\"canvas\""),
+            "authenticated GET /admin should return the full admin UI"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_api_accepts_api_key_header_after_auth_gate() {
+        // API endpoints must still accept x-api-key header (backwards compat)
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/layouts")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "API endpoints should still accept x-api-key header"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_logout_clears_session_cookie() {
+        // Step 1: log in to get a session cookie
+        let state = make_test_state();
+        let app = build_router(Arc::clone(&state));
+        let login_req = Request::builder()
+            .method("POST")
+            .uri("/admin/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("api_key=test-key"))
+            .unwrap();
+        let login_resp = app.oneshot(login_req).await.unwrap();
+        let set_cookie = login_resp
+            .headers()
+            .get("set-cookie")
+            .expect("login should set session cookie")
+            .to_str()
+            .unwrap();
+        let cookie_nv = set_cookie.split(';').next().unwrap();
+
+        // Step 2: GET /admin/logout with the session cookie
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/admin/logout")
+            .header("cookie", cookie_nv)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+
+        // Should clear the cookie by setting Max-Age=0 or an expired date
+        let clear_cookie = response
+            .headers()
+            .get("set-cookie")
+            .expect("logout should set a cookie header to clear the session");
+        let clear_str = clear_cookie.to_str().unwrap();
+        assert!(
+            clear_str.contains("Max-Age=0")
+                || clear_str.contains("max-age=0")
+                || clear_str.contains("expires=Thu, 01 Jan 1970"),
+            "logout should expire the session cookie, got: {clear_str}"
+        );
+    }
 }
