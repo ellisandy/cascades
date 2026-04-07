@@ -1261,6 +1261,9 @@ function makeEl(item) {
 
   const label = document.createElement('span');
   label.className = 'item-label';
+  if (item.type === 'static_text') {
+    label.style.fontSize = (item.font_size || 24) + 'px';
+  }
   label.textContent = itemLabel(item);
   el.appendChild(label);
 
