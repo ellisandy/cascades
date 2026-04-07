@@ -146,7 +146,7 @@ async fn default_config_composite_returns_800x480_png() {
         }],
     };
 
-    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let png = compositor.compose(&config, "einkPreview").await.expect("compose should succeed");
 
     assert!(png.starts_with(b"\x89PNG"), "result must be a PNG");
     let img = image::load_from_memory(&png).expect("valid PNG");
@@ -193,7 +193,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
         ],
     };
 
-    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let png = compositor.compose(&config, "einkPreview").await.expect("compose should succeed");
 
     assert!(png.starts_with(b"\x89PNG"), "result must be a PNG");
     let img = image::load_from_memory(&png).expect("valid PNG");
@@ -289,7 +289,7 @@ async fn compositor_runs_slots_concurrently_and_joins() {
 
     // Run twice to catch any single-use resource issues.
     for _ in 0..2 {
-        let png = compositor.compose(&config).await.expect("compose ok");
+        let png = compositor.compose(&config, "einkPreview").await.expect("compose ok");
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(img.width(), 800);
         assert_eq!(img.height(), 480);
@@ -336,7 +336,7 @@ async fn static_divider_composited_without_sidecar() {
         }],
     };
 
-    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let png = compositor.compose(&config, "einkPreview").await.expect("compose should succeed");
     let img = image::load_from_memory(&png).unwrap().to_luma8();
     assert_eq!(img.width(), 800);
     assert_eq!(img.height(), 480);
@@ -370,7 +370,7 @@ async fn static_text_renders_via_sidecar() {
         }],
     };
 
-    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let png = compositor.compose(&config, "einkPreview").await.expect("compose should succeed");
     let img = image::load_from_memory(&png).unwrap();
     assert_eq!(img.width(), 800);
     assert_eq!(img.height(), 480);
@@ -411,7 +411,7 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
         ],
     };
 
-    let png = compositor.compose(&config).await.expect("compose should succeed");
+    let png = compositor.compose(&config, "einkPreview").await.expect("compose should succeed");
     let img = image::load_from_memory(&png).unwrap().to_luma8();
     assert_eq!(img.width(), 800);
     assert_eq!(img.height(), 480);

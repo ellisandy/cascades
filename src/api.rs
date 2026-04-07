@@ -272,7 +272,7 @@ async fn serve_image_legacy(State(app): State<Arc<AppState>>) -> impl IntoRespon
         .ok()
         .flatten()
         .unwrap_or_else(|| "default".to_string());
-    match render_for_display(&app, &layout_id).await {
+    match render_for_display(&app, &layout_id, "einkPreview").await {
         Some(png) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
         None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -315,7 +315,7 @@ async fn post_webhook(
         .collect();
 
     for (display_id, config) in affected {
-        match compose_display(&app, &config).await {
+        match compose_display(&app, &config, "einkPreview").await {
             Some(png) => {
                 app.image_cache.write().unwrap().insert(display_id, png);
             }
@@ -386,7 +386,7 @@ async fn get_image(
         }
     };
     let cfg = DisplayConfiguration::from_layout_config(&layout);
-    match compose_display(&app, &cfg).await {
+    match compose_display(&app, &cfg, "einkPreview").await {
         Some(png) => {
             app.image_cache
                 .write()
@@ -897,7 +897,7 @@ async fn admin_post_preview(
     };
 
     let cfg = DisplayConfiguration::from_layout_config(&layout);
-    match compose_display(&app, &cfg).await {
+    match compose_display(&app, &cfg, "einkPreview").await {
         Some(png) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
         None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -1160,8 +1160,11 @@ fn capitalize_first(s: &str) -> String {
 }
 
 /// Compose a display config via the compositor.  Returns `None` on error.
-async fn compose_display(app: &AppState, config: &DisplayConfiguration) -> Option<Vec<u8>> {
-    match app.compositor.compose(config).await {
+///
+/// `render_mode` is forwarded to the sidecar: `"einkPreview"` for browser
+/// endpoints, `"device"` for real e-ink hardware.
+async fn compose_display(app: &AppState, config: &DisplayConfiguration, render_mode: &str) -> Option<Vec<u8>> {
+    match app.compositor.compose(config, render_mode).await {
         Ok(png) => Some(png),
         Err(e) => {
             log::error!("compositor error for '{}': {}", config.name, e);
@@ -1171,7 +1174,7 @@ async fn compose_display(app: &AppState, config: &DisplayConfiguration) -> Optio
 }
 
 /// Render a named display config by ID, using cache if available.
-async fn render_for_display(app: &AppState, display_id: &str) -> Option<Vec<u8>> {
+async fn render_for_display(app: &AppState, display_id: &str, render_mode: &str) -> Option<Vec<u8>> {
     {
         let cache = app.image_cache.read().unwrap();
         if let Some(png) = cache.get(display_id) {
@@ -1181,7 +1184,7 @@ async fn render_for_display(app: &AppState, display_id: &str) -> Option<Vec<u8>>
 
     let layout = app.layout_store.get_layout(display_id).ok().flatten()?;
     let config = DisplayConfiguration::from_layout_config(&layout);
-    let png = compose_display(app, &config).await?;
+    let png = compose_display(app, &config, render_mode).await?;
     app.image_cache
         .write()
         .unwrap()

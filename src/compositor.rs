@@ -243,9 +243,12 @@ impl Compositor {
     /// - `StaticDivider` items are drawn directly as black rectangles (no I/O).
     ///
     /// All rendered items are composited in `z_index` order (lowest first).
+    /// `render_mode` is forwarded to the sidecar: `"device"` (dither+negate),
+    /// `"einkPreview"` (dither only), or `"preview"` (raw).
     pub async fn compose(
         &self,
         config: &DisplayConfiguration,
+        render_mode: &str,
     ) -> Result<Vec<u8>, CompositorError> {
         // For each item, we either spawn an async render task or handle it inline.
         // task_for_item[i] = Some(handle_index) if item i has an async task, else None.
@@ -276,9 +279,10 @@ impl Compositor {
                         let engine = Arc::clone(&self.template_engine);
                         let store = Arc::clone(&self.instance_store);
                         let url = self.sidecar_url.clone();
+                        let mode = render_mode.to_string();
                         let idx = handles.len();
                         handles.push(task::spawn(async move {
-                            render_slot(slot, engine, store, url).await
+                            render_slot(slot, engine, store, url, mode).await
                         }));
                         Some(idx)
                     }
@@ -297,9 +301,10 @@ impl Compositor {
                     let fs = *font_size;
                     let url = self.sidecar_url.clone();
                     let iid = id.clone();
+                    let mode = render_mode.to_string();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_text(&text, fs, w, h, &url, &iid).await
+                        render_static_text(&text, fs, w, h, &url, &iid, &mode).await
                     }));
                     Some(idx)
                 }
@@ -328,6 +333,7 @@ async fn render_slot(
     engine: Arc<TemplateEngine>,
     store: Arc<InstanceStore>,
     sidecar_url: String,
+    mode: String,
 ) -> Result<Vec<u8>, CompositorError> {
     let id = slot.plugin_instance_id.clone();
     let store2 = Arc::clone(&store);
@@ -372,7 +378,7 @@ async fn render_slot(
 
     let html = engine.render(&template_name, &ctx)?;
     let (render_w, render_h) = slot.layout_variant.canonical_dimensions();
-    call_sidecar(&sidecar_url, html, render_w, render_h, &slot.plugin_instance_id).await
+    call_sidecar(&sidecar_url, html, render_w, render_h, &slot.plugin_instance_id, &mode).await
 }
 
 fn json_object_to_map(
@@ -397,6 +403,7 @@ async fn render_static_text(
     height: u32,
     sidecar_url: &str,
     item_id: &str,
+    mode: &str,
 ) -> Result<Vec<u8>, CompositorError> {
     let safe = html_escape(text);
     let html = format!(
@@ -408,7 +415,7 @@ async fn render_static_text(
         fs = font_size,
         text = safe,
     );
-    call_sidecar(sidecar_url, html, width, height, item_id).await
+    call_sidecar(sidecar_url, html, width, height, item_id, mode).await
 }
 
 /// Escape `&`, `<`, `>`, and `"` for safe HTML embedding.
@@ -421,23 +428,28 @@ fn html_escape(s: &str) -> String {
 
 // ─── Sidecar HTTP call ────────────────────────────────────────────────────────
 
-/// POST `{base_url}/render` with `{html, width, height, mode: "device"}`.
+/// POST `{base_url}/render` with `{html, width, height, mode}`.
 /// Returns raw PNG bytes from the response body.
+///
+/// `mode` is one of `"device"` (dither+negate for e-ink hardware),
+/// `"einkPreview"` (dither only, correct for browsers), or `"preview"` (raw).
 async fn call_sidecar(
     base_url: &str,
     html: String,
     width: u32,
     height: u32,
     slot_id: &str,
+    mode: &str,
 ) -> Result<Vec<u8>, CompositorError> {
     let url = format!("{}/render", base_url);
     let slot_id = slot_id.to_string();
+    let mode = mode.to_string();
 
     let body = serde_json::json!({
         "html": html,
         "width": width,
         "height": height,
-        "mode": "device"
+        "mode": mode
     });
 
     // ureq is synchronous; spawn_blocking moves it off the async executor.
