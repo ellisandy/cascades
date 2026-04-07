@@ -493,6 +493,9 @@ struct ItemPayload {
     text_content: Option<String>,
     font_size: Option<i32>,
     orientation: Option<String>,
+    field_mapping_id: Option<String>,
+    format_string: Option<String>,
+    label: Option<String>,
 }
 
 impl ItemPayload {
@@ -537,6 +540,21 @@ impl ItemPayload {
                 y: self.y,
                 width: self.width,
                 height: self.height,
+                orientation: self.orientation,
+            }),
+            "data_field" => Ok(LayoutItem::DataField {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                field_mapping_id: self.field_mapping_id.unwrap_or_default(),
+                font_size: self.font_size.unwrap_or(16),
+                format_string: self
+                    .format_string
+                    .unwrap_or_else(|| "{{value}}".to_string()),
+                label: self.label,
                 orientation: self.orientation,
             }),
             other => Err(format!("unknown item_type '{other}'")),

@@ -108,6 +108,23 @@ pub enum LayoutItem {
         height: i32,
         orientation: Option<String>,
     },
+    /// A data field that extracts a value from cached source data via JSONPath.
+    DataField {
+        id: String,
+        z_index: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        /// References data_source_fields.id
+        field_mapping_id: String,
+        font_size: i32,
+        /// Format string with `{{value}}` placeholder.
+        format_string: String,
+        /// Optional label displayed above/before the value.
+        label: Option<String>,
+        orientation: Option<String>,
+    },
 }
 
 impl LayoutItem {
@@ -117,6 +134,7 @@ impl LayoutItem {
             Self::StaticText { id, .. } => id,
             Self::StaticDateTime { id, .. } => id,
             Self::StaticDivider { id, .. } => id,
+            Self::DataField { id, .. } => id,
         }
     }
 
@@ -126,6 +144,7 @@ impl LayoutItem {
             Self::StaticText { z_index, .. } => *z_index,
             Self::StaticDateTime { z_index, .. } => *z_index,
             Self::StaticDivider { z_index, .. } => *z_index,
+            Self::DataField { z_index, .. } => *z_index,
         }
     }
 }
@@ -184,8 +203,29 @@ impl LayoutStore {
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS data_source_fields (
+                id              TEXT PRIMARY KEY,
+                data_source_id  TEXT NOT NULL,
+                source_type     TEXT NOT NULL DEFAULT 'generic',
+                name            TEXT NOT NULL,
+                json_path       TEXT NOT NULL,
+                created_at      INTEGER NOT NULL
             );",
         )?;
+
+        // Add nullable columns for DataField items (SQLite ignores if already present).
+        let columns = [
+            ("field_mapping_id", "TEXT"),
+            ("format_string", "TEXT"),
+            ("label", "TEXT"),
+        ];
+        for (col, typ) in &columns {
+            let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
+            // SQLite returns an error if the column already exists; ignore it.
+            let _ = conn.execute(&sql, []);
+        }
+
         Ok(())
     }
 
@@ -240,7 +280,8 @@ impl LayoutStore {
     ) -> Result<Vec<LayoutItem>, LayoutStoreError> {
         let mut stmt = conn.prepare(
             "SELECT id, item_type, z_index, x, y, width, height,
-                    plugin_instance_id, layout_variant, text_content, font_size, orientation
+                    plugin_instance_id, layout_variant, text_content, font_size, orientation,
+                    field_mapping_id, format_string, label
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -260,13 +301,17 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<i32>>(10)?,
                 row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut items = Vec::with_capacity(rows.len());
         for (item_id, item_type, z_index, x, y, width, height,
-             plugin_instance_id, layout_variant, text_content, font_size, orientation) in rows
+             plugin_instance_id, layout_variant, text_content, font_size, orientation,
+             field_mapping_id, format_string, label) in rows
         {
             let item = match item_type.as_str() {
                 "plugin_slot" => LayoutItem::PluginSlot {
@@ -309,6 +354,20 @@ impl LayoutStore {
                     y,
                     width,
                     height,
+                    orientation,
+                },
+                "data_field" => LayoutItem::DataField {
+                    id: item_id,
+                    z_index,
+                    x,
+                    y,
+                    width,
+                    height,
+                    field_mapping_id: field_mapping_id.unwrap_or_default(),
+                    font_size: font_size.unwrap_or(16),
+                    format_string: format_string
+                        .unwrap_or_else(|| "{{value}}".to_string()),
+                    label,
                     orientation,
                 },
                 other => {
@@ -389,6 +448,21 @@ impl LayoutStore {
                          (id, layout_id, item_type, z_index, x, y, width, height, orientation)
                          VALUES (?1, ?2, 'static_divider', ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![id, layout.id, z_index, x, y, width, height, orientation],
+                    )?;
+                }
+                LayoutItem::DataField {
+                    id, z_index, x, y, width, height,
+                    field_mapping_id, font_size, format_string, label, orientation,
+                } => {
+                    tx.execute(
+                        "INSERT INTO layout_items
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          field_mapping_id, font_size, format_string, label, orientation)
+                         VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![
+                            id, layout.id, z_index, x, y, width, height,
+                            field_mapping_id, font_size, format_string, label, orientation
+                        ],
                     )?;
                 }
             }
@@ -480,6 +554,101 @@ impl LayoutStore {
 
         Ok(())
     }
+
+    // ─── Field-mapping CRUD ──────────────────────────────────────────────────
+
+    /// Create a new field mapping. Returns the created mapping.
+    pub fn create_field_mapping(
+        &self,
+        id: &str,
+        data_source_id: &str,
+        source_type: &str,
+        name: &str,
+        json_path: &str,
+    ) -> Result<FieldMapping, LayoutStoreError> {
+        let now = unix_now();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO data_source_fields (id, data_source_id, source_type, name, json_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, data_source_id, source_type, name, json_path, now],
+        )?;
+        Ok(FieldMapping {
+            id: id.to_string(),
+            data_source_id: data_source_id.to_string(),
+            source_type: source_type.to_string(),
+            name: name.to_string(),
+            json_path: json_path.to_string(),
+            created_at: now,
+        })
+    }
+
+    /// Get a field mapping by ID.
+    pub fn get_field_mapping(&self, id: &str) -> Result<Option<FieldMapping>, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, data_source_id, source_type, name, json_path, created_at
+             FROM data_source_fields WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(FieldMapping {
+                id: row.get(0)?,
+                data_source_id: row.get(1)?,
+                source_type: row.get(2)?,
+                name: row.get(3)?,
+                json_path: row.get(4)?,
+                created_at: row.get(5)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// List all field mappings for a data source.
+    pub fn list_field_mappings(
+        &self,
+        data_source_id: &str,
+    ) -> Result<Vec<FieldMapping>, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, data_source_id, source_type, name, json_path, created_at
+             FROM data_source_fields WHERE data_source_id = ?1 ORDER BY name",
+        )?;
+        let mappings = stmt
+            .query_map(params![data_source_id], |row| {
+                Ok(FieldMapping {
+                    id: row.get(0)?,
+                    data_source_id: row.get(1)?,
+                    source_type: row.get(2)?,
+                    name: row.get(3)?,
+                    json_path: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(mappings)
+    }
+
+    /// Delete a field mapping by ID.
+    pub fn delete_field_mapping(&self, id: &str) -> Result<(), LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM data_source_fields WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+}
+
+/// A field mapping that extracts a single value from a data source's cached JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldMapping {
+    pub id: String,
+    pub data_source_id: String,
+    pub source_type: String,
+    pub name: String,
+    pub json_path: String,
+    pub created_at: i64,
 }
 
 fn unix_now() -> i64 {
@@ -763,5 +932,139 @@ mod tests {
         store.set_active_layout_id("first").unwrap();
         store.set_active_layout_id("second").unwrap();
         assert_eq!(store.get_active_layout_id().unwrap().unwrap(), "second");
+    }
+
+    #[test]
+    fn data_field_roundtrip() {
+        let (store, _dir) = open_store();
+        let layout = LayoutConfig {
+            id: "with-data".to_string(),
+            name: "With Data Fields".to_string(),
+            items: vec![
+                LayoutItem::DataField {
+                    id: "df0".to_string(),
+                    z_index: 0,
+                    x: 10,
+                    y: 20,
+                    width: 200,
+                    height: 50,
+                    field_mapping_id: "fm-123".to_string(),
+                    font_size: 32,
+                    format_string: "{{value}} ft".to_string(),
+                    label: Some("Water Level".to_string()),
+                    orientation: None,
+                },
+                LayoutItem::DataField {
+                    id: "df1".to_string(),
+                    z_index: 1,
+                    x: 10,
+                    y: 80,
+                    width: 200,
+                    height: 50,
+                    field_mapping_id: "fm-456".to_string(),
+                    font_size: 24,
+                    format_string: "{{value | round(0) | number_with_delimiter}} cfs".to_string(),
+                    label: None,
+                    orientation: Some("horizontal".to_string()),
+                },
+            ],
+            updated_at: 0,
+        };
+        store.upsert_layout(&layout).unwrap();
+
+        let got = store.get_layout("with-data").unwrap().unwrap();
+        assert_eq!(got.items.len(), 2);
+
+        if let LayoutItem::DataField {
+            id, field_mapping_id, font_size, format_string, label, orientation, ..
+        } = &got.items[0]
+        {
+            assert_eq!(id, "df0");
+            assert_eq!(field_mapping_id, "fm-123");
+            assert_eq!(*font_size, 32);
+            assert_eq!(format_string, "{{value}} ft");
+            assert_eq!(label.as_deref(), Some("Water Level"));
+            assert!(orientation.is_none());
+        } else {
+            panic!("expected DataField");
+        }
+
+        if let LayoutItem::DataField {
+            id, label, orientation, ..
+        } = &got.items[1]
+        {
+            assert_eq!(id, "df1");
+            assert!(label.is_none());
+            assert_eq!(orientation.as_deref(), Some("horizontal"));
+        } else {
+            panic!("expected DataField");
+        }
+    }
+
+    #[test]
+    fn data_field_serde_roundtrip() {
+        let item = LayoutItem::DataField {
+            id: "df0".to_string(),
+            z_index: 0,
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 50,
+            field_mapping_id: "fm-abc".to_string(),
+            font_size: 24,
+            format_string: "{{value}}".to_string(),
+            label: None,
+            orientation: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            LayoutItem::DataField { field_mapping_id, .. } if field_mapping_id == "fm-abc"
+        ));
+    }
+
+    #[test]
+    fn field_mapping_crud() {
+        let (store, _dir) = open_store();
+
+        // Create
+        let fm = store
+            .create_field_mapping("fm-1", "river-source", "builtin", "Water Level", "$.water_level_ft")
+            .unwrap();
+        assert_eq!(fm.id, "fm-1");
+        assert_eq!(fm.data_source_id, "river-source");
+        assert_eq!(fm.source_type, "builtin");
+        assert_eq!(fm.name, "Water Level");
+        assert_eq!(fm.json_path, "$.water_level_ft");
+
+        // Get
+        let got = store.get_field_mapping("fm-1").unwrap().unwrap();
+        assert_eq!(got.name, "Water Level");
+
+        // Get missing
+        assert!(store.get_field_mapping("nonexistent").unwrap().is_none());
+
+        // Create a second mapping for the same source
+        store
+            .create_field_mapping("fm-2", "river-source", "builtin", "Streamflow", "$.streamflow_cfs")
+            .unwrap();
+
+        // List
+        let mappings = store.list_field_mappings("river-source").unwrap();
+        assert_eq!(mappings.len(), 2);
+
+        // List for different source returns empty
+        let empty = store.list_field_mappings("other-source").unwrap();
+        assert!(empty.is_empty());
+
+        // Delete
+        store.delete_field_mapping("fm-1").unwrap();
+        assert!(store.get_field_mapping("fm-1").unwrap().is_none());
+
+        // Remaining mapping still exists
+        let remaining = store.list_field_mappings("river-source").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "fm-2");
     }
 }
