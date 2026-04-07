@@ -519,6 +519,17 @@ impl ItemPayload {
                 font_size: self.font_size.unwrap_or(16),
                 orientation: self.orientation,
             }),
+            "static_datetime" => Ok(LayoutItem::StaticDateTime {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                font_size: self.font_size.unwrap_or(16),
+                format: self.text_content,
+                orientation: self.orientation,
+            }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
                 id: self.id,
                 z_index: self.z_index,

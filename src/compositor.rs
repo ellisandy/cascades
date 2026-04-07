@@ -308,6 +308,27 @@ impl Compositor {
                     }));
                     Some(idx)
                 }
+                LayoutItem::StaticDateTime {
+                    id,
+                    width,
+                    height,
+                    font_size,
+                    format,
+                    ..
+                } => {
+                    let fmt = format.clone();
+                    let w = (*width).max(0) as u32;
+                    let h = (*height).max(0) as u32;
+                    let fs = *font_size;
+                    let url = self.sidecar_url.clone();
+                    let iid = id.clone();
+                    let mode = render_mode.to_string();
+                    let idx = handles.len();
+                    handles.push(task::spawn(async move {
+                        render_static_datetime(fmt.as_deref(), fs, w, h, &url, &iid, &mode).await
+                    }));
+                    Some(idx)
+                }
                 LayoutItem::StaticDivider { .. } => {
                     // Drawn directly — no async task needed.
                     None
@@ -418,6 +439,43 @@ async fn render_static_text(
     call_sidecar(sidecar_url, html, width, height, item_id, mode).await
 }
 
+// ─── Static datetime render ─────────────────────────────────────────────────
+
+/// Render a static date/time element via the sidecar.
+///
+/// Gets the current local time and formats it, then renders via the sidecar
+/// like `render_static_text`.
+async fn render_static_datetime(
+    format: Option<&str>,
+    font_size: i32,
+    width: u32,
+    height: u32,
+    sidecar_url: &str,
+    item_id: &str,
+    mode: &str,
+) -> Result<Vec<u8>, CompositorError> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let now = NowContext::from_unix(now_secs);
+    let time_str = match format {
+        Some(f) if !f.is_empty() => f.to_string(), // user-provided label/format
+        _ => now.local,
+    };
+    let safe = html_escape(&time_str);
+    let html = format!(
+        "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
+         justify-content:center;font-family:sans-serif;font-size:{fs}px;\
+         color:#000;background:white;'>{text}</div>",
+        w = width,
+        h = height,
+        fs = font_size,
+        text = safe,
+    );
+    call_sidecar(sidecar_url, html, width, height, item_id, mode).await
+}
+
 /// Escape `&`, `<`, `>`, and `"` for safe HTML embedding.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -514,6 +572,19 @@ fn composite_to_png(
                 }
             }
             LayoutItem::StaticText { x, y, width, height, id, .. } => {
+                if let Some(idx) = maybe_task {
+                    blit_png(
+                        &mut frame,
+                        &png_results[*idx],
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                        id,
+                    )?;
+                }
+            }
+            LayoutItem::StaticDateTime { x, y, width, height, id, .. } => {
                 if let Some(idx) = maybe_task {
                     blit_png(
                         &mut frame,

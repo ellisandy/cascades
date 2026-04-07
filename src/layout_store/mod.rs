@@ -85,6 +85,19 @@ pub enum LayoutItem {
         font_size: i32,
         orientation: Option<String>,
     },
+    /// A static date/time element rendered via the sidecar.
+    #[serde(rename = "static_datetime")]
+    StaticDateTime {
+        id: String,
+        z_index: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        font_size: i32,
+        format: Option<String>,
+        orientation: Option<String>,
+    },
     /// A horizontal or vertical divider line.
     StaticDivider {
         id: String,
@@ -102,6 +115,7 @@ impl LayoutItem {
         match self {
             Self::PluginSlot { id, .. } => id,
             Self::StaticText { id, .. } => id,
+            Self::StaticDateTime { id, .. } => id,
             Self::StaticDivider { id, .. } => id,
         }
     }
@@ -110,6 +124,7 @@ impl LayoutItem {
         match self {
             Self::PluginSlot { z_index, .. } => *z_index,
             Self::StaticText { z_index, .. } => *z_index,
+            Self::StaticDateTime { z_index, .. } => *z_index,
             Self::StaticDivider { z_index, .. } => *z_index,
         }
     }
@@ -276,6 +291,17 @@ impl LayoutStore {
                     font_size: font_size.unwrap_or(16),
                     orientation,
                 },
+                "static_datetime" => LayoutItem::StaticDateTime {
+                    id: item_id,
+                    z_index,
+                    x,
+                    y,
+                    width,
+                    height,
+                    font_size: font_size.unwrap_or(16),
+                    format: text_content,
+                    orientation,
+                },
                 "static_divider" => LayoutItem::StaticDivider {
                     id: item_id,
                     z_index,
@@ -338,6 +364,20 @@ impl LayoutStore {
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             text_content, font_size, orientation
+                        ],
+                    )?;
+                }
+                LayoutItem::StaticDateTime {
+                    id, z_index, x, y, width, height, font_size, format, orientation,
+                } => {
+                    tx.execute(
+                        "INSERT INTO layout_items
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          text_content, font_size, orientation)
+                         VALUES (?1, ?2, 'static_datetime', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![
+                            id, layout.id, z_index, x, y, width, height,
+                            format, font_size, orientation
                         ],
                     )?;
                 }
