@@ -988,10 +988,11 @@ fn make_api_app(
     base_dir: &std::path::Path,
 ) -> (Router, Arc<cascades::api::AppState>) {
     use cascades::{
-        api::{AppState, build_router},
+        api::{AppState, SourceScheduler, build_router},
         compositor::Compositor,
         instance_store::InstanceStore,
         layout_store::{LayoutConfig, LayoutStore},
+        source_store::SourceStore,
         template::TemplateEngine,
     };
     use std::collections::HashMap;
@@ -1004,6 +1005,8 @@ fn make_api_app(
         Arc::new(InstanceStore::open(&db_path).expect("open instance store"));
     let layout_store =
         Arc::new(LayoutStore::open(&db_path).expect("open layout store"));
+    let source_store =
+        Arc::new(SourceStore::open(&db_path).expect("open source store"));
     let template_engine =
         Arc::new(TemplateEngine::new(&templates_dir).expect("load templates"));
 
@@ -1025,11 +1028,14 @@ fn make_api_app(
         .expect("seed default layout");
 
     let image_cache = Arc::new(RwLock::new(HashMap::<String, Vec<u8>>::new()));
+    let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
 
     let state = Arc::new(AppState {
         compositor,
         instance_store,
         layout_store,
+        source_store,
+        scheduler,
         image_cache,
         api_key: "test-bearer-key".to_string(),
         refresh_rate_secs: 42,
@@ -1090,6 +1096,9 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         cascades::instance_store::InstanceStore::open(&db_path).unwrap(),
     );
     let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
+    let source_store = Arc::new(
+        cascades::source_store::SourceStore::open(&db_path).unwrap(),
+    );
     let template_engine = Arc::new(
         cascades::template::TemplateEngine::new(&templates_dir).unwrap(),
     );
@@ -1124,10 +1133,14 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         m
     }));
 
+    let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
+
     let state = Arc::new(cascades::api::AppState {
         compositor,
         instance_store,
         layout_store,
+        source_store,
+        scheduler,
         image_cache: Arc::clone(&image_cache),
         api_key: "key".to_string(),
         refresh_rate_secs: 60,

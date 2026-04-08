@@ -1,3 +1,4 @@
+pub mod generic;
 pub mod noaa;
 pub mod road_closures;
 pub mod trail_conditions;

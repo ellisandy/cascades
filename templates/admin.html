@@ -407,6 +407,37 @@
       font-size: 13px;
     }
     #datafield-modal select:focus { outline: none; border-color: #58a6ff; }
+    #preset-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1001;
+    }
+    #preset-modal.hidden { display: none; }
+    #preset-modal select {
+      width: 100%;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 6px 8px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    #preset-modal select:focus { outline: none; border-color: #58a6ff; }
+    .preset-param {
+      width: 100%;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 6px 8px;
+      border-radius: 3px;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
   </style>
 </head>
 <body>
@@ -471,6 +502,11 @@
            onclick="onStaticClick('data_field')">
         <div class="palette-item-name">Data Field</div>
       </div>
+    </div>
+    <div class="palette-section-header" style="margin-top:12px">SOURCES</div>
+    <div id="source-list">
+      <button class="btn" style="width:100%;margin-bottom:4px;font-size:11px" onclick="showPresetModal()">Add from Preset</button>
+      <div id="generic-source-list"><p class="no-sel" style="font-size:10px">No generic sources</p></div>
     </div>
   </div>
 
@@ -544,6 +580,23 @@
     <div class="modal-btns">
       <button class="btn btn-primary" onclick="submitDataFieldModal()">Add</button>
       <button class="btn" onclick="cancelDataFieldModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Preset picker modal -->
+<div id="preset-modal" class="hidden">
+  <div id="text-modal-box" style="width:380px">
+    <h3>Add Source from Preset</h3>
+    <label>Preset</label>
+    <select id="preset-modal-select" onchange="onPresetSelect(this.value)">
+      <option value="">Select a preset...</option>
+    </select>
+    <div id="preset-description" style="font-size:11px;color:#8b949e;margin:6px 0 10px"></div>
+    <div id="preset-params"></div>
+    <div class="modal-btns">
+      <button class="btn btn-primary" onclick="submitPresetModal()">Create Source</button>
+      <button class="btn" onclick="cancelPresetModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -624,6 +677,7 @@ window.addEventListener('DOMContentLoaded', () => {
   canvas.addEventListener('touchend', onCanvasTouchEnd, false);
 
   loadLayouts();
+  refreshSourceList();
 });
 
 // ────────────────────────────────────────
@@ -1561,16 +1615,18 @@ async function showDataFieldModal() {
   const modal = document.getElementById('datafield-modal');
   modal.classList.remove('hidden');
   const sel = document.getElementById('df-modal-source');
-  // Populate sources from cached plugins
-  if (!cachedPlugins.length) {
-    try {
-      const res = await apiFetch('/api/admin/plugins');
-      if (res.ok) cachedPlugins = await res.json();
-    } catch (e) { /* ignore */ }
-  }
-  sel.innerHTML = cachedPlugins.map(function(p) {
-    return '<option value="' + esc(p.id) + '">' + esc(p.name || p.id) + '</option>';
-  }).join('');
+  // Populate sources from built-in plugins + generic sources
+  var options = [];
+  try {
+    const res = await apiFetch('/api/admin/sources');
+    if (res.ok) {
+      const sources = await res.json();
+      options = sources.map(function(s) {
+        return '<option value="' + esc(s.id) + '">' + esc(s.name) + ' (' + s.source_kind + ')</option>';
+      });
+    }
+  } catch (e) { /* ignore */ }
+  sel.innerHTML = options.join('') || '<option value="">No sources</option>';
   document.getElementById('df-modal-jsonpath').value = '';
   document.getElementById('df-modal-label').value = '';
   document.getElementById('df-modal-format').value = '{{value}}';
@@ -1626,6 +1682,122 @@ async function submitDataFieldModal() {
 
 function cancelDataFieldModal() {
   document.getElementById('datafield-modal').classList.add('hidden');
+}
+
+// ────────────────────────────────────────
+// Source Preset modal
+// ────────────────────────────────────────
+let cachedPresets = [];
+
+async function showPresetModal() {
+  const modal = document.getElementById('preset-modal');
+  modal.classList.remove('hidden');
+  const sel = document.getElementById('preset-modal-select');
+
+  if (!cachedPresets.length) {
+    try {
+      const res = await apiFetch('/api/admin/presets');
+      if (res.ok) cachedPresets = await res.json();
+    } catch (e) { /* ignore */ }
+  }
+  sel.innerHTML = '<option value="">Select a preset...</option>' +
+    cachedPresets.map(function(p) {
+      return '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>';
+    }).join('');
+  document.getElementById('preset-description').textContent = '';
+  document.getElementById('preset-params').innerHTML = '';
+}
+
+function onPresetSelect(presetId) {
+  const preset = cachedPresets.find(function(p) { return p.id === presetId; });
+  const descEl = document.getElementById('preset-description');
+  const paramsEl = document.getElementById('preset-params');
+  if (!preset) {
+    descEl.textContent = '';
+    paramsEl.innerHTML = '';
+    return;
+  }
+  descEl.textContent = preset.description;
+  paramsEl.innerHTML = preset.params.map(function(p) {
+    var val = p.default || '';
+    return '<label>' + esc(p.label) + (p.required ? ' *' : '') + '</label>' +
+      '<input type="text" class="preset-param" data-name="' + esc(p.name) + '" ' +
+      'value="' + esc(val) + '" placeholder="' + esc(p.placeholder) + '">';
+  }).join('');
+  if (preset.default_fields && preset.default_fields.length) {
+    paramsEl.innerHTML += '<div style="margin-top:10px;font-size:11px;color:#8b949e">' +
+      '<strong>Default fields:</strong> ' +
+      preset.default_fields.map(function(f) { return esc(f.name); }).join(', ') + '</div>';
+  }
+}
+
+async function submitPresetModal() {
+  const presetId = document.getElementById('preset-modal-select').value;
+  if (!presetId) {
+    showToast('Select a preset', 'error');
+    return;
+  }
+  var params = {};
+  document.querySelectorAll('#preset-params .preset-param').forEach(function(el) {
+    params[el.dataset.name] = el.value.trim();
+  });
+
+  cancelPresetModal();
+
+  try {
+    const res = await apiFetch('/api/admin/sources/from-preset', {
+      method: 'POST',
+      body: JSON.stringify({ preset_id: presetId, params: params }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(function() { return {}; });
+      showToast(err.error || 'Failed to create source', 'error');
+      return;
+    }
+    const data = await res.json();
+    showToast('Created source: ' + (data.source && data.source.name || presetId));
+    refreshSourceList();
+    // Also refresh the source dropdown in the data field modal
+    cachedPlugins = [];
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+function cancelPresetModal() {
+  document.getElementById('preset-modal').classList.add('hidden');
+}
+
+async function refreshSourceList() {
+  const el = document.getElementById('generic-source-list');
+  try {
+    const res = await apiFetch('/api/admin/sources');
+    if (!res.ok) return;
+    const sources = await res.json();
+    const generic = sources.filter(function(s) { return s.source_kind === 'generic'; });
+    if (!generic.length) {
+      el.innerHTML = '<p class="no-sel" style="font-size:10px">No generic sources</p>';
+      return;
+    }
+    el.innerHTML = generic.map(function(s) {
+      var statusDot = s.last_error ? '\u26a0' : (s.last_fetched_at ? '\u2713' : '\u22ef');
+      return '<div class="palette-item" style="font-size:10px;padding:3px 6px;cursor:default" title="' + esc(s.url || '') + '">' +
+        '<span>' + statusDot + ' ' + esc(s.name) + '</span>' +
+        '<button style="float:right;font-size:9px;cursor:pointer;background:none;border:none;color:#f85149" ' +
+        'onclick="deleteGenericSource(\'' + esc(s.id) + '\')" title="Delete">\u2715</button></div>';
+    }).join('');
+  } catch (e) { /* ignore */ }
+}
+
+async function deleteGenericSource(sourceId) {
+  if (!confirm('Delete this source and its field mappings?')) return;
+  try {
+    await apiFetch('/api/admin/sources/' + encodeURIComponent(sourceId), { method: 'DELETE' });
+    showToast('Source deleted');
+    refreshSourceList();
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
 }
 
 // ────────────────────────────────────────

@@ -8,7 +8,9 @@ pub mod instance_store;
 pub mod jsonpath;
 pub mod layout_store;
 pub mod plugin_registry;
+pub mod presets;
 pub mod presentation;
+pub mod source_store;
 pub mod sources;
 pub mod template;
 
