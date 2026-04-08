@@ -9,6 +9,7 @@ pub mod jsonpath;
 pub mod layout_store;
 pub mod plugin_registry;
 pub mod presentation;
+pub mod source_store;
 pub mod sources;
 pub mod template;
 

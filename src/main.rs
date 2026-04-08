@@ -1,11 +1,13 @@
 use cascades::{
-    api::{AppState, build_router},
+    api::{AppState, SourceScheduler, build_router},
     build_sources,
     config::{load_config, load_display_layouts, load_or_create_secrets},
     compositor::Compositor,
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
     layout_store::LayoutStore,
+    source_store::SourceStore,
+    sources::generic::GenericHttpSource,
     template::TemplateEngine,
 };
 use std::{
@@ -52,6 +54,11 @@ async fn main() {
         .seed_from_toml(&display_layouts)
         .expect("failed to seed layout store from display.toml");
 
+    // Open source store for generic HTTP data sources.
+    let source_store = Arc::new(
+        SourceStore::open(store_path).expect("failed to open source store"),
+    );
+
     // Template engine — load from templates/ directory.
     let template_engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("failed to load templates"),
@@ -73,8 +80,7 @@ async fn main() {
         .map(|s| s.refresh_rate_secs)
         .unwrap_or(60);
 
-    // Spawn one background task per data source.
-    // Tasks update instance_store.cached_data so the compositor uses fresh data.
+    // Spawn one background task per built-in data source.
     let domain = Arc::new(RwLock::new(DomainState::default()));
     for source in build_sources(&config, fixture_mode) {
         let domain = Arc::clone(&domain);
@@ -109,11 +115,27 @@ async fn main() {
         });
     }
 
+    // Create the source scheduler for dynamically managing generic HTTP sources.
+    let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
+
+    // Spawn generic HTTP sources from database.
+    if let Ok(sources) = source_store.list() {
+        for ds in &sources {
+            let generic = GenericHttpSource::from_data_source(ds);
+            scheduler.spawn_source(generic);
+        }
+        if !sources.is_empty() {
+            log::info!("spawned {} generic HTTP source(s)", sources.len());
+        }
+    }
+
     let port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
     let app_state = Arc::new(AppState {
         compositor,
         instance_store,
         layout_store,
+        source_store,
+        scheduler,
         image_cache: Arc::new(RwLock::new(HashMap::new())),
         api_key: secrets.api_key,
         refresh_rate_secs,

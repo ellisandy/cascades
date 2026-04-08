@@ -534,6 +534,8 @@
     Snap
   </label>
   <div class="toolbar-sep"></div>
+  <button class="btn" onclick="openSourcesPanel()">Sources</button>
+  <div class="toolbar-sep"></div>
   <span id="status-msg"></span>
 </div>
 
@@ -662,6 +664,75 @@
     </div>
   </div>
 </div>
+
+<!-- ── Sources panel overlay ── -->
+<div id="sources-panel" class="hidden" style="
+  position:fixed; inset:0; background:rgba(0,0,0,0.7);
+  display:flex; align-items:center; justify-content:center; z-index:1001;
+">
+  <div style="
+    background:#161b22; border:1px solid #30363d; border-radius:8px;
+    width:700px; max-height:80vh; overflow-y:auto; padding:20px;
+  ">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <h3 style="color:#58a6ff; margin:0;">Data Sources</h3>
+      <div>
+        <button class="btn btn-primary" onclick="showAddSourceForm()">+ Add Source</button>
+        <button class="btn" onclick="closeSourcesPanel()">Close</button>
+      </div>
+    </div>
+
+    <!-- Source list -->
+    <div id="sources-list"></div>
+
+    <!-- Add/Edit source form (hidden by default) -->
+    <div id="source-form" style="display:none; margin-top:16px; border-top:1px solid #30363d; padding-top:16px;">
+      <h4 id="source-form-title" style="color:#79c0ff; margin-bottom:12px;">Add Source</h4>
+      <input type="hidden" id="sf-id" value="">
+      <div style="display:grid; gap:8px;">
+        <label style="color:#8b949e;">Name</label>
+        <input type="text" id="sf-name" placeholder="My API" style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">
+        <label style="color:#8b949e;">URL</label>
+        <input type="text" id="sf-url" placeholder="https://api.example.com/data" style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">
+        <div style="display:flex; gap:12px;">
+          <div style="flex:1;">
+            <label style="color:#8b949e;">Method</label>
+            <select id="sf-method" style="width:100%; background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+            </select>
+          </div>
+          <div style="flex:1;">
+            <label style="color:#8b949e;">Refresh Interval</label>
+            <select id="sf-interval" style="width:100%; background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">
+              <option value="30">30 seconds</option>
+              <option value="60" selected>1 minute</option>
+              <option value="120">2 minutes</option>
+              <option value="300">5 minutes</option>
+              <option value="600">10 minutes</option>
+              <option value="900">15 minutes</option>
+              <option value="1800">30 minutes</option>
+              <option value="3600">1 hour</option>
+            </select>
+          </div>
+        </div>
+        <label style="color:#8b949e;">Headers (JSON object)</label>
+        <textarea id="sf-headers" rows="3" placeholder='{"Authorization": "Bearer token"}' style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit; resize:vertical;"></textarea>
+        <label style="color:#8b949e;">Request Body (for POST)</label>
+        <textarea id="sf-body" rows="2" placeholder='{"query": "..."}' style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit; resize:vertical;"></textarea>
+        <label style="color:#8b949e;">Response Root Path (JSONPath, optional)</label>
+        <input type="text" id="sf-rootpath" placeholder="$.data.results" style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn btn-primary" onclick="submitSourceForm()">Save</button>
+          <button class="btn" onclick="testSourceFetch()">Test Fetch</button>
+          <button class="btn" onclick="cancelSourceForm()">Cancel</button>
+        </div>
+        <pre id="sf-test-result" style="display:none; background:#0d1117; color:#c9d1d9; padding:8px; border-radius:4px; max-height:200px; overflow:auto; font-size:11px; margin-top:8px;"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="sources-panel-hidden" class="hidden"></div>
 
 <script>
 // ────────────────────────────────────────
@@ -2047,6 +2118,245 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ────────────────────────────────────────
+// Sources Panel
+// ────────────────────────────────────────
+
+function openSourcesPanel() {
+  document.getElementById('sources-panel').classList.remove('hidden');
+  loadSourcesList();
+}
+
+function closeSourcesPanel() {
+  document.getElementById('sources-panel').classList.add('hidden');
+  document.getElementById('source-form').style.display = 'none';
+}
+
+async function loadSourcesList() {
+  var el = document.getElementById('sources-list');
+  try {
+    var res = await apiFetch('/api/admin/sources');
+    var sources = await res.json();
+    if (!sources.length) {
+      el.innerHTML = '<p style="color:#8b949e; padding:12px;">No data sources configured. Click "+ Add Source" to create one.</p>';
+      return;
+    }
+    var html = '<table style="width:100%; border-collapse:collapse; font-size:12px;">';
+    html += '<thead><tr>';
+    html += '<th style="text-align:left; color:#58a6ff; padding:6px 8px; border-bottom:1px solid #30363d;">Name</th>';
+    html += '<th style="text-align:left; color:#58a6ff; padding:6px 8px; border-bottom:1px solid #30363d;">Type</th>';
+    html += '<th style="text-align:left; color:#58a6ff; padding:6px 8px; border-bottom:1px solid #30363d;">URL</th>';
+    html += '<th style="text-align:left; color:#58a6ff; padding:6px 8px; border-bottom:1px solid #30363d;">Status</th>';
+    html += '<th style="text-align:right; color:#58a6ff; padding:6px 8px; border-bottom:1px solid #30363d;">Actions</th>';
+    html += '</tr></thead><tbody>';
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i];
+      var statusHtml = s.last_error
+        ? '<span style="color:#f85149;">' + esc(s.last_error).substring(0, 40) + '</span>'
+        : (s.last_fetched_at ? '<span style="color:#3fb950;">OK</span>' : '<span style="color:#8b949e;">Pending</span>');
+      var urlDisplay = s.url ? esc(s.url).substring(0, 40) + (s.url.length > 40 ? '...' : '') : '<span style="color:#8b949e;">—</span>';
+      var actions = '';
+      if (s.source_kind === 'generic') {
+        actions = '<button class="btn" style="font-size:11px; padding:2px 6px;" onclick="editSource(\'' + esc(s.id) + '\')">Edit</button> ';
+        actions += '<button class="btn" style="font-size:11px; padding:2px 6px;" onclick="fetchSource(\'' + esc(s.id) + '\')">Fetch</button> ';
+        actions += '<button class="btn btn-danger" style="font-size:11px; padding:2px 6px;" onclick="deleteSource(\'' + esc(s.id) + '\')">Del</button>';
+      }
+      html += '<tr>';
+      html += '<td style="padding:6px 8px; border-bottom:1px solid #21262d;">' + esc(s.name) + '</td>';
+      html += '<td style="padding:6px 8px; border-bottom:1px solid #21262d;">' + esc(s.source_kind) + '</td>';
+      html += '<td style="padding:6px 8px; border-bottom:1px solid #21262d; font-size:11px;">' + urlDisplay + '</td>';
+      html += '<td style="padding:6px 8px; border-bottom:1px solid #21262d;">' + statusHtml + '</td>';
+      html += '<td style="padding:6px 8px; border-bottom:1px solid #21262d; text-align:right;">' + actions + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<p style="color:#f85149;">Failed to load sources: ' + esc(e.message) + '</p>';
+  }
+}
+
+function showAddSourceForm() {
+  document.getElementById('source-form').style.display = 'block';
+  document.getElementById('source-form-title').textContent = 'Add Source';
+  document.getElementById('sf-id').value = '';
+  document.getElementById('sf-name').value = '';
+  document.getElementById('sf-url').value = '';
+  document.getElementById('sf-method').value = 'GET';
+  document.getElementById('sf-interval').value = '300';
+  document.getElementById('sf-headers').value = '';
+  document.getElementById('sf-body').value = '';
+  document.getElementById('sf-rootpath').value = '';
+  document.getElementById('sf-test-result').style.display = 'none';
+}
+
+async function editSource(id) {
+  try {
+    var res = await apiFetch('/api/admin/sources/' + encodeURIComponent(id));
+    if (!res.ok) { showToast('Source not found', 'error'); return; }
+    var ds = await res.json();
+    document.getElementById('source-form').style.display = 'block';
+    document.getElementById('source-form-title').textContent = 'Edit Source';
+    document.getElementById('sf-id').value = ds.id;
+    document.getElementById('sf-name').value = ds.name || '';
+    document.getElementById('sf-url').value = ds.url || '';
+    document.getElementById('sf-method').value = ds.method || 'GET';
+    document.getElementById('sf-interval').value = String(ds.refresh_interval_secs || 300);
+    document.getElementById('sf-headers').value = ds.headers && typeof ds.headers === 'object' ? JSON.stringify(ds.headers, null, 2) : '';
+    document.getElementById('sf-body').value = ds.body_template || '';
+    document.getElementById('sf-rootpath').value = ds.response_root_path || '';
+    document.getElementById('sf-test-result').style.display = 'none';
+  } catch (e) {
+    showToast('Error loading source: ' + e.message, 'error');
+  }
+}
+
+function cancelSourceForm() {
+  document.getElementById('source-form').style.display = 'none';
+}
+
+function buildSourcePayload() {
+  var headersStr = document.getElementById('sf-headers').value.trim();
+  var headers = {};
+  if (headersStr) {
+    try { headers = JSON.parse(headersStr); } catch (e) {
+      showToast('Invalid JSON in headers', 'error');
+      return null;
+    }
+  }
+  return {
+    name: document.getElementById('sf-name').value.trim(),
+    url: document.getElementById('sf-url').value.trim(),
+    method: document.getElementById('sf-method').value,
+    headers: headers,
+    body_template: document.getElementById('sf-body').value.trim() || null,
+    response_root_path: document.getElementById('sf-rootpath').value.trim() || null,
+    refresh_interval_secs: parseInt(document.getElementById('sf-interval').value, 10) || 300,
+  };
+}
+
+async function submitSourceForm() {
+  var payload = buildSourcePayload();
+  if (!payload) return;
+  if (!payload.name || !payload.url) {
+    showToast('Name and URL are required', 'error');
+    return;
+  }
+
+  var id = document.getElementById('sf-id').value;
+  try {
+    var res;
+    if (id) {
+      res = await apiFetch('/api/admin/sources/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      res = await apiFetch('/api/admin/sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return { error: 'Unknown error' }; });
+      showToast('Error: ' + (err.error || res.statusText), 'error');
+      return;
+    }
+    showToast(id ? 'Source updated' : 'Source created', 'ok');
+    document.getElementById('source-form').style.display = 'none';
+    loadSourcesList();
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function deleteSource(id) {
+  if (!confirm('Delete this source and all its field mappings?')) return;
+  try {
+    var res = await apiFetch('/api/admin/sources/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (res.ok) {
+      showToast('Source deleted', 'ok');
+      loadSourcesList();
+    } else {
+      showToast('Delete failed: ' + res.statusText, 'error');
+    }
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function fetchSource(id) {
+  try {
+    var res = await apiFetch('/api/admin/sources/' + encodeURIComponent(id) + '/fetch', { method: 'POST' });
+    var data = await res.json();
+    if (data.success) {
+      showToast('Fetch successful', 'ok');
+      loadSourcesList();
+    } else {
+      showToast('Fetch failed: ' + (data.error || 'Unknown error'), 'error');
+    }
+  } catch (e) {
+    showToast('Fetch error: ' + e.message, 'error');
+  }
+}
+
+async function testSourceFetch() {
+  var payload = buildSourcePayload();
+  if (!payload) return;
+  if (!payload.url) { showToast('URL is required', 'error'); return; }
+
+  var resultEl = document.getElementById('sf-test-result');
+  resultEl.style.display = 'block';
+  resultEl.textContent = 'Fetching...';
+
+  var id = document.getElementById('sf-id').value;
+  if (!id) {
+    // For unsaved sources, create temporarily then fetch then show result
+    try {
+      var createRes = await apiFetch('/api/admin/sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!createRes.ok) {
+        resultEl.textContent = 'Error creating temp source: ' + createRes.statusText;
+        return;
+      }
+      var created = await createRes.json();
+      id = created.id;
+      // Now fetch
+      var fetchRes = await apiFetch('/api/admin/sources/' + encodeURIComponent(id) + '/fetch', { method: 'POST' });
+      var fetchData = await fetchRes.json();
+      if (fetchData.success) {
+        resultEl.textContent = JSON.stringify(fetchData.data, null, 2);
+      } else {
+        resultEl.textContent = 'Fetch error: ' + (fetchData.error || 'Unknown');
+      }
+      // Update the form with the new ID so subsequent saves are updates
+      document.getElementById('sf-id').value = id;
+      document.getElementById('source-form-title').textContent = 'Edit Source';
+      loadSourcesList();
+    } catch (e) {
+      resultEl.textContent = 'Error: ' + e.message;
+    }
+  } else {
+    // Existing source — just trigger fetch
+    try {
+      var fetchRes2 = await apiFetch('/api/admin/sources/' + encodeURIComponent(id) + '/fetch', { method: 'POST' });
+      var fetchData2 = await fetchRes2.json();
+      if (fetchData2.success) {
+        resultEl.textContent = JSON.stringify(fetchData2.data, null, 2);
+      } else {
+        resultEl.textContent = 'Fetch error: ' + (fetchData2.error || 'Unknown');
+      }
+    } catch (e) {
+      resultEl.textContent = 'Error: ' + e.message;
+    }
+  }
 }
 </script>
 </body>

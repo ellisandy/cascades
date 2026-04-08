@@ -1025,11 +1025,17 @@ fn make_api_app(
         .expect("seed default layout");
 
     let image_cache = Arc::new(RwLock::new(HashMap::<String, Vec<u8>>::new()));
+    let source_store = Arc::new(
+        cascades::source_store::SourceStore::open(&db_path).expect("open source store"),
+    );
+    let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
 
     let state = Arc::new(AppState {
         compositor,
         instance_store,
         layout_store,
+        source_store,
+        scheduler,
         image_cache,
         api_key: "test-bearer-key".to_string(),
         refresh_rate_secs: 42,
@@ -1124,10 +1130,17 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         m
     }));
 
+    let source_store = Arc::new(
+        cascades::source_store::SourceStore::open(&db_path).unwrap(),
+    );
+    let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
+
     let state = Arc::new(cascades::api::AppState {
         compositor,
         instance_store,
         layout_store,
+        source_store,
+        scheduler,
         image_cache: Arc::clone(&image_cache),
         api_key: "key".to_string(),
         refresh_rate_secs: 60,

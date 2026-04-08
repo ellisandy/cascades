@@ -44,6 +44,8 @@ use crate::{
     compositor::{Compositor, DisplayConfiguration},
     instance_store::InstanceStore,
     layout_store::{LayoutConfig, LayoutItem, LayoutStore},
+    source_store::{DataSourceConfig, SourceStore},
+    sources::{Source, generic::GenericHttpSource},
 };
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -53,11 +55,12 @@ pub struct AppState {
     pub compositor: Arc<Compositor>,
     pub instance_store: Arc<InstanceStore>,
     /// SQLite-backed store for display layout configurations.
-    /// Replaces the startup-time `display_configs` HashMap; layouts are now
-    /// mutable at runtime via the Admin UI.
     pub layout_store: Arc<LayoutStore>,
+    /// SQLite-backed store for user-defined generic HTTP data sources.
+    pub source_store: Arc<SourceStore>,
+    /// Manages background fetch tasks for generic HTTP data sources.
+    pub scheduler: Arc<SourceScheduler>,
     /// In-memory PNG cache: display_id → latest rendered PNG bytes.
-    /// Invalidated by `POST /api/webhook/:id` for affected displays.
     pub image_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     /// Bearer token required for `GET /api/display`.
     pub api_key: String,
@@ -67,6 +70,83 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Base URL of the Bun render sidecar; surfaced in `GET /api/status`.
     pub sidecar_url: String,
+}
+
+/// Manages background fetch tasks for generic HTTP data sources.
+pub struct SourceScheduler {
+    source_store: Arc<SourceStore>,
+    tasks: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
+impl SourceScheduler {
+    pub fn new(source_store: Arc<SourceStore>) -> Self {
+        Self {
+            source_store,
+            tasks: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Spawn a background fetch task for a generic source.
+    pub fn spawn_source(&self, source: GenericHttpSource) {
+        let source_id = source.id().to_string();
+        let store = Arc::clone(&self.source_store);
+        let interval = source.refresh_interval();
+
+        let handle = tokio::spawn(async move {
+            let mut source = source;
+            loop {
+                let (s, result) = tokio::task::spawn_blocking(move || {
+                    let r = source.fetch();
+                    (source, r)
+                })
+                .await
+                .expect("generic source task panicked");
+                source = s;
+
+                match result {
+                    Ok(value) => {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        if let Err(e) = store.update_cached_data(source.id(), &value, now_secs) {
+                            log::warn!("generic source '{}': failed to store data: {}", source.name(), e);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("generic source '{}' fetch failed: {}", source.name(), e);
+                        store.update_last_error(source.id(), &e.to_string()).ok();
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(old) = tasks.remove(&source_id) {
+            old.abort();
+        }
+        tasks.insert(source_id, handle);
+    }
+
+    /// Stop the background fetch task for a source.
+    pub fn stop_source(&self, source_id: &str) {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(handle) = tasks.remove(source_id) {
+            handle.abort();
+        }
+    }
+
+    /// Execute a one-shot fetch. Returns the fetched data or error.
+    pub async fn fetch_once(source: GenericHttpSource) -> Result<serde_json::Value, String> {
+        let (_, result) = tokio::task::spawn_blocking(move || {
+            let r = source.fetch();
+            (source, r)
+        })
+        .await
+        .map_err(|e| format!("task panicked: {e}"))?;
+        result.map_err(|e| e.to_string())
+    }
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -95,6 +175,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
         .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
         .route("/api/admin/layout/{id}/item/{item_id}", delete(admin_delete_item))
+        // Generic data source CRUD
+        .route("/api/admin/sources", get(admin_list_sources))
+        .route("/api/admin/sources", post(admin_create_source))
+        .route("/api/admin/sources/{id}", get(admin_get_source))
+        .route("/api/admin/sources/{id}", put(admin_update_source))
+        .route("/api/admin/sources/{id}", delete(admin_delete_source))
+        .route("/api/admin/sources/{id}/fetch", post(admin_fetch_source))
         // Field mapping CRUD
         .route("/api/admin/sources/{id}/fields", get(admin_list_fields))
         .route("/api/admin/sources/{id}/fields", post(admin_create_field))
@@ -446,7 +533,7 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
         }
     };
 
-    let sources: Vec<serde_json::Value> = instances
+    let mut sources: Vec<serde_json::Value> = instances
         .iter()
         .map(|inst| {
             let name = capitalize_first(&inst.id);
@@ -468,6 +555,28 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
             })
         })
         .collect();
+
+    // Include generic HTTP sources
+    if let Ok(generic_sources) = app.source_store.list() {
+        for ds in &generic_sources {
+            let last_fetched_at = ds.last_fetched_at.map(|ts| ts as u64);
+            let data_age_secs = ds.last_fetched_at.and_then(|ts| {
+                if ts > 0 && now as i64 >= ts {
+                    Some((now as i64 - ts) as u64)
+                } else {
+                    None
+                }
+            });
+            sources.push(serde_json::json!({
+                "id": ds.id,
+                "name": ds.name,
+                "enabled": true,
+                "last_fetched_at": last_fetched_at,
+                "last_error": ds.last_error,
+                "data_age_secs": data_age_secs,
+            }));
+        }
+    }
 
     let body = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -1122,6 +1231,238 @@ async fn admin_delete_item(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ─── Generic data source handlers ───────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct SourceSummary {
+    id: String,
+    name: String,
+    source_kind: String,
+    url: Option<String>,
+    method: Option<String>,
+    refresh_interval_secs: Option<i64>,
+    last_fetched_at: Option<i64>,
+    last_error: Option<String>,
+}
+
+/// `GET /api/admin/sources` — list all sources (built-in + generic).
+async fn admin_list_sources(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut sources: Vec<SourceSummary> = Vec::new();
+
+    if let Ok(instances) = app.instance_store.list_instances() {
+        for inst in instances {
+            sources.push(SourceSummary {
+                id: inst.id.clone(),
+                name: capitalize_first(&inst.id),
+                source_kind: "builtin".to_string(),
+                url: None,
+                method: None,
+                refresh_interval_secs: None,
+                last_fetched_at: inst.last_fetched_at,
+                last_error: inst.last_error,
+            });
+        }
+    }
+
+    if let Ok(generic_sources) = app.source_store.list() {
+        for ds in generic_sources {
+            sources.push(SourceSummary {
+                id: ds.id.clone(),
+                name: ds.name.clone(),
+                source_kind: "generic".to_string(),
+                url: Some(ds.url.clone()),
+                method: Some(ds.method.clone()),
+                refresh_interval_secs: Some(ds.refresh_interval_secs),
+                last_fetched_at: ds.last_fetched_at,
+                last_error: ds.last_error,
+            });
+        }
+    }
+
+    Json(sources).into_response()
+}
+
+/// `POST /api/admin/sources` — create a new generic data source.
+async fn admin_create_source(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<DataSourceConfig>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.source_store.create(&payload) {
+        Ok(ds) => {
+            let generic = GenericHttpSource::from_data_source(&ds);
+            app.scheduler.spawn_source(generic);
+            (StatusCode::CREATED, Json(ds)).into_response()
+        }
+        Err(e) => {
+            log::error!("admin_create_source: {}", e);
+            let status = if matches!(e, crate::source_store::SourceStoreError::Validation(_)) {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+/// `GET /api/admin/sources/:id` — get source details.
+async fn admin_get_source(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.source_store.get(&source_id) {
+        Ok(Some(ds)) => return Json(ds).into_response(),
+        Ok(None) => {}
+        Err(e) => {
+            log::error!("admin_get_source '{}': {}", source_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    match app.instance_store.get_instance(&source_id) {
+        Ok(Some(inst)) => {
+            Json(serde_json::json!({
+                "id": inst.id,
+                "name": capitalize_first(&inst.id),
+                "source_kind": "builtin",
+                "cached_data": inst.cached_data,
+                "last_fetched_at": inst.last_fetched_at,
+                "last_error": inst.last_error,
+            }))
+            .into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_get_source '{}': {}", source_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `PUT /api/admin/sources/:id` — update a generic source config.
+async fn admin_update_source(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<DataSourceConfig>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.source_store.update(&source_id, &payload) {
+        Ok(Some(ds)) => {
+            app.scheduler.stop_source(&source_id);
+            let generic = GenericHttpSource::from_data_source(&ds);
+            app.scheduler.spawn_source(generic);
+            Json(ds).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_update_source '{}': {}", source_id, e);
+            let status = if matches!(e, crate::source_store::SourceStoreError::Validation(_)) {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+/// `DELETE /api/admin/sources/:id` — delete a generic source + field mappings.
+async fn admin_delete_source(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.source_store.delete(&source_id) {
+        Ok(true) => {
+            app.scheduler.stop_source(&source_id);
+            if let Ok(fields) = app.layout_store.list_field_mappings(&source_id) {
+                for field in fields {
+                    app.layout_store.delete_field_mapping(&field.id).ok();
+                }
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_delete_source '{}': {}", source_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `POST /api/admin/sources/:id/fetch` — trigger an immediate one-shot fetch.
+async fn admin_fetch_source(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let ds = match app.source_store.get(&source_id) {
+        Ok(Some(ds)) => ds,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_fetch_source '{}': {}", source_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let generic = GenericHttpSource::from_data_source(&ds);
+    match SourceScheduler::fetch_once(generic).await {
+        Ok(value) => {
+            let now_secs = unix_now_secs() as i64;
+            app.source_store
+                .update_cached_data(&source_id, &value, now_secs)
+                .ok();
+            Json(serde_json::json!({
+                "success": true,
+                "data": value,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            app.source_store
+                .update_last_error(&source_id, &e)
+                .ok();
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": e,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 // ─── Field mapping handlers ─────────────────────────────────────────────────
 
 /// `GET /api/admin/sources/:id/fields` — list field mappings for a source.
@@ -1221,6 +1562,8 @@ async fn admin_delete_field(
 }
 
 /// `GET /api/admin/sources/:id/data` — return cached_data JSON for a source.
+///
+/// Checks both built-in sources (instance store) and generic sources (source store).
 async fn admin_get_source_data(
     headers: HeaderMap,
     Path(source_id): Path<String>,
@@ -1230,9 +1573,23 @@ async fn admin_get_source_data(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // Check built-in sources first
     match app.instance_store.get_instance(&source_id) {
         Ok(Some(inst)) => {
             let data = inst.cached_data.unwrap_or(Value::Null);
+            return Json(data).into_response();
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log::error!("admin_get_source_data '{}': {}", source_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    // Check generic sources
+    match app.source_store.get(&source_id) {
+        Ok(Some(ds)) => {
+            let data = ds.cached_data.unwrap_or(Value::Null);
             Json(data).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -1387,6 +1744,7 @@ mod tests {
     fn make_test_state() -> Arc<AppState> {
         use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
         use crate::layout_store::LayoutStore;
+        use crate::source_store::SourceStore;
 
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
@@ -1395,6 +1753,7 @@ mod tests {
 
         let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
         let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
+        let source_store = Arc::new(SourceStore::open(&db_path).unwrap());
         let config = Config {
             display: DisplayConfig { width: 800, height: 480 },
             location: LocationConfig {
@@ -1428,10 +1787,14 @@ mod tests {
             "http://localhost:3001".to_string(),
         ));
 
+        let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
+
         Arc::new(AppState {
             compositor,
             instance_store,
             layout_store,
+            source_store,
+            scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key: "test-key".to_string(),
             refresh_rate_secs: 60,
@@ -1570,6 +1933,7 @@ mod tests {
     fn make_writable_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
         use crate::layout_store::LayoutStore;
+        use crate::source_store::SourceStore;
 
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
@@ -1578,6 +1942,7 @@ mod tests {
 
         let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
         let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
+        let source_store = Arc::new(SourceStore::open(&db_path).unwrap());
         let config = Config {
             display: DisplayConfig { width: 800, height: 480 },
             location: LocationConfig { latitude: 48.4, longitude: -122.3, name: "Test".to_string() },
@@ -1602,10 +1967,14 @@ mod tests {
             "http://localhost:3001".to_string(),
         ));
 
+        let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
+
         let state = Arc::new(AppState {
             compositor,
             instance_store,
             layout_store,
+            source_store,
+            scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key: "test-key".to_string(),
             refresh_rate_secs: 60,
