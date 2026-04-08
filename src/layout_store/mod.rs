@@ -629,6 +629,31 @@ impl LayoutStore {
         Ok(mappings)
     }
 
+    /// Update a field mapping's name and/or json_path.  Returns the updated row,
+    /// or `None` if the ID doesn't exist.
+    pub fn update_field_mapping(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        json_path: Option<&str>,
+    ) -> Result<Option<FieldMapping>, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(name) = name {
+            conn.execute(
+                "UPDATE data_source_fields SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
+        }
+        if let Some(json_path) = json_path {
+            conn.execute(
+                "UPDATE data_source_fields SET json_path = ?1 WHERE id = ?2",
+                params![json_path, id],
+            )?;
+        }
+        drop(conn);
+        self.get_field_mapping(id)
+    }
+
     /// Delete a field mapping by ID.
     pub fn delete_field_mapping(&self, id: &str) -> Result<(), LayoutStoreError> {
         let conn = self.conn.lock().unwrap();

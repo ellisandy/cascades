@@ -20,6 +20,11 @@
 //! - `POST /api/admin/layout/{id}/item`                 — add item to layout
 //! - `PUT  /api/admin/layout/{id}/item/{item_id}`       — update single item
 //! - `DELETE /api/admin/layout/{id}/item/{item_id}`     — remove item
+//! - `GET  /api/admin/sources/{id}/fields`              — list field mappings for a source
+//! - `POST /api/admin/sources/{id}/fields`              — create a field mapping
+//! - `PUT  /api/admin/fields/{id}`                      — update a field mapping
+//! - `DELETE /api/admin/fields/{id}`                    — delete a field mapping
+//! - `GET  /api/admin/sources/{id}/data`                — cached data JSON for a source
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -90,6 +95,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
         .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
         .route("/api/admin/layout/{id}/item/{item_id}", delete(admin_delete_item))
+        // Field mapping CRUD
+        .route("/api/admin/sources/{id}/fields", get(admin_list_fields))
+        .route("/api/admin/sources/{id}/fields", post(admin_create_field))
+        .route("/api/admin/fields/{id}", put(admin_update_field))
+        .route("/api/admin/fields/{id}", delete(admin_delete_field))
+        .route("/api/admin/sources/{id}/data", get(admin_get_source_data))
         .with_state(state)
 }
 
@@ -589,6 +600,20 @@ struct PluginInstanceSummary {
     id: String,
     name: String,
     supported_variants: Vec<&'static str>,
+}
+
+/// Body for `POST /api/admin/sources/:id/fields`.
+#[derive(Debug, Deserialize)]
+struct CreateFieldPayload {
+    name: String,
+    json_path: String,
+}
+
+/// Body for `PUT /api/admin/fields/:id`.
+#[derive(Debug, Deserialize)]
+struct UpdateFieldPayload {
+    name: Option<String>,
+    json_path: Option<String>,
 }
 
 // ─── Admin handlers ───────────────────────────────────────────────────────────
@@ -1095,6 +1120,127 @@ async fn admin_delete_item(
     app.image_cache.write().unwrap().remove(&id);
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ─── Field mapping handlers ─────────────────────────────────────────────────
+
+/// `GET /api/admin/sources/:id/fields` — list field mappings for a source.
+async fn admin_list_fields(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.layout_store.list_field_mappings(&source_id) {
+        Ok(fields) => Json(fields).into_response(),
+        Err(e) => {
+            log::error!("admin_list_fields '{}': {}", source_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `POST /api/admin/sources/:id/fields` — create a field mapping.
+async fn admin_create_field(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<CreateFieldPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let id = format!(
+        "fm-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    // Determine source_type: "builtin" if it matches a known plugin instance, else "generic".
+    let source_type = match app.instance_store.get_instance(&source_id) {
+        Ok(Some(_)) => "builtin",
+        _ => "generic",
+    };
+
+    match app.layout_store.create_field_mapping(&id, &source_id, source_type, &payload.name, &payload.json_path) {
+        Ok(fm) => (StatusCode::CREATED, Json(fm)).into_response(),
+        Err(e) => {
+            log::error!("admin_create_field '{}': {}", source_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `PUT /api/admin/fields/:id` — update a field mapping.
+async fn admin_update_field(
+    headers: HeaderMap,
+    Path(field_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<UpdateFieldPayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.layout_store.update_field_mapping(
+        &field_id,
+        payload.name.as_deref(),
+        payload.json_path.as_deref(),
+    ) {
+        Ok(Some(fm)) => Json(fm).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_update_field '{}': {}", field_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `DELETE /api/admin/fields/:id` — delete a field mapping.
+async fn admin_delete_field(
+    headers: HeaderMap,
+    Path(field_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    if let Err(e) = app.layout_store.delete_field_mapping(&field_id) {
+        log::error!("admin_delete_field '{}': {}", field_id, e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /api/admin/sources/:id/data` — return cached_data JSON for a source.
+async fn admin_get_source_data(
+    headers: HeaderMap,
+    Path(source_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match app.instance_store.get_instance(&source_id) {
+        Ok(Some(inst)) => {
+            let data = inst.cached_data.unwrap_or(Value::Null);
+            Json(data).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_get_source_data '{}': {}", source_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -2181,5 +2327,270 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["layout_id"], "default");
+    }
+
+    // ── Field mapping CRUD tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_list_fields_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources/weather/fields")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_list_fields_returns_empty_for_new_source() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/sources/weather/fields")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.is_array());
+        assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn admin_create_field_returns_201() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({
+            "name": "Water Level",
+            "json_path": "$.water_level_ft"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/river/fields")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["id"].is_string());
+        assert_eq!(body["name"], "Water Level");
+        assert_eq!(body["json_path"], "$.water_level_ft");
+        assert_eq!(body["data_source_id"], "river");
+    }
+
+    #[tokio::test]
+    async fn admin_create_field_requires_auth() {
+        let app = build_router(make_test_state());
+        let payload = serde_json::json!({
+            "name": "Temp",
+            "json_path": "$.temp"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/weather/fields")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_create_and_list_fields() {
+        let (state, _dir) = make_writable_test_state();
+
+        // Create two fields for river
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({ "name": "Level", "json_path": "$.level" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/river/fields")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        app.oneshot(req).await.unwrap();
+
+        // Need a small delay so the millis-based ID is different
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({ "name": "Flow", "json_path": "$.flow" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/river/fields")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        app.oneshot(req).await.unwrap();
+
+        // List — should have 2
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/sources/river/fields")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn admin_update_field_changes_name() {
+        let (state, _dir) = make_writable_test_state();
+
+        // Create a field
+        state.layout_store.create_field_mapping(
+            "fm-test-1", "river", "builtin", "Old Name", "$.level",
+        ).unwrap();
+
+        // Update it
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({ "name": "New Name" });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/fields/fm-test-1")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["name"], "New Name");
+        assert_eq!(body["json_path"], "$.level"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn admin_update_field_404_for_missing() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({ "name": "Nope" });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/fields/nonexistent")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_update_field_requires_auth() {
+        let app = build_router(make_test_state());
+        let payload = serde_json::json!({ "name": "Nope" });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/fields/fm-1")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_field_returns_204() {
+        let (state, _dir) = make_writable_test_state();
+        state.layout_store.create_field_mapping(
+            "fm-del-1", "river", "builtin", "ToDelete", "$.x",
+        ).unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/fields/fm-del-1")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify deleted
+        assert!(state.layout_store.get_field_mapping("fm-del-1").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_delete_field_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/fields/fm-1")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_data_returns_cached_json() {
+        let (state, _dir) = make_writable_test_state();
+
+        // Set some cached data
+        let data = serde_json::json!({ "water_level_ft": 8.5, "flow_cfs": 1200 });
+        state.instance_store.update_cached_data("river", &data, 1_700_000_000).unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/sources/river/data")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["water_level_ft"], 8.5);
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_data_returns_null_when_no_data() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/sources/weather/data")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.is_null());
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_data_404_for_missing_source() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/sources/nonexistent/data")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_data_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources/weather/data")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
