@@ -407,6 +407,105 @@
       font-size: 13px;
     }
     #datafield-modal select:focus { outline: none; border-color: #58a6ff; }
+
+    /* ── JSON Explorer modal ── */
+    #json-explorer-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1002;
+    }
+    #json-explorer-modal.hidden { display: none; }
+    #json-explorer-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 20px;
+      width: 520px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    #json-explorer-box h3 {
+      margin-bottom: 12px;
+      color: #58a6ff;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    #json-tree-container {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 120px;
+      max-height: 60vh;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 8px;
+      font-size: 12px;
+    }
+    .jtree-node { padding-left: 16px; }
+    .jtree-root { padding-left: 0; }
+    .jtree-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 0;
+      line-height: 1.6;
+    }
+    .jtree-toggle {
+      cursor: pointer;
+      color: #8b949e;
+      user-select: none;
+      width: 12px;
+      text-align: center;
+      flex-shrink: 0;
+      font-size: 10px;
+    }
+    .jtree-toggle:hover { color: #c9d1d9; }
+    .jtree-key { color: #79c0ff; }
+    .jtree-colon { color: #8b949e; }
+    .jtree-val-string { color: #a5d6ff; }
+    .jtree-val-number { color: #d2a8ff; }
+    .jtree-val-bool { color: #ff7b72; }
+    .jtree-val-null { color: #8b949e; font-style: italic; }
+    .jtree-type-hint { color: #484f58; font-size: 11px; }
+    .jtree-add-btn {
+      background: none;
+      border: 1px solid #30363d;
+      color: #3fb950;
+      font-size: 10px;
+      padding: 0 5px;
+      border-radius: 3px;
+      cursor: pointer;
+      margin-left: 6px;
+      font-family: inherit;
+      white-space: nowrap;
+      line-height: 1.6;
+    }
+    .jtree-add-btn:hover { background: #238636; color: #fff; border-color: #238636; }
+    .jtree-children { display: block; }
+    .jtree-children.collapsed { display: none; }
+    #json-explorer-empty {
+      color: #8b949e;
+      text-align: center;
+      padding: 20px;
+    }
+    /* ── Inline explorer in DataField modal ── */
+    #df-explorer-inline {
+      max-height: 200px;
+      overflow-y: auto;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 6px;
+      margin-top: 6px;
+      font-size: 11px;
+    }
+    #df-explorer-inline.hidden { display: none; }
+    #df-explorer-inline .jtree-node { padding-left: 14px; }
   </style>
 </head>
 <body>
@@ -545,6 +644,22 @@
       <button class="btn btn-primary" onclick="submitDataFieldModal()">Add</button>
       <button class="btn" onclick="cancelDataFieldModal()">Cancel</button>
     </div>
+    <div id="df-explorer-inline" class="hidden"></div>
+  </div>
+</div>
+
+<!-- ── JSON Explorer modal (standalone) ── -->
+<div id="json-explorer-modal" class="hidden">
+  <div id="json-explorer-box">
+    <h3 id="json-explorer-title">Browse Fields</h3>
+    <div id="json-tree-container">
+      <div id="json-explorer-empty">No data loaded.</div>
+    </div>
+    <div style="margin-top:12px; display:flex; gap:8px; flex-shrink:0;">
+      <button class="btn" id="json-explorer-fetch-btn" onclick="explorerFetchNow()" style="display:none">Fetch Now</button>
+      <div style="flex:1"></div>
+      <button class="btn" onclick="closeJsonExplorer()">Close</button>
+    </div>
   </div>
 </div>
 
@@ -574,6 +689,7 @@ const state = {
 let canvasScale = 1;
 let dragCtx = null;
 let resizeCtx = null;
+let cachedPlugins = [];
 
 // ────────────────────────────────────────
 // Init
@@ -970,7 +1086,9 @@ async function loadPlugins() {
         '<p class="no-sel" style="color:red">Failed to load plugins (' + res.status + ') — check API key</p>';
       return;
     }
-    buildPalette(await res.json());
+    var plugins = await res.json();
+    cachedPlugins = plugins;
+    buildPalette(plugins);
   } catch (e) {
     document.getElementById('plugin-list').innerHTML =
       '<p class="no-sel" style="color:red">Error loading plugins: ' + e.message + '</p>';
@@ -1086,10 +1204,12 @@ function buildPalette(plugins) {
         safeId + '\',\'' + v + '\')" title="Add ' + safeId + ' (' + v + ')">' +
         (ABBREV[v] || v) + '</button>';
     }).join('');
+    var browseBtn = '<button class="variant-btn" onclick="event.stopPropagation();openJsonExplorer(\'' +
+      safeId + '\')" title="Browse JSON fields for ' + safeName + '">\uD83D\uDD0D fields</button>';
     return '<div class="palette-item" draggable="true"' +
       ' ondragstart="onPaletteDragStart(event,{type:\'plugin\',id:\'' + safeId + '\',variant:\'full\'})">' +
       '<div class="palette-item-name">' + safeName + '</div>' +
-      '<div class="palette-variants">' + variants + '</div></div>';
+      '<div class="palette-variants">' + variants + ' ' + browseBtn + '</div></div>';
   }).join('');
 }
 
@@ -1553,10 +1673,267 @@ function cancelTextModal() {
 }
 
 // ────────────────────────────────────────
+// JSON Tree Explorer
+// ────────────────────────────────────────
+let explorerSourceId = null;
+
+function buildJsonTree(data, path, keyName) {
+  var node = document.createElement('div');
+  node.className = 'jtree-node';
+
+  if (data === null || data === undefined) {
+    node.appendChild(makeLeafRow(keyName, 'null', 'jtree-val-null', path));
+    return node;
+  }
+  if (typeof data === 'object' && !Array.isArray(data)) {
+    var keys = Object.keys(data);
+    var row = document.createElement('div');
+    row.className = 'jtree-row';
+    var toggle = document.createElement('span');
+    toggle.className = 'jtree-toggle';
+    toggle.textContent = '\u25BC';
+    row.appendChild(toggle);
+    if (keyName !== undefined) {
+      var k = document.createElement('span');
+      k.className = 'jtree-key';
+      k.textContent = keyName;
+      row.appendChild(k);
+      var c = document.createElement('span');
+      c.className = 'jtree-colon';
+      c.textContent = ': ';
+      row.appendChild(c);
+    }
+    var hint = document.createElement('span');
+    hint.className = 'jtree-type-hint';
+    hint.textContent = '{' + keys.length + '}';
+    row.appendChild(hint);
+    node.appendChild(row);
+
+    var children = document.createElement('div');
+    children.className = 'jtree-children';
+    keys.forEach(function(childKey) {
+      var childPath = path + '.' + childKey;
+      children.appendChild(buildJsonTree(data[childKey], childPath, childKey));
+    });
+    node.appendChild(children);
+
+    toggle.onclick = function() {
+      var collapsed = children.classList.toggle('collapsed');
+      toggle.textContent = collapsed ? '\u25B6' : '\u25BC';
+    };
+    return node;
+  }
+  if (Array.isArray(data)) {
+    var row = document.createElement('div');
+    row.className = 'jtree-row';
+    var toggle = document.createElement('span');
+    toggle.className = 'jtree-toggle';
+    toggle.textContent = '\u25BC';
+    row.appendChild(toggle);
+    if (keyName !== undefined) {
+      var k = document.createElement('span');
+      k.className = 'jtree-key';
+      k.textContent = keyName;
+      row.appendChild(k);
+      var c = document.createElement('span');
+      c.className = 'jtree-colon';
+      c.textContent = ': ';
+      row.appendChild(c);
+    }
+    var hint = document.createElement('span');
+    hint.className = 'jtree-type-hint';
+    hint.textContent = '[' + data.length + ']';
+    row.appendChild(hint);
+    node.appendChild(row);
+
+    var children = document.createElement('div');
+    children.className = 'jtree-children';
+    data.forEach(function(val, idx) {
+      var childPath = path + '[' + idx + ']';
+      children.appendChild(buildJsonTree(val, childPath, '[' + idx + ']'));
+    });
+    node.appendChild(children);
+
+    toggle.onclick = function() {
+      var collapsed = children.classList.toggle('collapsed');
+      toggle.textContent = collapsed ? '\u25B6' : '\u25BC';
+    };
+    return node;
+  }
+  // Leaf: string, number, boolean
+  var cls = 'jtree-val-string';
+  var display = JSON.stringify(data);
+  if (typeof data === 'number') { cls = 'jtree-val-number'; display = String(data); }
+  else if (typeof data === 'boolean') { cls = 'jtree-val-bool'; display = String(data); }
+  node.appendChild(makeLeafRow(keyName, display, cls, path));
+  return node;
+}
+
+function makeLeafRow(keyName, display, valClass, path) {
+  var row = document.createElement('div');
+  row.className = 'jtree-row';
+  var sp = document.createElement('span');
+  sp.style.width = '12px';
+  sp.style.flexShrink = '0';
+  row.appendChild(sp);
+  if (keyName !== undefined) {
+    var k = document.createElement('span');
+    k.className = 'jtree-key';
+    k.textContent = keyName;
+    row.appendChild(k);
+    var c = document.createElement('span');
+    c.className = 'jtree-colon';
+    c.textContent = ': ';
+    row.appendChild(c);
+  }
+  var v = document.createElement('span');
+  v.className = valClass;
+  v.textContent = display;
+  row.appendChild(v);
+  var btn = document.createElement('button');
+  btn.className = 'jtree-add-btn';
+  btn.textContent = '+ Add Field';
+  btn.onclick = function(e) {
+    e.stopPropagation();
+    onAddFieldFromTree(path, keyName);
+  };
+  row.appendChild(btn);
+  return row;
+}
+
+function renderTreeInto(container, data) {
+  container.innerHTML = '';
+  var tree = buildJsonTree(data, '$', undefined);
+  tree.classList.add('jtree-root');
+  container.appendChild(tree);
+}
+
+async function openJsonExplorer(sourceId) {
+  explorerSourceId = sourceId;
+  var modal = document.getElementById('json-explorer-modal');
+  var container = document.getElementById('json-tree-container');
+  var fetchBtn = document.getElementById('json-explorer-fetch-btn');
+  var titleEl = document.getElementById('json-explorer-title');
+  var srcName = sourceId;
+  for (var i = 0; i < cachedPlugins.length; i++) {
+    if (cachedPlugins[i].id === sourceId) { srcName = cachedPlugins[i].name || sourceId; break; }
+  }
+  titleEl.textContent = 'Browse Fields: ' + srcName;
+  container.innerHTML = '<div id="json-explorer-empty">Loading...</div>';
+  fetchBtn.style.display = 'none';
+  modal.classList.remove('hidden');
+
+  try {
+    var res = await apiFetch('/api/admin/sources/' + encodeURIComponent(sourceId) + '/data');
+    if (res.status === 404) {
+      container.innerHTML = '<div id="json-explorer-empty">No cached data for this source.</div>';
+      fetchBtn.style.display = '';
+      return;
+    }
+    if (!res.ok) {
+      container.innerHTML = '<div id="json-explorer-empty">Failed to load data (HTTP ' + res.status + ')</div>';
+      return;
+    }
+    var data = await res.json();
+    if (data === null || data === undefined) {
+      container.innerHTML = '<div id="json-explorer-empty">Source has no cached data yet.</div>';
+      fetchBtn.style.display = '';
+      return;
+    }
+    renderTreeInto(container, data);
+  } catch (e) {
+    container.innerHTML = '<div id="json-explorer-empty">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function explorerFetchNow() {
+  if (!explorerSourceId) return;
+  var fetchBtn = document.getElementById('json-explorer-fetch-btn');
+  fetchBtn.disabled = true;
+  fetchBtn.textContent = 'Fetching...';
+  var container = document.getElementById('json-tree-container');
+  try {
+    var res = await apiFetch('/api/admin/sources/' + encodeURIComponent(explorerSourceId) + '/data');
+    if (!res.ok || res.status === 404) {
+      container.innerHTML = '<div id="json-explorer-empty">Still no data. The source may not have fetched yet.</div>';
+    } else {
+      var data = await res.json();
+      if (data === null || data === undefined) {
+        container.innerHTML = '<div id="json-explorer-empty">Still no data available.</div>';
+      } else {
+        renderTreeInto(container, data);
+        fetchBtn.style.display = 'none';
+      }
+    }
+  } catch (e) {
+    container.innerHTML = '<div id="json-explorer-empty">Error: ' + esc(e.message) + '</div>';
+  }
+  fetchBtn.disabled = false;
+  fetchBtn.textContent = 'Fetch Now';
+}
+
+function closeJsonExplorer() {
+  document.getElementById('json-explorer-modal').classList.add('hidden');
+}
+
+function onAddFieldFromTree(jsonPath, leafName) {
+  var srcId = explorerSourceId;
+  var dfModal = document.getElementById('datafield-modal');
+  var modalAlreadyOpen = !dfModal.classList.contains('hidden');
+
+  // Close standalone explorer (no-op if hidden)
+  document.getElementById('json-explorer-modal').classList.add('hidden');
+
+  if (modalAlreadyOpen) {
+    // Inline explorer: just populate JSONPath and label, don't reopen
+    document.getElementById('df-modal-jsonpath').value = jsonPath;
+    var readable = leafName || '';
+    if (readable.charAt(0) === '[') readable = '';
+    readable = readable.replace(/[_-]/g, ' ').replace(/\b\w/g, function(ch) { return ch.toUpperCase(); });
+    document.getElementById('df-modal-label').value = readable;
+    document.getElementById('df-modal-jsonpath').focus();
+  } else {
+    // Standalone explorer: open the DataField modal pre-populated
+    showDataFieldModal();
+    setTimeout(function() {
+      if (srcId) {
+        document.getElementById('df-modal-source').value = srcId;
+      }
+      document.getElementById('df-modal-jsonpath').value = jsonPath;
+      var readable = leafName || '';
+      if (readable.charAt(0) === '[') readable = '';
+      readable = readable.replace(/[_-]/g, ' ').replace(/\b\w/g, function(ch) { return ch.toUpperCase(); });
+      document.getElementById('df-modal-label').value = readable;
+    }, 50);
+  }
+}
+
+async function showInlineExplorer(sourceId) {
+  var container = document.getElementById('df-explorer-inline');
+  if (!sourceId) { container.classList.add('hidden'); return; }
+  container.classList.remove('hidden');
+  container.innerHTML = '<span style="color:#8b949e">Loading...</span>';
+  explorerSourceId = sourceId;
+  try {
+    var res = await apiFetch('/api/admin/sources/' + encodeURIComponent(sourceId) + '/data');
+    if (!res.ok || res.status === 404) {
+      container.innerHTML = '<span style="color:#8b949e">No cached data. Select a JSONPath manually.</span>';
+      return;
+    }
+    var data = await res.json();
+    if (data === null || data === undefined) {
+      container.innerHTML = '<span style="color:#8b949e">No data yet.</span>';
+      return;
+    }
+    renderTreeInto(container, data);
+  } catch (e) {
+    container.innerHTML = '<span style="color:#f85149">Error: ' + esc(e.message) + '</span>';
+  }
+}
+
+// ────────────────────────────────────────
 // Data Field modal
 // ────────────────────────────────────────
-let cachedPlugins = [];
-
 async function showDataFieldModal() {
   const modal = document.getElementById('datafield-modal');
   modal.classList.remove('hidden');
@@ -1575,11 +1952,15 @@ async function showDataFieldModal() {
   document.getElementById('df-modal-label').value = '';
   document.getElementById('df-modal-format').value = '{{value}}';
   document.getElementById('df-modal-fontsize').value = '24';
+  // Load inline explorer for the first source
+  var firstSource = sel.value;
+  if (firstSource) showInlineExplorer(firstSource);
+  else document.getElementById('df-explorer-inline').classList.add('hidden');
   setTimeout(function() { document.getElementById('df-modal-jsonpath').focus(); }, 0);
 }
 
 function onDfSourceChange(sourceId) {
-  // Could load source data for preview, but not required for Phase 1c
+  showInlineExplorer(sourceId);
 }
 
 async function submitDataFieldModal() {
@@ -1626,6 +2007,7 @@ async function submitDataFieldModal() {
 
 function cancelDataFieldModal() {
   document.getElementById('datafield-modal').classList.add('hidden');
+  document.getElementById('df-explorer-inline').classList.add('hidden');
 }
 
 // ────────────────────────────────────────
