@@ -407,6 +407,82 @@
       font-size: 13px;
     }
     #datafield-modal select:focus { outline: none; border-color: #58a6ff; }
+
+    /* ── Sources modal ── */
+    #sources-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1001;
+    }
+    #sources-modal.hidden { display: none; }
+    #sources-modal-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 20px;
+      width: 560px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    #sources-modal-box h3 { margin-bottom: 12px; color: #58a6ff; font-size: 14px; }
+    #sources-modal-box label {
+      display: block;
+      color: #8b949e;
+      font-size: 12px;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+    #sources-modal-box input, #sources-modal-box select, #sources-modal-box textarea {
+      width: 100%;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 6px 8px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    #sources-modal-box input:focus, #sources-modal-box textarea:focus {
+      outline: none;
+      border-color: #58a6ff;
+    }
+    .source-list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      margin-bottom: 4px;
+      cursor: pointer;
+    }
+    .source-list-item:hover { background: #21262d; }
+    .source-list-item .source-name { font-weight: bold; color: #c9d1d9; }
+    .source-list-item .source-status { font-size: 11px; color: #8b949e; }
+    .header-row {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .header-row input { flex: 1; }
+    .header-row .secret-toggle {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      white-space: nowrap;
+      cursor: pointer;
+      color: #8b949e;
+      font-size: 11px;
+      min-width: 50px;
+    }
+    .header-row .secret-toggle input[type=checkbox] { width: auto; }
+    .header-row .btn { padding: 4px 6px; font-size: 11px; }
+    input[type=password] { font-family: inherit; }
   </style>
 </head>
 <body>
@@ -434,6 +510,8 @@
     <input type="checkbox" id="snap-toggle" onchange="toggleSnap(this.checked)">
     Snap
   </label>
+  <div class="toolbar-sep"></div>
+  <button class="btn" onclick="openSourcesPanel()">Sources</button>
   <div class="toolbar-sep"></div>
   <span id="status-msg"></span>
 </div>
@@ -544,6 +622,56 @@
     <div class="modal-btns">
       <button class="btn btn-primary" onclick="submitDataFieldModal()">Add</button>
       <button class="btn" onclick="cancelDataFieldModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sources modal ── -->
+<div id="sources-modal" class="hidden">
+  <div id="sources-modal-box">
+    <!-- List view -->
+    <div id="sources-list-view">
+      <h3>Data Sources</h3>
+      <div id="sources-list"></div>
+      <div class="modal-btns">
+        <button class="btn btn-primary" onclick="showSourceForm(null)">Add Source</button>
+        <button class="btn" onclick="closeSourcesPanel()">Close</button>
+      </div>
+    </div>
+    <!-- Edit/Create form -->
+    <div id="sources-form-view" style="display:none">
+      <h3 id="source-form-title">Add Source</h3>
+      <input type="hidden" id="src-form-id">
+      <label>Name</label>
+      <input type="text" id="src-form-name" placeholder="My API Source">
+      <label>URL</label>
+      <input type="text" id="src-form-url" placeholder="https://api.example.com/data">
+      <label>Method</label>
+      <select id="src-form-method">
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+      </select>
+      <label>Refresh Interval</label>
+      <select id="src-form-interval">
+        <option value="30">30 seconds</option>
+        <option value="60">1 minute</option>
+        <option value="300" selected>5 minutes</option>
+        <option value="900">15 minutes</option>
+        <option value="1800">30 minutes</option>
+        <option value="3600">1 hour</option>
+      </select>
+      <label>Response Root Path (optional JSONPath)</label>
+      <input type="text" id="src-form-root-path" placeholder="$.data.results">
+      <label>Headers</label>
+      <div id="src-form-headers"></div>
+      <button class="btn" onclick="addHeaderRow()" style="margin-top:4px;font-size:11px">+ Add Header</button>
+      <label>Body (POST only)</label>
+      <textarea id="src-form-body" rows="3" placeholder="Optional request body"></textarea>
+      <div class="modal-btns">
+        <button class="btn btn-primary" onclick="submitSourceForm()">Save</button>
+        <button class="btn" onclick="showSourcesList()">Back</button>
+        <button class="btn btn-danger" id="src-form-delete" onclick="deleteSource()" style="display:none">Delete</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1665,6 +1793,147 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ────────────────────────────────────────
+// Sources management
+// ────────────────────────────────────────
+function openSourcesPanel() {
+  document.getElementById('sources-modal').classList.remove('hidden');
+  loadSources();
+}
+function closeSourcesPanel() {
+  document.getElementById('sources-modal').classList.add('hidden');
+}
+function showSourcesList() {
+  document.getElementById('sources-list-view').style.display = '';
+  document.getElementById('sources-form-view').style.display = 'none';
+  loadSources();
+}
+async function loadSources() {
+  try {
+    const resp = await apiFetch('/api/admin/sources');
+    if (!resp.ok) return;
+    const sources = await resp.json();
+    const el = document.getElementById('sources-list');
+    if (sources.length === 0) {
+      el.innerHTML = '<p style="color:#8b949e;padding:8px">No generic data sources configured.</p>';
+      return;
+    }
+    el.innerHTML = sources.map(s => {
+      const status = s.last_error ? '⚠ error' : s.last_fetched_at ? '✓ ok' : '— never fetched';
+      const secretCount = s.encrypted_headers.length;
+      const badge = secretCount > 0 ? ` <span style="color:#f0883e;font-size:10px">[${secretCount} secret]</span>` : '';
+      return `<div class="source-list-item" onclick="showSourceForm('${esc(s.id)}')">
+        <span class="source-name">${esc(s.name)}${badge}</span>
+        <span class="source-status">${esc(status)}</span>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error('loadSources', e); }
+}
+async function showSourceForm(id) {
+  document.getElementById('sources-list-view').style.display = 'none';
+  document.getElementById('sources-form-view').style.display = '';
+  document.getElementById('src-form-headers').innerHTML = '';
+  document.getElementById('src-form-delete').style.display = id ? '' : 'none';
+  document.getElementById('source-form-title').textContent = id ? 'Edit Source' : 'Add Source';
+  if (id) {
+    try {
+      const resp = await apiFetch(`/api/admin/sources/${id}`);
+      if (!resp.ok) return;
+      const s = await resp.json();
+      document.getElementById('src-form-id').value = s.id;
+      document.getElementById('src-form-name').value = s.name;
+      document.getElementById('src-form-url').value = s.url;
+      document.getElementById('src-form-method').value = s.method;
+      document.getElementById('src-form-interval').value = String(s.refresh_interval_secs);
+      document.getElementById('src-form-root-path').value = s.response_root_path || '';
+      document.getElementById('src-form-body').value = s.body_template || '';
+      // Plain headers
+      (s.headers || []).forEach(h => addHeaderRow(h.key, h.value, false, false));
+      // Encrypted headers — show masked values with Change button
+      (s.encrypted_headers || []).forEach(h => addHeaderRow(h.key, '', true, true));
+    } catch(e) { console.error('showSourceForm', e); }
+  } else {
+    document.getElementById('src-form-id').value = '';
+    document.getElementById('src-form-name').value = '';
+    document.getElementById('src-form-url').value = '';
+    document.getElementById('src-form-method').value = 'GET';
+    document.getElementById('src-form-interval').value = '300';
+    document.getElementById('src-form-root-path').value = '';
+    document.getElementById('src-form-body').value = '';
+  }
+}
+function addHeaderRow(key, value, secret, masked) {
+  const container = document.getElementById('src-form-headers');
+  const row = document.createElement('div');
+  row.className = 'header-row';
+  const inputType = secret ? 'password' : 'text';
+  const placeholder = masked ? '••••••  (unchanged)' : 'Value';
+  row.innerHTML = `
+    <input type="text" placeholder="Header name" value="${esc(key || '')}" class="hdr-key">
+    <input type="${inputType}" placeholder="${placeholder}" value="${esc(value || '')}" class="hdr-value"${masked ? ' data-masked="1"' : ''}>
+    <label class="secret-toggle"><input type="checkbox" class="hdr-secret" ${secret ? 'checked' : ''} onchange="toggleHeaderSecret(this)">🔒</label>
+    <button class="btn btn-danger" onclick="this.parentElement.remove()" title="Remove header">✕</button>
+  `;
+  container.appendChild(row);
+}
+function toggleHeaderSecret(checkbox) {
+  const row = checkbox.closest('.header-row');
+  const input = row.querySelector('.hdr-value');
+  input.type = checkbox.checked ? 'password' : 'text';
+}
+async function submitSourceForm() {
+  const id = document.getElementById('src-form-id').value;
+  const headers = [];
+  document.querySelectorAll('#src-form-headers .header-row').forEach(row => {
+    const key = row.querySelector('.hdr-key').value.trim();
+    const value = row.querySelector('.hdr-value').value;
+    const secret = row.querySelector('.hdr-secret').checked;
+    const masked = row.querySelector('.hdr-value').dataset.masked === '1';
+    if (!key) return;
+    // Skip masked (unchanged) secret headers — they keep their existing encrypted value
+    if (secret && masked && !value) return;
+    headers.push({ key, value, secret });
+  });
+  const body = {
+    name: document.getElementById('src-form-name').value,
+    url: document.getElementById('src-form-url').value,
+    method: document.getElementById('src-form-method').value,
+    headers,
+    refresh_interval_secs: parseInt(document.getElementById('src-form-interval').value, 10),
+    response_root_path: document.getElementById('src-form-root-path').value || null,
+    body_template: document.getElementById('src-form-body').value || null,
+  };
+  try {
+    const url = id ? `/api/admin/sources/${id}` : '/api/admin/sources';
+    const method = id ? 'PUT' : 'POST';
+    const resp = await apiFetch(url, {
+      method,
+      body: JSON.stringify(body),
+    });
+    if (resp.ok) {
+      showToast(id ? 'Source updated' : 'Source created');
+      showSourcesList();
+    } else {
+      showToast('Error saving source', true);
+    }
+  } catch(e) { showToast('Error: ' + e.message, true); }
+}
+async function deleteSource() {
+  const id = document.getElementById('src-form-id').value;
+  if (!id || !confirm('Delete this data source?')) return;
+  try {
+    const resp = await apiFetch(`/api/admin/sources/${id}`, {
+      method: 'DELETE',
+    });
+    if (resp.ok) {
+      showToast('Source deleted');
+      showSourcesList();
+    } else {
+      showToast('Error deleting source', true);
+    }
+  } catch(e) { showToast('Error: ' + e.message, true); }
 }
 </script>
 </body>

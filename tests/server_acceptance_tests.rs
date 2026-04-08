@@ -990,8 +990,10 @@ fn make_api_app(
     use cascades::{
         api::{AppState, build_router},
         compositor::Compositor,
+        crypto::EncryptionKey,
         instance_store::InstanceStore,
         layout_store::{LayoutConfig, LayoutStore},
+        source_store::SourceStore,
         template::TemplateEngine,
     };
     use std::collections::HashMap;
@@ -1026,6 +1028,11 @@ fn make_api_app(
 
     let image_cache = Arc::new(RwLock::new(HashMap::<String, Vec<u8>>::new()));
 
+    let encryption_key = EncryptionKey::derive_from_api_key("test-bearer-key");
+    let source_store = Arc::new(
+        SourceStore::open(&db_path, encryption_key).expect("open source store"),
+    );
+
     let state = Arc::new(AppState {
         compositor,
         instance_store,
@@ -1035,6 +1042,7 @@ fn make_api_app(
         refresh_rate_secs: 42,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),
+        source_store,
     });
 
     let router = build_router(Arc::clone(&state));
@@ -1124,6 +1132,11 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         m
     }));
 
+    let encryption_key = cascades::crypto::EncryptionKey::derive_from_api_key("key");
+    let source_store = Arc::new(
+        cascades::source_store::SourceStore::open(&db_path, encryption_key).unwrap(),
+    );
+
     let state = Arc::new(cascades::api::AppState {
         compositor,
         instance_store,
@@ -1133,6 +1146,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         refresh_rate_secs: 60,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),
+        source_store,
     });
 
     let app = cascades::api::build_router(Arc::clone(&state));
@@ -1383,4 +1397,151 @@ async fn legacy_image_endpoint_still_works_with_new_router() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(ct, "image/png");
+}
+
+// ── Data Source CRUD with encrypted headers ──────────────────────────────────
+
+#[tokio::test]
+async fn source_crud_creates_and_lists_with_masked_secrets() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    // Create a source with one plain header and one secret header
+    let create_body = serde_json::json!({
+        "name": "Test API",
+        "url": "https://api.example.com/data",
+        "method": "GET",
+        "headers": [
+            { "key": "Accept", "value": "application/json", "secret": false },
+            { "key": "Authorization", "value": "Bearer sk-secret-12345", "secret": true }
+        ],
+        "refresh_interval_secs": 60
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/admin/sources")
+        .header("x-api-key", "test-bearer-key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(create_body.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Plain header value is visible
+    assert_eq!(created["headers"][0]["value"], "application/json");
+    // Secret header value is masked in response
+    assert_eq!(created["encrypted_headers"][0]["value"], "••••••");
+    assert_eq!(created["encrypted_headers"][0]["secret"], true);
+    assert_eq!(created["encrypted_headers"][0]["key"], "Authorization");
+}
+
+#[tokio::test]
+async fn source_get_masks_secret_headers() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, state) = make_api_app(tmp.path());
+
+    // Create a source directly through the store
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let src = cascades::source_store::DataSource {
+        id: "test-src".into(),
+        name: "Test".into(),
+        url: "https://example.com".into(),
+        method: "GET".into(),
+        headers: vec![],
+        encrypted_headers: vec![cascades::source_store::HeaderEntry {
+            key: "X-Api-Key".into(),
+            value: "super-secret-value".into(),
+            secret: true,
+        }],
+        body_template: None,
+        response_root_path: None,
+        refresh_interval_secs: 300,
+        cached_data: None,
+        last_fetched_at: None,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state.source_store.create(&src).unwrap();
+
+    // GET the source — secret values should be masked
+    let req = Request::builder()
+        .uri("/api/admin/sources/test-src")
+        .header("x-api-key", "test-bearer-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let source: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(source["encrypted_headers"][0]["value"], "••••••");
+    // The actual secret must NOT appear in the response
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("super-secret-value"));
+}
+
+#[tokio::test]
+async fn source_delete_returns_204() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, state) = make_api_app(tmp.path());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let src = cascades::source_store::DataSource {
+        id: "del-test".into(),
+        name: "Delete Me".into(),
+        url: "https://example.com".into(),
+        method: "GET".into(),
+        headers: vec![],
+        encrypted_headers: vec![],
+        body_template: None,
+        response_root_path: None,
+        refresh_interval_secs: 300,
+        cached_data: None,
+        last_fetched_at: None,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state.source_store.create(&src).unwrap();
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/admin/sources/del-test")
+        .header("x-api-key", "test-bearer-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Verify it's gone
+    assert!(state.source_store.get("del-test").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn source_endpoints_require_auth() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (app, _state) = make_api_app(tmp.path());
+
+    // No auth header → 401
+    let req = Request::builder()
+        .uri("/api/admin/sources")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

@@ -3,9 +3,11 @@ use cascades::{
     build_sources,
     config::{load_config, load_display_layouts, load_or_create_secrets},
     compositor::Compositor,
+    crypto::EncryptionKey,
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
     layout_store::LayoutStore,
+    source_store::SourceStore,
     template::TemplateEngine,
 };
 use std::{
@@ -51,6 +53,12 @@ async fn main() {
     layout_store
         .seed_from_toml(&display_layouts)
         .expect("failed to seed layout store from display.toml");
+
+    // Open source store (same SQLite file) for generic data sources with encrypted headers.
+    let encryption_key = EncryptionKey::derive_from_api_key(&secrets.api_key);
+    let source_store = Arc::new(
+        SourceStore::open(store_path, encryption_key).expect("failed to open source store"),
+    );
 
     // Template engine — load from templates/ directory.
     let template_engine = Arc::new(
@@ -119,6 +127,7 @@ async fn main() {
         refresh_rate_secs,
         started_at: std::time::Instant::now(),
         sidecar_url,
+        source_store,
     });
 
     let app = build_router(app_state);

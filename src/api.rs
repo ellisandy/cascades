@@ -25,6 +25,12 @@
 //! - `PUT  /api/admin/fields/{id}`                      — update a field mapping
 //! - `DELETE /api/admin/fields/{id}`                    — delete a field mapping
 //! - `GET  /api/admin/sources/{id}/data`                — cached data JSON for a source
+//! - `GET  /api/admin/sources`                          — list all generic data sources (secrets masked)
+//! - `POST /api/admin/sources`                          — create generic data source
+//! - `GET  /api/admin/sources/{id}`                     — get source details (secrets masked)
+//! - `PUT  /api/admin/sources/{id}`                     — update source configuration
+//! - `DELETE /api/admin/sources/{id}`                   — delete source
+//! - `POST /api/admin/sources/{id}/fetch`               — trigger immediate one-shot fetch
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -44,6 +50,7 @@ use crate::{
     compositor::{Compositor, DisplayConfiguration},
     instance_store::InstanceStore,
     layout_store::{LayoutConfig, LayoutItem, LayoutStore},
+    source_store::SourceStore,
 };
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -67,6 +74,8 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Base URL of the Bun render sidecar; surfaced in `GET /api/status`.
     pub sidecar_url: String,
+    /// SQLite-backed store for generic data sources with encrypted headers.
+    pub source_store: Arc<SourceStore>,
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -101,6 +110,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/fields/{id}", put(admin_update_field))
         .route("/api/admin/fields/{id}", delete(admin_delete_field))
         .route("/api/admin/sources/{id}/data", get(admin_get_source_data))
+        // Generic data source CRUD (with encrypted header support)
+        .route("/api/admin/sources", get(admin_list_sources))
+        .route("/api/admin/sources", post(admin_create_source))
+        .route("/api/admin/sources/{id}", get(admin_get_source))
+        .route("/api/admin/sources/{id}", put(admin_update_source))
+        .route("/api/admin/sources/{id}", delete(admin_delete_source))
+        .route("/api/admin/sources/{id}/fetch", post(admin_fetch_source))
         .with_state(state)
 }
 
@@ -614,6 +630,50 @@ struct CreateFieldPayload {
 struct UpdateFieldPayload {
     name: Option<String>,
     json_path: Option<String>,
+}
+
+/// Header entry in source create/update payloads.
+#[derive(Debug, Deserialize)]
+struct HeaderPayload {
+    key: String,
+    value: String,
+    #[serde(default)]
+    secret: bool,
+}
+
+/// Body for `POST /api/admin/sources`.
+#[derive(Debug, Deserialize)]
+struct CreateSourcePayload {
+    name: String,
+    url: String,
+    #[serde(default = "default_method_payload")]
+    method: String,
+    #[serde(default)]
+    headers: Vec<HeaderPayload>,
+    body_template: Option<String>,
+    response_root_path: Option<String>,
+    #[serde(default = "default_interval_payload")]
+    refresh_interval_secs: i64,
+}
+
+fn default_method_payload() -> String {
+    "GET".to_string()
+}
+
+fn default_interval_payload() -> i64 {
+    300
+}
+
+/// Body for `PUT /api/admin/sources/:id`.
+#[derive(Debug, Deserialize)]
+struct UpdateSourcePayload {
+    name: Option<String>,
+    url: Option<String>,
+    method: Option<String>,
+    headers: Option<Vec<HeaderPayload>>,
+    body_template: Option<String>,
+    response_root_path: Option<String>,
+    refresh_interval_secs: Option<i64>,
 }
 
 // ─── Admin handlers ───────────────────────────────────────────────────────────
@@ -1243,6 +1303,262 @@ async fn admin_get_source_data(
     }
 }
 
+// ─── Generic data source handlers ────────────────────────────────────────────
+
+/// `GET /api/admin/sources` — list all generic data sources (secrets masked).
+async fn admin_list_sources(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.source_store.list() {
+        Ok(sources) => {
+            let masked: Vec<_> = sources.iter().map(|s| s.masked_for_api()).collect();
+            Json(masked).into_response()
+        }
+        Err(e) => {
+            log::error!("admin_list_sources: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `POST /api/admin/sources` — create a generic data source.
+/// Headers with `secret: true` are encrypted before storage.
+async fn admin_create_source(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<CreateSourcePayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let now = now_secs();
+    let id = format!("ds-{}", now);
+
+    let (plain, secret) = split_headers(payload.headers);
+
+    let interval = payload.refresh_interval_secs.max(30);
+    let source = crate::source_store::DataSource {
+        id: id.clone(),
+        name: payload.name,
+        url: payload.url,
+        method: payload.method,
+        headers: plain,
+        encrypted_headers: secret,
+        body_template: payload.body_template,
+        response_root_path: payload.response_root_path,
+        refresh_interval_secs: interval,
+        cached_data: None,
+        last_fetched_at: None,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    match app.source_store.create(&source) {
+        Ok(_) => (StatusCode::CREATED, Json(source.masked_for_api())).into_response(),
+        Err(e) => {
+            log::error!("admin_create_source: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `GET /api/admin/sources/:id` — get a single source (secrets masked).
+async fn admin_get_source(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.source_store.get(&id) {
+        Ok(Some(source)) => Json(source.masked_for_api()).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_get_source '{}': {}", id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `PUT /api/admin/sources/:id` — update a data source.
+/// Secret header values in the payload are encrypted before storage.
+/// Omitted fields are left unchanged.
+async fn admin_update_source(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<UpdateSourcePayload>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let existing = match app.source_store.get(&id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_update_source get '{}': {}", id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let (plain, secret) = if let Some(hdrs) = payload.headers {
+        split_headers(hdrs)
+    } else {
+        (existing.headers, existing.encrypted_headers)
+    };
+
+    let updated = crate::source_store::DataSource {
+        id: existing.id,
+        name: payload.name.unwrap_or(existing.name),
+        url: payload.url.unwrap_or(existing.url),
+        method: payload.method.unwrap_or(existing.method),
+        headers: plain,
+        encrypted_headers: secret,
+        body_template: payload.body_template.or(existing.body_template),
+        response_root_path: payload.response_root_path.or(existing.response_root_path),
+        refresh_interval_secs: payload
+            .refresh_interval_secs
+            .map(|i| i.max(30))
+            .unwrap_or(existing.refresh_interval_secs),
+        cached_data: existing.cached_data,
+        last_fetched_at: existing.last_fetched_at,
+        last_error: existing.last_error,
+        created_at: existing.created_at,
+        updated_at: now_secs(),
+    };
+
+    match app.source_store.update(&updated) {
+        Ok(()) => Json(updated.masked_for_api()).into_response(),
+        Err(e) => {
+            log::error!("admin_update_source '{}': {}", id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `DELETE /api/admin/sources/:id` — delete a data source.
+async fn admin_delete_source(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.source_store.delete(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_delete_source '{}': {}", id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `POST /api/admin/sources/:id/fetch` — trigger an immediate one-shot fetch.
+async fn admin_fetch_source(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let source = match app.source_store.get(&id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_fetch_source get '{}': {}", id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    // Perform the HTTP fetch using ureq
+    let result = tokio::task::spawn_blocking(move || {
+        let mut req = match source.method.to_uppercase().as_str() {
+            "POST" => ureq::post(&source.url),
+            _ => ureq::get(&source.url),
+        };
+        for (k, v) in source.all_headers() {
+            req = req.set(&k, &v);
+        }
+        let resp = if let Some(body) = &source.body_template {
+            req.send_string(body)
+        } else {
+            req.call()
+        };
+        match resp {
+            Ok(r) => {
+                let text = r.into_string().unwrap_or_default();
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(json) => Ok(json),
+                    Err(e) => Err(format!("JSON parse error: {}", e)),
+                }
+            }
+            Err(e) => Err(format!("HTTP error: {}", e)),
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(json)) => {
+            let now = now_secs();
+            app.source_store
+                .update_cached_data(&id, &json, now)
+                .ok();
+            Json(json).into_response()
+        }
+        Ok(Err(err)) => {
+            app.source_store.update_last_error(&id, &err).ok();
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": err }))).into_response()
+        }
+        Err(e) => {
+            log::error!("admin_fetch_source spawn '{}': {}", id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Split a list of header payloads into plain and secret entries.
+fn split_headers(
+    headers: Vec<HeaderPayload>,
+) -> (
+    Vec<crate::source_store::HeaderEntry>,
+    Vec<crate::source_store::HeaderEntry>,
+) {
+    let mut plain = Vec::new();
+    let mut secret = Vec::new();
+    for h in headers {
+        let entry = crate::source_store::HeaderEntry {
+            key: h.key,
+            value: h.value,
+            secret: h.secret,
+        };
+        if h.secret {
+            secret.push(entry);
+        } else {
+            plain.push(entry);
+        }
+    }
+    (plain, secret)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn image_response(png: Vec<u8>) -> Response<Body> {
@@ -1428,6 +1744,11 @@ mod tests {
             "http://localhost:3001".to_string(),
         ));
 
+        let encryption_key = crate::crypto::EncryptionKey::derive_from_api_key("test-key");
+        let source_store = Arc::new(
+            crate::source_store::SourceStore::open(&db_path, encryption_key).unwrap(),
+        );
+
         Arc::new(AppState {
             compositor,
             instance_store,
@@ -1437,6 +1758,7 @@ mod tests {
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
+            source_store,
         })
     }
 
@@ -1602,6 +1924,11 @@ mod tests {
             "http://localhost:3001".to_string(),
         ));
 
+        let encryption_key = crate::crypto::EncryptionKey::derive_from_api_key("test-key");
+        let source_store = Arc::new(
+            crate::source_store::SourceStore::open(&db_path, encryption_key).unwrap(),
+        );
+
         let state = Arc::new(AppState {
             compositor,
             instance_store,
@@ -1611,6 +1938,7 @@ mod tests {
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
+            source_store,
         });
         (state, dir)
     }

@@ -1,6 +1,7 @@
 pub mod api;
 pub mod compositor;
 pub mod config;
+pub mod crypto;
 pub mod domain;
 pub mod evaluation;
 pub mod format;
@@ -9,6 +10,7 @@ pub mod jsonpath;
 pub mod layout_store;
 pub mod plugin_registry;
 pub mod presentation;
+pub mod source_store;
 pub mod sources;
 pub mod template;
 
