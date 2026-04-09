@@ -678,6 +678,7 @@
       <h3 style="color:#58a6ff; margin:0;">Data Sources</h3>
       <div>
         <button class="btn btn-primary" onclick="showAddSourceForm()">+ Add Source</button>
+        <button class="btn btn-primary" onclick="showPresetPicker()" style="background:#238636;">+ From Preset</button>
         <button class="btn" onclick="closeSourcesPanel()">Close</button>
       </div>
     </div>
@@ -728,6 +729,26 @@
           <button class="btn" onclick="cancelSourceForm()">Cancel</button>
         </div>
         <pre id="sf-test-result" style="display:none; background:#0d1117; color:#c9d1d9; padding:8px; border-radius:4px; max-height:200px; overflow:auto; font-size:11px; margin-top:8px;"></pre>
+      </div>
+    </div>
+
+    <!-- Preset picker (hidden by default) -->
+    <div id="preset-picker" style="display:none; margin-top:16px; border-top:1px solid #30363d; padding-top:16px;">
+      <h4 style="color:#79c0ff; margin-bottom:12px;">Add from Preset</h4>
+      <div id="preset-list" style="display:grid; gap:8px;"></div>
+      <div id="preset-params-form" style="display:none; margin-top:12px; border-top:1px solid #21262d; padding-top:12px;">
+        <h4 id="preset-params-title" style="color:#79c0ff; margin-bottom:8px;"></h4>
+        <p id="preset-params-desc" style="color:#8b949e; font-size:12px; margin-bottom:8px;"></p>
+        <input type="hidden" id="pp-preset-id" value="">
+        <div style="display:grid; gap:8px;">
+          <label style="color:#8b949e;">Source Name (optional override)</label>
+          <input type="text" id="pp-name" placeholder="Leave blank for default" style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">
+          <div id="pp-fields"></div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <button class="btn btn-primary" onclick="submitPresetForm()">Create Source</button>
+            <button class="btn" onclick="cancelPresetForm()">Cancel</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -2356,6 +2377,116 @@ async function testSourceFetch() {
     } catch (e) {
       resultEl.textContent = 'Error: ' + e.message;
     }
+  }
+}
+
+// ────────────────────────────────────────
+// Preset Picker
+// ────────────────────────────────────────
+
+async function showPresetPicker() {
+  document.getElementById('source-form').style.display = 'none';
+  document.getElementById('preset-picker').style.display = 'block';
+  document.getElementById('preset-params-form').style.display = 'none';
+
+  var listEl = document.getElementById('preset-list');
+  listEl.innerHTML = '<p style="color:#8b949e;">Loading presets...</p>';
+
+  try {
+    var res = await apiFetch('/api/admin/presets');
+    var presets = await res.json();
+    if (!presets.length) {
+      listEl.innerHTML = '<p style="color:#8b949e;">No presets available.</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < presets.length; i++) {
+      var p = presets[i];
+      html += '<div style="background:#21262d; border:1px solid #30363d; border-radius:6px; padding:12px; cursor:pointer;" ';
+      html += 'onclick="selectPreset(\'' + esc(p.id) + '\')" ';
+      html += 'onmouseover="this.style.borderColor=\'#58a6ff\'" onmouseout="this.style.borderColor=\'#30363d\'">';
+      html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
+      html += '<strong style="color:#58a6ff;">' + esc(p.name) + '</strong>';
+      html += '<span style="color:#8b949e; font-size:11px; background:#0d1117; padding:2px 6px; border-radius:3px;">' + esc(p.category) + '</span>';
+      html += '</div>';
+      html += '<p style="color:#8b949e; font-size:12px; margin:4px 0 0 0;">' + esc(p.description) + '</p>';
+      html += '</div>';
+    }
+    listEl.innerHTML = html;
+    window._cachedPresets = presets;
+  } catch (e) {
+    listEl.innerHTML = '<p style="color:#f85149;">Failed to load presets: ' + esc(e.message) + '</p>';
+  }
+}
+
+function selectPreset(presetId) {
+  var presets = window._cachedPresets || [];
+  var preset = null;
+  for (var i = 0; i < presets.length; i++) {
+    if (presets[i].id === presetId) { preset = presets[i]; break; }
+  }
+  if (!preset) return;
+
+  document.getElementById('preset-list').style.display = 'none';
+  document.getElementById('preset-params-form').style.display = 'block';
+  document.getElementById('preset-params-title').textContent = preset.name;
+  document.getElementById('preset-params-desc').textContent = preset.description;
+  document.getElementById('pp-preset-id').value = preset.id;
+  document.getElementById('pp-name').value = '';
+
+  var fieldsHtml = '';
+  for (var i = 0; i < preset.params.length; i++) {
+    var param = preset.params[i];
+    fieldsHtml += '<label style="color:#8b949e;">' + esc(param.name);
+    if (param.required) fieldsHtml += ' <span style="color:#f85149;">*</span>';
+    fieldsHtml += '</label>';
+    fieldsHtml += '<input type="text" class="pp-param" data-name="' + esc(param.name) + '" ';
+    fieldsHtml += 'placeholder="' + esc(param.placeholder || param.default || '') + '" ';
+    fieldsHtml += 'value="' + esc(param.default || '') + '" ';
+    fieldsHtml += 'style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;">';
+    fieldsHtml += '<p style="color:#6e7681; font-size:11px; margin:0 0 4px 0;">' + esc(param.description) + '</p>';
+  }
+  document.getElementById('pp-fields').innerHTML = fieldsHtml;
+}
+
+function cancelPresetForm() {
+  document.getElementById('preset-picker').style.display = 'none';
+  document.getElementById('preset-list').style.display = 'grid';
+  document.getElementById('preset-params-form').style.display = 'none';
+}
+
+async function submitPresetForm() {
+  var presetId = document.getElementById('pp-preset-id').value;
+  var name = document.getElementById('pp-name').value.trim();
+  var params = {};
+  var paramInputs = document.querySelectorAll('.pp-param');
+  for (var i = 0; i < paramInputs.length; i++) {
+    var inp = paramInputs[i];
+    var val = inp.value.trim();
+    if (val) params[inp.getAttribute('data-name')] = val;
+  }
+
+  var payload = { preset_id: presetId, params: params };
+  if (name) payload.name = name;
+
+  try {
+    var res = await apiFetch('/api/admin/sources/from-preset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return { error: 'Unknown error' }; });
+      showToast('Error: ' + (err.error || res.statusText), 'error');
+      return;
+    }
+    showToast('Source created from preset', 'ok');
+    document.getElementById('preset-picker').style.display = 'none';
+    document.getElementById('preset-list').style.display = 'grid';
+    document.getElementById('preset-params-form').style.display = 'none';
+    loadSourcesList();
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
   }
 }
 </script>

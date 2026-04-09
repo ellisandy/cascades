@@ -25,6 +25,8 @@
 //! - `PUT  /api/admin/fields/{id}`                      — update a field mapping
 //! - `DELETE /api/admin/fields/{id}`                    — delete a field mapping
 //! - `GET  /api/admin/sources/{id}/data`                — cached data JSON for a source
+//! - `GET  /api/admin/presets`                          — list available source presets
+//! - `POST /api/admin/sources/from-preset`              — create source from a preset
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -45,7 +47,7 @@ use crate::{
     instance_store::InstanceStore,
     layout_store::{LayoutConfig, LayoutItem, LayoutStore},
     source_store::{DataSourceConfig, SourceStore},
-    sources::{Source, generic::GenericHttpSource},
+    sources::{Source, generic::GenericHttpSource, presets},
 };
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -175,6 +177,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
         .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
         .route("/api/admin/layout/{id}/item/{item_id}", delete(admin_delete_item))
+        // Source presets
+        .route("/api/admin/presets", get(admin_list_presets))
+        .route("/api/admin/sources/from-preset", post(admin_create_from_preset))
         // Generic data source CRUD
         .route("/api/admin/sources", get(admin_list_sources))
         .route("/api/admin/sources", post(admin_create_source))
@@ -1596,6 +1601,86 @@ async fn admin_get_source_data(
         Err(e) => {
             log::error!("admin_get_source_data '{}': {}", source_id, e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+// ─── Presets ─────────────────────────────────────────────────────────────────
+
+/// `GET /api/admin/presets` — list all available source presets.
+async fn admin_list_presets(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(presets::all_presets()).into_response()
+}
+
+/// `POST /api/admin/sources/from-preset` — create a source from a preset.
+async fn admin_create_from_preset(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<presets::CreateFromPresetRequest>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let preset = match presets::get_preset(&payload.preset_id) {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("preset '{}' not found", payload.preset_id)})),
+            )
+                .into_response();
+        }
+    };
+
+    let resolved_params = match presets::validate_params(&preset, &payload.params) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    let url = presets::substitute_params(&preset.url_template, &resolved_params);
+    let name = payload.name.unwrap_or_else(|| preset.name.clone());
+
+    let config = DataSourceConfig {
+        name,
+        url,
+        method: preset.method.clone(),
+        headers: preset.headers.clone(),
+        body_template: None,
+        response_root_path: preset.response_root_path.clone(),
+        refresh_interval_secs: preset.refresh_interval_secs,
+    };
+
+    match app.source_store.create(&config) {
+        Ok(ds) => {
+            let generic = GenericHttpSource::from_data_source(&ds);
+            app.scheduler.spawn_source(generic);
+            (StatusCode::CREATED, Json(serde_json::json!({
+                "source": ds,
+                "default_fields": preset.default_fields,
+            })))
+                .into_response()
+        }
+        Err(e) => {
+            log::error!("admin_create_from_preset: {}", e);
+            let status = if matches!(e, crate::source_store::SourceStoreError::Validation(_)) {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
         }
     }
 }
