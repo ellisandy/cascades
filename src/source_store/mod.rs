@@ -64,6 +64,9 @@ pub struct DataSource {
     pub url: String,
     pub method: String,
     pub headers: serde_json::Value,
+    /// Encrypted header values: JSON array of `{"key": "...", "value": "..."}`.
+    /// Values are AES-256-GCM encrypted, base64-encoded strings.
+    pub encrypted_headers: serde_json::Value,
     pub body_template: Option<String>,
     pub response_root_path: Option<String>,
     pub refresh_interval_secs: i64,
@@ -83,10 +86,23 @@ pub struct DataSourceConfig {
     pub method: String,
     #[serde(default = "default_headers")]
     pub headers: serde_json::Value,
+    /// Secret headers to encrypt before storage.
+    /// Array of `{"key": "...", "value": "..."}` objects.
+    /// On update, a null value means "keep existing encrypted value for this key".
+    #[serde(default)]
+    pub secret_headers: Option<Vec<SecretHeaderInput>>,
     pub body_template: Option<String>,
     pub response_root_path: Option<String>,
     #[serde(default = "default_interval")]
     pub refresh_interval_secs: i64,
+}
+
+/// Input for a secret header: key + plaintext value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretHeaderInput {
+    pub key: String,
+    /// Plaintext value to encrypt. `None` means keep existing encrypted value.
+    pub value: Option<String>,
 }
 
 fn default_method() -> String {
@@ -134,6 +150,7 @@ impl SourceStore {
                 url                   TEXT NOT NULL,
                 method                TEXT NOT NULL DEFAULT 'GET',
                 headers               TEXT NOT NULL DEFAULT '{}',
+                encrypted_headers     TEXT NOT NULL DEFAULT '[]',
                 body_template         TEXT,
                 response_root_path    TEXT,
                 refresh_interval_secs INTEGER NOT NULL DEFAULT 300,
@@ -144,11 +161,27 @@ impl SourceStore {
                 updated_at            INTEGER NOT NULL
             );",
         )?;
+        // Migration for existing databases: add encrypted_headers column if missing.
+        let has_column: bool = conn
+            .prepare("SELECT encrypted_headers FROM data_sources LIMIT 0")
+            .is_ok();
+        if !has_column {
+            conn.execute_batch(
+                "ALTER TABLE data_sources ADD COLUMN encrypted_headers TEXT NOT NULL DEFAULT '[]';",
+            )?;
+        }
         Ok(())
     }
 
     /// Create a new data source. Returns the created source.
-    pub fn create(&self, config: &DataSourceConfig) -> Result<DataSource, SourceStoreError> {
+    ///
+    /// `encrypted_headers_json` should be a pre-encrypted JSON array string
+    /// (encryption is handled by the caller, not the store).
+    pub fn create(
+        &self,
+        config: &DataSourceConfig,
+        encrypted_headers_json: &str,
+    ) -> Result<DataSource, SourceStoreError> {
         let interval = config.refresh_interval_secs.max(MIN_REFRESH_INTERVAL_SECS);
         let method = config.method.to_uppercase();
         if method != "GET" && method != "POST" {
@@ -170,15 +203,16 @@ impl SourceStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO data_sources
-             (id, name, url, method, headers, body_template, response_root_path,
-              refresh_interval_secs, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, name, url, method, headers, encrypted_headers, body_template,
+              response_root_path, refresh_interval_secs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 config.name,
                 config.url,
                 method,
                 headers_json,
+                encrypted_headers_json,
                 config.body_template,
                 config.response_root_path,
                 interval,
@@ -187,12 +221,16 @@ impl SourceStore {
             ],
         )?;
 
+        let encrypted_headers: serde_json::Value =
+            serde_json::from_str(encrypted_headers_json).unwrap_or(serde_json::json!([]));
+
         Ok(DataSource {
             id,
             name: config.name.clone(),
             url: config.url.clone(),
             method,
             headers: config.headers.clone(),
+            encrypted_headers,
             body_template: config.body_template.clone(),
             response_root_path: config.response_root_path.clone(),
             refresh_interval_secs: interval,
@@ -208,7 +246,8 @@ impl SourceStore {
     pub fn get(&self, id: &str) -> Result<Option<DataSource>, SourceStoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, method, headers, body_template, response_root_path,
+            "SELECT id, name, url, method, headers, encrypted_headers,
+                    body_template, response_root_path,
                     refresh_interval_secs, cached_data, last_fetched_at, last_error,
                     created_at, updated_at
              FROM data_sources WHERE id = ?1",
@@ -224,7 +263,8 @@ impl SourceStore {
     pub fn list(&self) -> Result<Vec<DataSource>, SourceStoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, method, headers, body_template, response_root_path,
+            "SELECT id, name, url, method, headers, encrypted_headers,
+                    body_template, response_root_path,
                     refresh_interval_secs, cached_data, last_fetched_at, last_error,
                     created_at, updated_at
              FROM data_sources ORDER BY name",
@@ -238,10 +278,13 @@ impl SourceStore {
     }
 
     /// Update a data source's configuration. Returns the updated source.
+    ///
+    /// `encrypted_headers_json` should be a pre-encrypted JSON array string.
     pub fn update(
         &self,
         id: &str,
         config: &DataSourceConfig,
+        encrypted_headers_json: &str,
     ) -> Result<Option<DataSource>, SourceStoreError> {
         let interval = config.refresh_interval_secs.max(MIN_REFRESH_INTERVAL_SECS);
         let method = config.method.to_uppercase();
@@ -257,14 +300,16 @@ impl SourceStore {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
             "UPDATE data_sources
-             SET name = ?1, url = ?2, method = ?3, headers = ?4, body_template = ?5,
-                 response_root_path = ?6, refresh_interval_secs = ?7, updated_at = ?8
-             WHERE id = ?9",
+             SET name = ?1, url = ?2, method = ?3, headers = ?4, encrypted_headers = ?5,
+                 body_template = ?6, response_root_path = ?7, refresh_interval_secs = ?8,
+                 updated_at = ?9
+             WHERE id = ?10",
             params![
                 config.name,
                 config.url,
                 method,
                 headers_json,
+                encrypted_headers_json,
                 config.body_template,
                 config.response_root_path,
                 interval,
@@ -323,6 +368,20 @@ impl SourceStore {
         Ok(())
     }
 
+    /// Update encrypted_headers for a source (used during key rotation).
+    pub fn update_encrypted_headers(
+        &self,
+        id: &str,
+        encrypted_headers_json: &str,
+    ) -> Result<(), SourceStoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE data_sources SET encrypted_headers = ?1 WHERE id = ?2",
+            params![encrypted_headers_json, id],
+        )?;
+        Ok(())
+    }
+
     /// Update last_error for a source. Does not clear cached_data.
     pub fn update_last_error(&self, id: &str, error: &str) -> Result<(), SourceStoreError> {
         let conn = self.conn.lock().unwrap();
@@ -339,8 +398,11 @@ fn row_to_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<DataSource> {
     let headers_str: String = row.get(4)?;
     let headers: serde_json::Value =
         serde_json::from_str(&headers_str).unwrap_or(serde_json::json!({}));
+    let enc_headers_str: String = row.get(5)?;
+    let encrypted_headers: serde_json::Value =
+        serde_json::from_str(&enc_headers_str).unwrap_or(serde_json::json!([]));
     let cached_data: Option<serde_json::Value> = row
-        .get::<_, Option<String>>(8)?
+        .get::<_, Option<String>>(9)?
         .and_then(|s| serde_json::from_str(&s).ok());
 
     Ok(DataSource {
@@ -349,14 +411,15 @@ fn row_to_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<DataSource> {
         url: row.get(2)?,
         method: row.get(3)?,
         headers,
-        body_template: row.get(5)?,
-        response_root_path: row.get(6)?,
-        refresh_interval_secs: row.get(7)?,
+        encrypted_headers,
+        body_template: row.get(6)?,
+        response_root_path: row.get(7)?,
+        refresh_interval_secs: row.get(8)?,
         cached_data,
-        last_fetched_at: row.get(9)?,
-        last_error: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        last_fetched_at: row.get(10)?,
+        last_error: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -387,27 +450,44 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             method: "GET".to_string(),
             headers: serde_json::json!({"Authorization": "Bearer test"}),
+            secret_headers: None,
             body_template: None,
             response_root_path: None,
             refresh_interval_secs: 60,
         }
     }
 
+    const EMPTY_ENC: &str = "[]";
+
     #[test]
     fn create_and_get_source() {
         let (store, _dir) = open_store();
         let config = test_config();
-        let created = store.create(&config).unwrap();
+        let created = store.create(&config, EMPTY_ENC).unwrap();
         assert!(created.id.starts_with("src-"));
         assert_eq!(created.name, "Test API");
         assert_eq!(created.url, "https://api.example.com/data");
         assert_eq!(created.method, "GET");
         assert_eq!(created.refresh_interval_secs, 60);
         assert!(created.cached_data.is_none());
+        assert_eq!(created.encrypted_headers, serde_json::json!([]));
 
         let got = store.get(&created.id).unwrap().unwrap();
         assert_eq!(got.name, "Test API");
         assert_eq!(got.headers["Authorization"], "Bearer test");
+    }
+
+    #[test]
+    fn create_with_encrypted_headers() {
+        let (store, _dir) = open_store();
+        let config = test_config();
+        let enc = r#"[{"key":"X-Secret","value":"ENCRYPTED_DATA"}]"#;
+        let created = store.create(&config, enc).unwrap();
+        assert_eq!(created.encrypted_headers[0]["key"], "X-Secret");
+        assert_eq!(created.encrypted_headers[0]["value"], "ENCRYPTED_DATA");
+
+        let got = store.get(&created.id).unwrap().unwrap();
+        assert_eq!(got.encrypted_headers[0]["key"], "X-Secret");
     }
 
     #[test]
@@ -423,10 +503,9 @@ mod tests {
         c1.name = "Zebra API".to_string();
         let mut c2 = test_config();
         c2.name = "Alpha API".to_string();
-        store.create(&c1).unwrap();
-        // Sleep briefly so IDs are unique
+        store.create(&c1, EMPTY_ENC).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        store.create(&c2).unwrap();
+        store.create(&c2, EMPTY_ENC).unwrap();
 
         let all = store.list().unwrap();
         assert_eq!(all.len(), 2);
@@ -437,14 +516,14 @@ mod tests {
     #[test]
     fn update_source() {
         let (store, _dir) = open_store();
-        let created = store.create(&test_config()).unwrap();
+        let created = store.create(&test_config(), EMPTY_ENC).unwrap();
 
         let mut updated_config = test_config();
         updated_config.name = "Updated API".to_string();
         updated_config.url = "https://api.example.com/v2".to_string();
         updated_config.refresh_interval_secs = 120;
 
-        let updated = store.update(&created.id, &updated_config).unwrap().unwrap();
+        let updated = store.update(&created.id, &updated_config, EMPTY_ENC).unwrap().unwrap();
         assert_eq!(updated.name, "Updated API");
         assert_eq!(updated.url, "https://api.example.com/v2");
         assert_eq!(updated.refresh_interval_secs, 120);
@@ -453,14 +532,14 @@ mod tests {
     #[test]
     fn update_missing_returns_none() {
         let (store, _dir) = open_store();
-        let result = store.update("nonexistent", &test_config()).unwrap();
+        let result = store.update("nonexistent", &test_config(), EMPTY_ENC).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn delete_source() {
         let (store, _dir) = open_store();
-        let created = store.create(&test_config()).unwrap();
+        let created = store.create(&test_config(), EMPTY_ENC).unwrap();
         assert!(store.delete(&created.id).unwrap());
         assert!(store.get(&created.id).unwrap().is_none());
     }
@@ -475,8 +554,8 @@ mod tests {
     fn enforces_minimum_refresh_interval() {
         let (store, _dir) = open_store();
         let mut config = test_config();
-        config.refresh_interval_secs = 5; // Below minimum
-        let created = store.create(&config).unwrap();
+        config.refresh_interval_secs = 5;
+        let created = store.create(&config, EMPTY_ENC).unwrap();
         assert_eq!(created.refresh_interval_secs, MIN_REFRESH_INTERVAL_SECS);
     }
 
@@ -485,20 +564,18 @@ mod tests {
         let (store, _dir) = open_store();
         let mut config = test_config();
         config.method = "PATCH".to_string();
-        assert!(store.create(&config).is_err());
+        assert!(store.create(&config, EMPTY_ENC).is_err());
     }
 
     #[test]
     fn update_cached_data_and_clear_error() {
         let (store, _dir) = open_store();
-        let created = store.create(&test_config()).unwrap();
+        let created = store.create(&test_config(), EMPTY_ENC).unwrap();
 
-        // Set an error first
         store.update_last_error(&created.id, "timeout").unwrap();
         let with_error = store.get(&created.id).unwrap().unwrap();
         assert_eq!(with_error.last_error.as_deref(), Some("timeout"));
 
-        // Update cached data — should clear error
         let data = serde_json::json!({"temp": 72});
         store.update_cached_data(&created.id, &data, 1_700_000_000).unwrap();
         let updated = store.get(&created.id).unwrap().unwrap();
@@ -510,7 +587,7 @@ mod tests {
     #[test]
     fn update_last_error_preserves_cached_data() {
         let (store, _dir) = open_store();
-        let created = store.create(&test_config()).unwrap();
+        let created = store.create(&test_config(), EMPTY_ENC).unwrap();
 
         let data = serde_json::json!({"temp": 72});
         store.update_cached_data(&created.id, &data, 1_000).unwrap();
@@ -524,9 +601,8 @@ mod tests {
     #[test]
     fn rejects_oversized_cached_data() {
         let (store, _dir) = open_store();
-        let created = store.create(&test_config()).unwrap();
+        let created = store.create(&test_config(), EMPTY_ENC).unwrap();
 
-        // Create data larger than 1MB
         let big_string = "x".repeat(MAX_CACHED_RESPONSE_BYTES + 1);
         let data = serde_json::json!({"data": big_string});
         assert!(store.update_cached_data(&created.id, &data, 1_000).is_err());
@@ -537,7 +613,7 @@ mod tests {
         let (store, _dir) = open_store();
         let mut config = test_config();
         config.method = "post".to_string();
-        let created = store.create(&config).unwrap();
+        let created = store.create(&config, EMPTY_ENC).unwrap();
         assert_eq!(created.method, "POST");
     }
 }

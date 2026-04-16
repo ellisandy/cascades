@@ -1,6 +1,7 @@
 pub mod api;
 pub mod compositor;
 pub mod config;
+pub mod crypto;
 pub mod domain;
 pub mod evaluation;
 pub mod format;

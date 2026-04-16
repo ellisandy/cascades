@@ -1030,6 +1030,9 @@ fn make_api_app(
     );
     let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
 
+    let api_key = "test-bearer-key".to_string();
+    let encryption_key = cascades::crypto::EncryptionKey::derive_from_api_key(&api_key);
+
     let state = Arc::new(AppState {
         compositor,
         instance_store,
@@ -1037,7 +1040,8 @@ fn make_api_app(
         source_store,
         scheduler,
         image_cache,
-        api_key: "test-bearer-key".to_string(),
+        api_key,
+        encryption_key,
         refresh_rate_secs: 42,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),
@@ -1135,6 +1139,9 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
     );
     let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
 
+    let api_key = "key".to_string();
+    let encryption_key = cascades::crypto::EncryptionKey::derive_from_api_key(&api_key);
+
     let state = Arc::new(cascades::api::AppState {
         compositor,
         instance_store,
@@ -1142,7 +1149,8 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         source_store,
         scheduler,
         image_cache: Arc::clone(&image_cache),
-        api_key: "key".to_string(),
+        api_key,
+        encryption_key,
         refresh_rate_secs: 60,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),

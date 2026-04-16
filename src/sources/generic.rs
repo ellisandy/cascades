@@ -4,6 +4,7 @@
 //! headers, optional request body, and an optional `response_root_path` (JSONPath)
 //! for extracting a sub-tree from the response before caching.
 
+use crate::crypto::EncryptionKey;
 use crate::jsonpath::jsonpath_extract;
 use crate::sources::{Source, SourceError};
 use std::time::Duration;
@@ -45,9 +46,13 @@ impl GenericHttpSource {
         }
     }
 
-    /// Build from a DataSource record.
-    pub fn from_data_source(ds: &crate::source_store::DataSource) -> Self {
-        let headers = ds
+    /// Build from a DataSource record. If an encryption key is provided,
+    /// encrypted headers are decrypted and merged with plaintext headers.
+    pub fn from_data_source(
+        ds: &crate::source_store::DataSource,
+        encryption_key: Option<&EncryptionKey>,
+    ) -> Self {
+        let mut headers: Vec<(String, String)> = ds
             .headers
             .as_object()
             .map(|obj| {
@@ -56,6 +61,27 @@ impl GenericHttpSource {
                     .collect()
             })
             .unwrap_or_default();
+
+        // Decrypt and merge encrypted headers
+        if let Some(key) = encryption_key {
+            if let Some(arr) = ds.encrypted_headers.as_array() {
+                for entry in arr {
+                    if let (Some(k), Some(encrypted_val)) =
+                        (entry["key"].as_str(), entry["value"].as_str())
+                    {
+                        match crate::crypto::decrypt(key, encrypted_val) {
+                            Ok(plaintext) => headers.push((k.to_string(), plaintext)),
+                            Err(e) => {
+                                log::warn!(
+                                    "failed to decrypt header '{}' for source '{}': {}",
+                                    k, ds.id, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Self::new(
             ds.id.clone(),

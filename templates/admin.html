@@ -716,8 +716,12 @@
             </select>
           </div>
         </div>
-        <label style="color:#8b949e;">Headers (JSON object)</label>
-        <textarea id="sf-headers" rows="3" placeholder='{"Authorization": "Bearer token"}' style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit; resize:vertical;"></textarea>
+        <label style="color:#8b949e;">Headers (JSON object, non-secret)</label>
+        <textarea id="sf-headers" rows="3" placeholder='{"Content-Type": "application/json"}' style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit; resize:vertical;"></textarea>
+        <label style="color:#8b949e;">Secret Headers (encrypted at rest)</label>
+        <div id="sf-secret-headers" style="display:flex; flex-direction:column; gap:4px;">
+        </div>
+        <button type="button" class="btn" onclick="addSecretHeaderRow()" style="width:fit-content; font-size:12px; padding:4px 10px;">+ Add Secret Header</button>
         <label style="color:#8b949e;">Request Body (for POST)</label>
         <textarea id="sf-body" rows="2" placeholder='{"query": "..."}' style="background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit; resize:vertical;"></textarea>
         <label style="color:#8b949e;">Response Root Path (JSONPath, optional)</label>
@@ -2190,6 +2194,47 @@ function showAddSourceForm() {
   document.getElementById('sf-body').value = '';
   document.getElementById('sf-rootpath').value = '';
   document.getElementById('sf-test-result').style.display = 'none';
+  document.getElementById('sf-secret-headers').innerHTML = '';
+}
+
+function addSecretHeaderRow(key, hasExisting) {
+  var container = document.getElementById('sf-secret-headers');
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex; gap:6px; align-items:center;';
+  var keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.placeholder = 'Header name';
+  keyInput.value = key || '';
+  keyInput.className = 'sh-key';
+  keyInput.style.cssText = 'flex:1; background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;';
+  var valInput = document.createElement('input');
+  valInput.type = 'password';
+  valInput.className = 'sh-value';
+  valInput.style.cssText = 'flex:2; background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 8px; border-radius:3px; font-family:inherit;';
+  if (hasExisting) {
+    valInput.placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022 (unchanged)';
+    valInput.dataset.unchanged = '1';
+  } else {
+    valInput.placeholder = 'Secret value';
+  }
+  valInput.addEventListener('input', function() { delete valInput.dataset.unchanged; });
+  var toggleBtn = document.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.textContent = '\uD83D\uDC41';
+  toggleBtn.title = 'Toggle visibility';
+  toggleBtn.style.cssText = 'background:none; border:1px solid #30363d; color:#8b949e; padding:4px 8px; border-radius:3px; cursor:pointer;';
+  toggleBtn.onclick = function() { valInput.type = valInput.type === 'password' ? 'text' : 'password'; };
+  var removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.textContent = '\u2715';
+  removeBtn.title = 'Remove';
+  removeBtn.style.cssText = 'background:none; border:1px solid #30363d; color:#f85149; padding:4px 8px; border-radius:3px; cursor:pointer;';
+  removeBtn.onclick = function() { row.remove(); };
+  row.appendChild(keyInput);
+  row.appendChild(valInput);
+  row.appendChild(toggleBtn);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
 }
 
 async function editSource(id) {
@@ -2208,6 +2253,13 @@ async function editSource(id) {
     document.getElementById('sf-body').value = ds.body_template || '';
     document.getElementById('sf-rootpath').value = ds.response_root_path || '';
     document.getElementById('sf-test-result').style.display = 'none';
+    // Populate secret headers (values are masked — shown as unchanged placeholders)
+    document.getElementById('sf-secret-headers').innerHTML = '';
+    if (ds.encrypted_headers && Array.isArray(ds.encrypted_headers)) {
+      ds.encrypted_headers.forEach(function(h) {
+        addSecretHeaderRow(h.key, true);
+      });
+    }
   } catch (e) {
     showToast('Error loading source: ' + e.message, 'error');
   }
@@ -2226,7 +2278,23 @@ function buildSourcePayload() {
       return null;
     }
   }
-  return {
+  // Collect secret headers
+  var secretHeaders = [];
+  var rows = document.getElementById('sf-secret-headers').children;
+  for (var i = 0; i < rows.length; i++) {
+    var keyEl = rows[i].querySelector('.sh-key');
+    var valEl = rows[i].querySelector('.sh-value');
+    if (!keyEl || !valEl) continue;
+    var key = keyEl.value.trim();
+    if (!key) continue;
+    if (valEl.dataset.unchanged === '1') {
+      // Value not changed — send null to keep existing encrypted value
+      secretHeaders.push({ key: key, value: null });
+    } else {
+      secretHeaders.push({ key: key, value: valEl.value });
+    }
+  }
+  var payload = {
     name: document.getElementById('sf-name').value.trim(),
     url: document.getElementById('sf-url').value.trim(),
     method: document.getElementById('sf-method').value,
@@ -2235,6 +2303,10 @@ function buildSourcePayload() {
     response_root_path: document.getElementById('sf-rootpath').value.trim() || null,
     refresh_interval_secs: parseInt(document.getElementById('sf-interval').value, 10) || 300,
   };
+  if (secretHeaders.length > 0) {
+    payload.secret_headers = secretHeaders;
+  }
+  return payload;
 }
 
 async function submitSourceForm() {

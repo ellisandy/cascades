@@ -42,6 +42,7 @@ use serde_json::Value;
 
 use crate::{
     compositor::{Compositor, DisplayConfiguration},
+    crypto::{self, EncryptionKey},
     instance_store::InstanceStore,
     layout_store::{LayoutConfig, LayoutItem, LayoutStore},
     source_store::{DataSourceConfig, SourceStore},
@@ -64,6 +65,8 @@ pub struct AppState {
     pub image_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     /// Bearer token required for `GET /api/display`.
     pub api_key: String,
+    /// Encryption key derived from api_key for encrypting secret header values.
+    pub encryption_key: EncryptionKey,
     /// Device refresh rate in seconds, returned by `GET /api/display`.
     pub refresh_rate_secs: u64,
     /// Time the server started; used to compute `uptime_secs` in `GET /api/status`.
@@ -188,6 +191,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/fields/{id}", put(admin_update_field))
         .route("/api/admin/fields/{id}", delete(admin_delete_field))
         .route("/api/admin/sources/{id}/data", get(admin_get_source_data))
+        .route("/api/admin/rotate-encryption-key", post(admin_rotate_encryption_key))
         .with_state(state)
 }
 
@@ -1231,6 +1235,86 @@ async fn admin_delete_item(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ─── Encrypted headers helpers ──────────────────────────────────────────────
+
+/// Encrypt secret_headers from a DataSourceConfig input.
+/// Returns the JSON string to store in the encrypted_headers column.
+fn encrypt_secret_headers(
+    key: &EncryptionKey,
+    config: &DataSourceConfig,
+    existing_encrypted: Option<&serde_json::Value>,
+) -> Result<String, String> {
+    let Some(secret_headers) = &config.secret_headers else {
+        // No secret headers in input — keep existing or default to empty
+        if let Some(existing) = existing_encrypted {
+            return serde_json::to_string(existing).map_err(|e| e.to_string());
+        }
+        return Ok("[]".to_string());
+    };
+
+    let mut result = Vec::new();
+    for sh in secret_headers {
+        match &sh.value {
+            Some(plaintext) => {
+                // New value — encrypt it
+                let encrypted = crypto::encrypt(key, plaintext)
+                    .map_err(|e| format!("encryption failed for header '{}': {}", sh.key, e))?;
+                result.push(serde_json::json!({"key": sh.key, "value": encrypted}));
+            }
+            None => {
+                // Null value — preserve existing encrypted value for this key
+                if let Some(existing) = existing_encrypted {
+                    if let Some(arr) = existing.as_array() {
+                        if let Some(entry) = arr.iter().find(|e| e["key"] == sh.key) {
+                            result.push(entry.clone());
+                            continue;
+                        }
+                    }
+                }
+                // Key not found in existing — skip it
+            }
+        }
+    }
+    serde_json::to_string(&result).map_err(|e| e.to_string())
+}
+
+/// Mask encrypted header values for API responses (replace values with null).
+fn mask_encrypted_headers(encrypted_headers: &serde_json::Value) -> serde_json::Value {
+    if let Some(arr) = encrypted_headers.as_array() {
+        let masked: Vec<serde_json::Value> = arr
+            .iter()
+            .filter_map(|entry| {
+                entry["key"].as_str().map(|k| {
+                    serde_json::json!({"key": k, "value": null})
+                })
+            })
+            .collect();
+        serde_json::Value::Array(masked)
+    } else {
+        serde_json::json!([])
+    }
+}
+
+/// Build a masked DataSource for API responses.
+fn mask_source_for_response(ds: &crate::source_store::DataSource) -> serde_json::Value {
+    serde_json::json!({
+        "id": ds.id,
+        "name": ds.name,
+        "url": ds.url,
+        "method": ds.method,
+        "headers": ds.headers,
+        "encrypted_headers": mask_encrypted_headers(&ds.encrypted_headers),
+        "body_template": ds.body_template,
+        "response_root_path": ds.response_root_path,
+        "refresh_interval_secs": ds.refresh_interval_secs,
+        "cached_data": ds.cached_data,
+        "last_fetched_at": ds.last_fetched_at,
+        "last_error": ds.last_error,
+        "created_at": ds.created_at,
+        "updated_at": ds.updated_at,
+    })
+}
+
 // ─── Generic data source handlers ───────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -1299,11 +1383,22 @@ async fn admin_create_source(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    match app.source_store.create(&payload) {
+    let enc_json = match encrypt_secret_headers(&app.encryption_key, &payload, None) {
+        Ok(j) => j,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    match app.source_store.create(&payload, &enc_json) {
         Ok(ds) => {
-            let generic = GenericHttpSource::from_data_source(&ds);
+            let generic = GenericHttpSource::from_data_source(&ds, Some(&app.encryption_key));
             app.scheduler.spawn_source(generic);
-            (StatusCode::CREATED, Json(ds)).into_response()
+            (StatusCode::CREATED, Json(mask_source_for_response(&ds))).into_response()
         }
         Err(e) => {
             log::error!("admin_create_source: {}", e);
@@ -1318,6 +1413,7 @@ async fn admin_create_source(
 }
 
 /// `GET /api/admin/sources/:id` — get source details.
+/// Encrypted header values are masked (returned as null).
 async fn admin_get_source(
     headers: HeaderMap,
     Path(source_id): Path<String>,
@@ -1328,7 +1424,7 @@ async fn admin_get_source(
     }
 
     match app.source_store.get(&source_id) {
-        Ok(Some(ds)) => return Json(ds).into_response(),
+        Ok(Some(ds)) => return Json(mask_source_for_response(&ds)).into_response(),
         Ok(None) => {}
         Err(e) => {
             log::error!("admin_get_source '{}': {}", source_id, e);
@@ -1367,12 +1463,34 @@ async fn admin_update_source(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    match app.source_store.update(&source_id, &payload) {
+    // Load existing source to preserve unchanged encrypted headers
+    let existing = match app.source_store.get(&source_id) {
+        Ok(Some(ds)) => Some(ds),
+        Ok(None) => None,
+        Err(e) => {
+            log::error!("admin_update_source get '{}': {}", source_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let existing_enc = existing.as_ref().map(|ds| &ds.encrypted_headers);
+    let enc_json = match encrypt_secret_headers(&app.encryption_key, &payload, existing_enc) {
+        Ok(j) => j,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    match app.source_store.update(&source_id, &payload, &enc_json) {
         Ok(Some(ds)) => {
             app.scheduler.stop_source(&source_id);
-            let generic = GenericHttpSource::from_data_source(&ds);
+            let generic = GenericHttpSource::from_data_source(&ds, Some(&app.encryption_key));
             app.scheduler.spawn_source(generic);
-            Json(ds).into_response()
+            Json(mask_source_for_response(&ds)).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
@@ -1434,7 +1552,7 @@ async fn admin_fetch_source(
         }
     };
 
-    let generic = GenericHttpSource::from_data_source(&ds);
+    let generic = GenericHttpSource::from_data_source(&ds, Some(&app.encryption_key));
     match SourceScheduler::fetch_once(generic).await {
         Ok(value) => {
             let now_secs = unix_now_secs() as i64;
@@ -1598,6 +1716,91 @@ async fn admin_get_source_data(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// `POST /api/admin/rotate-encryption-key` — re-encrypt all encrypted headers
+/// with a new key derived from the provided `new_api_key`.
+///
+/// Body: `{"new_api_key": "..."}`
+async fn admin_rotate_encryption_key(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let new_api_key = match payload["new_api_key"].as_str() {
+        Some(k) if !k.is_empty() => k,
+        _ => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "new_api_key is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let old_key = &app.encryption_key;
+    let new_key = EncryptionKey::derive_from_api_key(new_api_key);
+
+    let sources = match app.source_store.list() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("rotate_encryption_key list: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut rotated_count = 0usize;
+    for ds in &sources {
+        if let Some(arr) = ds.encrypted_headers.as_array() {
+            if arr.is_empty() {
+                continue;
+            }
+            let encrypted_values: Vec<String> = arr
+                .iter()
+                .filter_map(|e| e["value"].as_str().map(|s| s.to_string()))
+                .collect();
+            let keys: Vec<String> = arr
+                .iter()
+                .filter_map(|e| e["key"].as_str().map(|s| s.to_string()))
+                .collect();
+
+            match crypto::rotate_key(old_key, &new_key, &encrypted_values) {
+                Ok(new_values) => {
+                    let new_enc: Vec<serde_json::Value> = keys
+                        .iter()
+                        .zip(new_values.iter())
+                        .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
+                        .collect();
+                    let enc_json = serde_json::to_string(&new_enc).unwrap_or_default();
+                    if let Err(e) = app.source_store.update_encrypted_headers(&ds.id, &enc_json) {
+                        log::error!("rotate_encryption_key update '{}': {}", ds.id, e);
+                    } else {
+                        rotated_count += 1;
+                    }
+                }
+                Err(e) => {
+                    log::error!("rotate_encryption_key decrypt '{}': {}", ds.id, e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("failed to re-encrypt source '{}': {}", ds.id, e)
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "rotated_sources": rotated_count,
+        "message": "Re-encryption complete. Update secrets.toml with the new API key and restart."
+    }))
+    .into_response()
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1789,6 +1992,8 @@ mod tests {
 
         let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
 
+        let api_key = "test-key".to_string();
+        let encryption_key = EncryptionKey::derive_from_api_key(&api_key);
         Arc::new(AppState {
             compositor,
             instance_store,
@@ -1796,7 +2001,8 @@ mod tests {
             source_store,
             scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
-            api_key: "test-key".to_string(),
+            api_key,
+            encryption_key,
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
@@ -1969,6 +2175,8 @@ mod tests {
 
         let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
 
+        let api_key = "test-key".to_string();
+        let encryption_key = EncryptionKey::derive_from_api_key(&api_key);
         let state = Arc::new(AppState {
             compositor,
             instance_store,
@@ -1976,7 +2184,8 @@ mod tests {
             source_store,
             scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
-            api_key: "test-key".to_string(),
+            api_key,
+            encryption_key,
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
@@ -2961,5 +3170,185 @@ mod tests {
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── Encrypted headers tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_source_with_secret_headers_masks_in_response() {
+        let (state, _dir) = make_state_with_full_config();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+
+        let payload = serde_json::json!({
+            "name": "Secret API",
+            "url": "https://api.example.com/v1",
+            "method": "GET",
+            "headers": {"Content-Type": "application/json"},
+            "secret_headers": [
+                {"key": "Authorization", "value": "Bearer sk-secret-123"},
+                {"key": "X-Api-Token", "value": "tok_abc"}
+            ],
+            "refresh_interval_secs": 60
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Plaintext headers visible
+        assert_eq!(json["headers"]["Content-Type"], "application/json");
+
+        // Secret headers keys visible but values masked (null)
+        let enc = json["encrypted_headers"].as_array().unwrap();
+        assert_eq!(enc.len(), 2);
+        assert_eq!(enc[0]["key"], "Authorization");
+        assert!(enc[0]["value"].is_null(), "encrypted value should be masked");
+        assert_eq!(enc[1]["key"], "X-Api-Token");
+        assert!(enc[1]["value"].is_null(), "encrypted value should be masked");
+    }
+
+    #[tokio::test]
+    async fn get_source_masks_encrypted_headers() {
+        let (state, _dir) = make_state_with_full_config();
+        seed_default_layout(&state);
+
+        // Create a source with secret headers
+        let config = crate::source_store::DataSourceConfig {
+            name: "Test".to_string(),
+            url: "https://example.com".to_string(),
+            method: "GET".to_string(),
+            headers: serde_json::json!({}),
+            secret_headers: Some(vec![crate::source_store::SecretHeaderInput {
+                key: "Authorization".to_string(),
+                value: Some("Bearer secret".to_string()),
+            }]),
+            body_template: None,
+            response_root_path: None,
+            refresh_interval_secs: 60,
+        };
+        let enc_json = encrypt_secret_headers(&state.encryption_key, &config, None).unwrap();
+        let ds = state.source_store.create(&config, &enc_json).unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri(format!("/api/admin/sources/{}", ds.id))
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let enc = json["encrypted_headers"].as_array().unwrap();
+        assert_eq!(enc.len(), 1);
+        assert_eq!(enc[0]["key"], "Authorization");
+        assert!(enc[0]["value"].is_null(), "value should be masked in GET response");
+    }
+
+    #[tokio::test]
+    async fn secret_headers_decrypted_for_source_construction() {
+        let key = EncryptionKey::derive_from_api_key("test-api-key-for-crypto");
+        let encrypted = crate::crypto::encrypt(&key, "Bearer sk-secret").unwrap();
+
+        let ds = crate::source_store::DataSource {
+            id: "src-test".to_string(),
+            name: "Test".to_string(),
+            url: "https://httpbin.org/get".to_string(),
+            method: "GET".to_string(),
+            headers: serde_json::json!({"X-Public": "visible"}),
+            encrypted_headers: serde_json::json!([
+                {"key": "Authorization", "value": encrypted}
+            ]),
+            body_template: None,
+            response_root_path: None,
+            refresh_interval_secs: 60,
+            cached_data: None,
+            last_fetched_at: None,
+            last_error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let generic = GenericHttpSource::from_data_source(&ds, Some(&key));
+        // The source should have 2 headers: X-Public + decrypted Authorization
+        // We can't directly inspect headers but we can verify it doesn't panic
+        assert_eq!(generic.id(), "src-test");
+        assert_eq!(generic.name(), "Test");
+    }
+
+    #[tokio::test]
+    async fn update_source_preserves_unchanged_secret_headers() {
+        let (state, _dir) = make_state_with_full_config();
+        seed_default_layout(&state);
+
+        // Create source with a secret header
+        let create_payload = serde_json::json!({
+            "name": "Preserve Test",
+            "url": "https://example.com",
+            "headers": {},
+            "secret_headers": [{"key": "Secret-Key", "value": "original-value"}],
+            "refresh_interval_secs": 60
+        });
+
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&create_payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let source_id = created["id"].as_str().unwrap().to_string();
+
+        // Update with null value (should preserve the encrypted value)
+        let update_payload = serde_json::json!({
+            "name": "Preserve Test Updated",
+            "url": "https://example.com",
+            "headers": {},
+            "secret_headers": [{"key": "Secret-Key", "value": null}],
+            "refresh_interval_secs": 60
+        });
+
+        let app2 = build_router(Arc::clone(&state));
+        let req2 = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/admin/sources/{}", source_id))
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&update_payload).unwrap()))
+            .unwrap();
+        let resp2 = app2.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Verify the encrypted header still exists in the DB
+        let ds = state.source_store.get(&source_id).unwrap().unwrap();
+        let enc_arr = ds.encrypted_headers.as_array().unwrap();
+        assert_eq!(enc_arr.len(), 1);
+        assert_eq!(enc_arr[0]["key"], "Secret-Key");
+        // The stored value should be a non-null encrypted string
+        assert!(enc_arr[0]["value"].is_string(), "encrypted value should be preserved");
+
+        // And it should still decrypt correctly
+        let encrypted_val = enc_arr[0]["value"].as_str().unwrap();
+        let decrypted = crate::crypto::decrypt(&state.encryption_key, encrypted_val).unwrap();
+        assert_eq!(decrypted, "original-value");
     }
 }

@@ -3,6 +3,7 @@ use cascades::{
     build_sources,
     config::{load_config, load_display_layouts, load_or_create_secrets},
     compositor::Compositor,
+    crypto::EncryptionKey,
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
     layout_store::LayoutStore,
@@ -30,6 +31,7 @@ async fn main() {
         });
 
     let secrets = load_or_create_secrets(Path::new("config/secrets.toml"));
+    let encryption_key = EncryptionKey::derive_from_api_key(&secrets.api_key);
 
     let fixture_mode = std::env::var("SKAGIT_FIXTURE_DATA").as_deref() == Ok("1");
     if fixture_mode {
@@ -121,7 +123,7 @@ async fn main() {
     // Spawn generic HTTP sources from database.
     if let Ok(sources) = source_store.list() {
         for ds in &sources {
-            let generic = GenericHttpSource::from_data_source(ds);
+            let generic = GenericHttpSource::from_data_source(ds, Some(&encryption_key));
             scheduler.spawn_source(generic);
         }
         if !sources.is_empty() {
@@ -138,6 +140,7 @@ async fn main() {
         scheduler,
         image_cache: Arc::new(RwLock::new(HashMap::new())),
         api_key: secrets.api_key,
+        encryption_key,
         refresh_rate_secs,
         started_at: std::time::Instant::now(),
         sidecar_url,
