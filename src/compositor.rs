@@ -298,6 +298,10 @@ impl Compositor {
                     height,
                     text_content,
                     font_size,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                     ..
                 } => {
                     let text = text_content.clone();
@@ -307,9 +311,15 @@ impl Compositor {
                     let url = self.sidecar_url.clone();
                     let iid = id.clone();
                     let mode = render_mode.to_string();
+                    let style = TextStyle {
+                        bold: *bold,
+                        italic: *italic,
+                        underline: *underline,
+                        font_family: font_family.clone(),
+                    };
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_text(&text, fs, w, h, &url, &iid, &mode).await
+                        render_static_text(&text, fs, w, h, &style, &url, &iid, &mode).await
                     }));
                     Some(idx)
                 }
@@ -319,6 +329,10 @@ impl Compositor {
                     height,
                     font_size,
                     format,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                     ..
                 } => {
                     let fmt = format.clone();
@@ -328,9 +342,15 @@ impl Compositor {
                     let url = self.sidecar_url.clone();
                     let iid = id.clone();
                     let mode = render_mode.to_string();
+                    let style = TextStyle {
+                        bold: *bold,
+                        italic: *italic,
+                        underline: *underline,
+                        font_family: font_family.clone(),
+                    };
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_datetime(fmt.as_deref(), fs, w, h, &url, &iid, &mode).await
+                        render_static_datetime(fmt.as_deref(), fs, w, h, &style, &url, &iid, &mode).await
                     }));
                     Some(idx)
                 }
@@ -342,6 +362,10 @@ impl Compositor {
                     font_size,
                     format_string,
                     label,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                     ..
                 } => {
                     let w = (*width).max(0) as u32;
@@ -355,10 +379,16 @@ impl Compositor {
                     let lbl = label.clone();
                     let layout_store = Arc::clone(&self.layout_store);
                     let instance_store = Arc::clone(&self.instance_store);
+                    let style = TextStyle {
+                        bold: *bold,
+                        italic: *italic,
+                        underline: *underline,
+                        font_family: font_family.clone(),
+                    };
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
                         render_data_field(
-                            &fmid, &fmt_str, lbl.as_deref(), fs, w, h,
+                            &fmid, &fmt_str, lbl.as_deref(), fs, w, h, &style,
                             &url, &iid, &mode,
                             layout_store, instance_store,
                         )

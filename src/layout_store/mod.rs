@@ -84,6 +84,14 @@ pub enum LayoutItem {
         text_content: String,
         font_size: i32,
         orientation: Option<String>,
+        #[serde(default)]
+        bold: bool,
+        #[serde(default)]
+        italic: bool,
+        #[serde(default)]
+        underline: bool,
+        #[serde(default)]
+        font_family: Option<String>,
     },
     /// A static date/time element rendered via the sidecar.
     #[serde(rename = "static_datetime")]
@@ -97,6 +105,14 @@ pub enum LayoutItem {
         font_size: i32,
         format: Option<String>,
         orientation: Option<String>,
+        #[serde(default)]
+        bold: bool,
+        #[serde(default)]
+        italic: bool,
+        #[serde(default)]
+        underline: bool,
+        #[serde(default)]
+        font_family: Option<String>,
     },
     /// A horizontal or vertical divider line.
     StaticDivider {
@@ -124,6 +140,14 @@ pub enum LayoutItem {
         /// Optional label displayed above/before the value.
         label: Option<String>,
         orientation: Option<String>,
+        #[serde(default)]
+        bold: bool,
+        #[serde(default)]
+        italic: bool,
+        #[serde(default)]
+        underline: bool,
+        #[serde(default)]
+        font_family: Option<String>,
     },
 }
 
@@ -219,6 +243,10 @@ impl LayoutStore {
             ("field_mapping_id", "TEXT"),
             ("format_string", "TEXT"),
             ("label", "TEXT"),
+            ("bold", "INTEGER"),
+            ("italic", "INTEGER"),
+            ("underline", "INTEGER"),
+            ("font_family", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -281,7 +309,8 @@ impl LayoutStore {
         let mut stmt = conn.prepare(
             "SELECT id, item_type, z_index, x, y, width, height,
                     plugin_instance_id, layout_variant, text_content, font_size, orientation,
-                    field_mapping_id, format_string, label
+                    field_mapping_id, format_string, label,
+                    bold, italic, underline, font_family
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -304,6 +333,10 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<i32>>(15)?,
+                row.get::<_, Option<i32>>(16)?,
+                row.get::<_, Option<i32>>(17)?,
+                row.get::<_, Option<String>>(18)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -311,8 +344,12 @@ impl LayoutStore {
         let mut items = Vec::with_capacity(rows.len());
         for (item_id, item_type, z_index, x, y, width, height,
              plugin_instance_id, layout_variant, text_content, font_size, orientation,
-             field_mapping_id, format_string, label) in rows
+             field_mapping_id, format_string, label,
+             bold, italic, underline, font_family) in rows
         {
+            let bold = bold.unwrap_or(0) != 0;
+            let italic = italic.unwrap_or(0) != 0;
+            let underline = underline.unwrap_or(0) != 0;
             let item = match item_type.as_str() {
                 "plugin_slot" => LayoutItem::PluginSlot {
                     id: item_id,
@@ -335,6 +372,10 @@ impl LayoutStore {
                     text_content: text_content.unwrap_or_default(),
                     font_size: font_size.unwrap_or(16),
                     orientation,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                 },
                 "static_datetime" => LayoutItem::StaticDateTime {
                     id: item_id,
@@ -346,6 +387,10 @@ impl LayoutStore {
                     font_size: font_size.unwrap_or(16),
                     format: text_content,
                     orientation,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                 },
                 "static_divider" => LayoutItem::StaticDivider {
                     id: item_id,
@@ -369,6 +414,10 @@ impl LayoutStore {
                         .unwrap_or_else(|| "{{value}}".to_string()),
                     label,
                     orientation,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                 },
                 other => {
                     return Err(LayoutStoreError::InvalidItemType(other.to_string()))
@@ -414,29 +463,37 @@ impl LayoutStore {
                 }
                 LayoutItem::StaticText {
                     id, z_index, x, y, width, height, text_content, font_size, orientation,
+                    bold, italic, underline, font_family,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          text_content, font_size, orientation)
-                         VALUES (?1, ?2, 'static_text', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                          text_content, font_size, orientation,
+                          bold, italic, underline, font_family)
+                         VALUES (?1, ?2, 'static_text', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                                 ?11, ?12, ?13, ?14)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
-                            text_content, font_size, orientation
+                            text_content, font_size, orientation,
+                            *bold as i32, *italic as i32, *underline as i32, font_family
                         ],
                     )?;
                 }
                 LayoutItem::StaticDateTime {
                     id, z_index, x, y, width, height, font_size, format, orientation,
+                    bold, italic, underline, font_family,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          text_content, font_size, orientation)
-                         VALUES (?1, ?2, 'static_datetime', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                          text_content, font_size, orientation,
+                          bold, italic, underline, font_family)
+                         VALUES (?1, ?2, 'static_datetime', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                                 ?11, ?12, ?13, ?14)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
-                            format, font_size, orientation
+                            format, font_size, orientation,
+                            *bold as i32, *italic as i32, *underline as i32, font_family
                         ],
                     )?;
                 }
@@ -453,15 +510,19 @@ impl LayoutStore {
                 LayoutItem::DataField {
                     id, z_index, x, y, width, height,
                     field_mapping_id, font_size, format_string, label, orientation,
+                    bold, italic, underline, font_family,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          field_mapping_id, font_size, format_string, label, orientation)
-                         VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                          field_mapping_id, font_size, format_string, label, orientation,
+                          bold, italic, underline, font_family)
+                         VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                                 ?13, ?14, ?15, ?16)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
-                            field_mapping_id, font_size, format_string, label, orientation
+                            field_mapping_id, font_size, format_string, label, orientation,
+                            *bold as i32, *italic as i32, *underline as i32, font_family
                         ],
                     )?;
                 }
@@ -907,6 +968,10 @@ mod tests {
                     text_content: "Hello".to_string(),
                     font_size: 24,
                     orientation: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_family: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
@@ -978,6 +1043,10 @@ mod tests {
                     format_string: "{{value}} ft".to_string(),
                     label: Some("Water Level".to_string()),
                     orientation: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_family: None,
                 },
                 LayoutItem::DataField {
                     id: "df1".to_string(),
@@ -991,6 +1060,10 @@ mod tests {
                     format_string: "{{value | round(0) | number_with_delimiter}} cfs".to_string(),
                     label: None,
                     orientation: Some("horizontal".to_string()),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font_family: None,
                 },
             ],
             updated_at: 0,
@@ -1040,6 +1113,10 @@ mod tests {
             format_string: "{{value}}".to_string(),
             label: None,
             orientation: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            font_family: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();

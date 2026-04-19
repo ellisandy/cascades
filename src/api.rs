@@ -621,6 +621,14 @@ struct ItemPayload {
     field_mapping_id: Option<String>,
     format_string: Option<String>,
     label: Option<String>,
+    #[serde(default)]
+    bold: Option<bool>,
+    #[serde(default)]
+    italic: Option<bool>,
+    #[serde(default)]
+    underline: Option<bool>,
+    #[serde(default)]
+    font_family: Option<String>,
 }
 
 impl ItemPayload {
@@ -646,6 +654,10 @@ impl ItemPayload {
                 text_content: self.text_content.unwrap_or_default(),
                 font_size: self.font_size.unwrap_or(16),
                 orientation: self.orientation,
+                bold: self.bold.unwrap_or(false),
+                italic: self.italic.unwrap_or(false),
+                underline: self.underline.unwrap_or(false),
+                font_family: self.font_family,
             }),
             "static_datetime" => Ok(LayoutItem::StaticDateTime {
                 id: self.id,
@@ -657,6 +669,10 @@ impl ItemPayload {
                 font_size: self.font_size.unwrap_or(16),
                 format: self.text_content,
                 orientation: self.orientation,
+                bold: self.bold.unwrap_or(false),
+                italic: self.italic.unwrap_or(false),
+                underline: self.underline.unwrap_or(false),
+                font_family: self.font_family,
             }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
                 id: self.id,
@@ -681,6 +697,10 @@ impl ItemPayload {
                     .unwrap_or_else(|| "{{value}}".to_string()),
                 label: self.label,
                 orientation: self.orientation,
+                bold: self.bold.unwrap_or(false),
+                italic: self.italic.unwrap_or(false),
+                underline: self.underline.unwrap_or(false),
+                font_family: self.font_family,
             }),
             other => Err(format!("unknown item_type '{other}'")),
         }
