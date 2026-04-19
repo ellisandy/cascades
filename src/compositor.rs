@@ -844,9 +844,20 @@ fn composite_to_png(
                     (*height).max(0) as u32,
                 );
             }
-            LayoutItem::Group { .. } => {
-                // Phase 1: groups are pure visual containers with no compositor
-                // output. Phase 2 adds optional card/chrome backgrounds.
+            LayoutItem::Group { x, y, width, height, background, .. } => {
+                // Phase 2: groups may declare a background rendered behind
+                // their descendants. Items are traversed in z-order, so a
+                // group placed at a lower z_index than its children paints
+                // first — the natural "background" position.
+                if background.as_deref() == Some("card") {
+                    draw_card_background(
+                        &mut frame,
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                    );
+                }
             }
         }
     }
@@ -893,6 +904,52 @@ fn blit_png(
         }
     }
     Ok(())
+}
+
+/// Draw a "card" style group background: white fill with a 1px black border.
+///
+/// Used to render [`LayoutItem::Group`] items with `background = "card"`.
+/// The fill ensures any items below this group in z-order are masked out;
+/// the 1px border marks the group visually.
+fn draw_card_background(frame: &mut GrayImage, x: u32, y: u32, width: u32, height: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    // White fill.
+    for py in 0..height {
+        for px in 0..width {
+            let dst_x = x + px;
+            let dst_y = y + py;
+            if dst_x < FRAME_WIDTH && dst_y < FRAME_HEIGHT {
+                frame.put_pixel(dst_x, dst_y, image::Luma([255u8]));
+            }
+        }
+    }
+    // 1px black border (top/bottom/left/right).
+    let right = x.saturating_add(width.saturating_sub(1));
+    let bottom = y.saturating_add(height.saturating_sub(1));
+    for px in 0..width {
+        let dst_x = x + px;
+        if dst_x < FRAME_WIDTH {
+            if y < FRAME_HEIGHT {
+                frame.put_pixel(dst_x, y, image::Luma([0u8]));
+            }
+            if bottom < FRAME_HEIGHT {
+                frame.put_pixel(dst_x, bottom, image::Luma([0u8]));
+            }
+        }
+    }
+    for py in 0..height {
+        let dst_y = y + py;
+        if dst_y < FRAME_HEIGHT {
+            if x < FRAME_WIDTH {
+                frame.put_pixel(x, dst_y, image::Luma([0u8]));
+            }
+            if right < FRAME_WIDTH {
+                frame.put_pixel(right, dst_y, image::Luma([0u8]));
+            }
+        }
+    }
 }
 
 /// Fill a rectangle on `frame` with black (pixel value 0).
@@ -1264,6 +1321,97 @@ mod tests {
 
         // Black (z=1) overwrote white (z=0).
         assert_eq!(frame.get_pixel(10, 10).0[0], 0);
+    }
+
+    #[test]
+    fn composite_to_png_group_card_background_draws_border_and_fills_white() {
+        // A group with a "card" background paints a white rectangle with a
+        // 1px black border at its bounds, before any descendants.
+        let item = LayoutItem::Group {
+            id: "g0".to_string(),
+            z_index: 0,
+            x: 50, y: 40, width: 100, height: 60,
+            plugin_instance_id: None,
+            label: None,
+            background: Some("card".to_string()),
+            parent_id: None,
+        };
+        let task_for_item = vec![None];
+        let png = composite_to_png(&[item], &task_for_item, &[]).unwrap();
+        let frame = image::load_from_memory(&png).unwrap().to_luma8();
+
+        // Border pixels are black.
+        assert_eq!(frame.get_pixel(50, 40).0[0], 0, "top-left corner");
+        assert_eq!(frame.get_pixel(149, 40).0[0], 0, "top-right corner");
+        assert_eq!(frame.get_pixel(50, 99).0[0], 0, "bottom-left corner");
+        assert_eq!(frame.get_pixel(149, 99).0[0], 0, "bottom-right corner");
+        assert_eq!(frame.get_pixel(100, 40).0[0], 0, "top edge");
+        assert_eq!(frame.get_pixel(100, 99).0[0], 0, "bottom edge");
+        assert_eq!(frame.get_pixel(50, 70).0[0], 0, "left edge");
+        assert_eq!(frame.get_pixel(149, 70).0[0], 0, "right edge");
+
+        // Interior is white.
+        assert_eq!(frame.get_pixel(100, 70).0[0], 255, "interior");
+        assert_eq!(frame.get_pixel(51, 41).0[0], 255, "just inside top-left");
+
+        // Outside the group is unchanged white.
+        assert_eq!(frame.get_pixel(49, 40).0[0], 255);
+        assert_eq!(frame.get_pixel(150, 40).0[0], 255);
+    }
+
+    #[test]
+    fn composite_to_png_group_without_background_is_noop() {
+        // A group with no background (or None) paints nothing.
+        let item = LayoutItem::Group {
+            id: "g0".to_string(),
+            z_index: 0,
+            x: 10, y: 10, width: 50, height: 50,
+            plugin_instance_id: None,
+            label: None,
+            background: None,
+            parent_id: None,
+        };
+        let task_for_item = vec![None];
+        let png = composite_to_png(&[item], &task_for_item, &[]).unwrap();
+        let frame = image::load_from_memory(&png).unwrap().to_luma8();
+
+        // Frame is still pure white.
+        for pixel in frame.pixels() {
+            assert_eq!(pixel.0[0], 255);
+        }
+    }
+
+    #[test]
+    fn composite_to_png_group_card_paints_before_children_in_z_order() {
+        // Group (z=0) with card bg, plus a black child (z=1) inside it.
+        // The child must paint on top — the group bg must NOT overwrite it.
+        let group = LayoutItem::Group {
+            id: "g".to_string(),
+            z_index: 0,
+            x: 100, y: 100, width: 80, height: 60,
+            plugin_instance_id: None,
+            label: None,
+            background: Some("card".to_string()),
+            parent_id: None,
+        };
+        // Child is a StaticDivider at z=1 inside the group.
+        let child = LayoutItem::StaticDivider {
+            id: "d".to_string(),
+            z_index: 1,
+            x: 110, y: 120, width: 20, height: 10,
+            orientation: None,
+            parent_id: Some("g".to_string()),
+        };
+        let task_for_item = vec![None, None];
+        let png = composite_to_png(&[group, child], &task_for_item, &[]).unwrap();
+        let frame = image::load_from_memory(&png).unwrap().to_luma8();
+
+        // Inside the child rectangle — should be black (child painted on top).
+        assert_eq!(frame.get_pixel(115, 125).0[0], 0, "child should overpaint group bg");
+        // Inside the group but outside the child — should be white.
+        assert_eq!(frame.get_pixel(140, 140).0[0], 255, "group interior should be white");
+        // Group border should still be visible.
+        assert_eq!(frame.get_pixel(100, 100).0[0], 0, "group border top-left");
     }
 
     #[test]

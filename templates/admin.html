@@ -319,6 +319,43 @@
     .prop-grid select:focus { outline: none; border-color: #58a6ff; }
     .no-sel { color: #8b949e; font-size: 12px; padding: 4px 0; }
 
+    /* ── Outliner panel ── */
+    #outliner {
+      width: 180px;
+      min-width: 180px;
+      background: #0d1117;
+      border-right: 1px solid #30363d;
+      overflow-y: auto;
+      padding: 6px 0;
+      flex-shrink: 0;
+      font-size: 12px;
+    }
+    .outliner-header {
+      color: #8b949e;
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      padding: 6px 8px 4px;
+      border-bottom: 1px solid #21262d;
+      margin-bottom: 4px;
+    }
+    .outliner-row {
+      padding: 3px 8px;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #c9d1d9;
+      border-left: 2px solid transparent;
+    }
+    .outliner-row:hover { background: #161b22; }
+    .outliner-row.selected {
+      background: #1f6feb33;
+      border-left-color: #58a6ff;
+      color: #58a6ff;
+    }
+    .outliner-row.group-row { color: #8b949e; font-weight: bold; }
+    .outliner-empty { color: #484f58; padding: 8px; font-style: italic; }
+
     /* ── Preview overlay ── */
     #preview-area {
       position: fixed;
@@ -556,6 +593,9 @@
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="distributeSelected('h')"  title="Distribute horizontally">⟷ Dist H</button>
   <button class="btn" onclick="distributeSelected('v')"  title="Distribute vertically">⟺ Dist V</button>
+  <div class="toolbar-sep"></div>
+  <button class="btn" onclick="groupSelected()"   title="Group selected items">▢ Group</button>
+  <button class="btn" onclick="ungroupSelected()" title="Ungroup selected group(s)">⊟ Ungroup</button>
   <span id="selection-count" style="margin-left:auto; color:#8b949e;"></span>
 </div>
 
@@ -599,6 +639,12 @@
       </div>
     </div>
   </div>
+
+  <!-- Outliner panel -->
+  <aside id="outliner">
+    <div class="outliner-header">OUTLINER</div>
+    <div id="outliner-tree"><div class="outliner-empty">No items</div></div>
+  </aside>
 
   <!-- Right area -->
   <div id="right">
@@ -965,7 +1011,10 @@ function detectCollisions() {
     for (let j = i + 1; j < state.items.length; j++) {
       const a = state.items[i];
       const b = state.items[j];
-      // Check if rectangles overlap
+      // Groups legitimately enclose their children; skip them in collision detection
+      // along with any item nested inside a group (parent_id set).
+      if (a.type === 'group' || b.type === 'group') continue;
+      if (a.parent_id || b.parent_id) continue;
       if (a.x < b.x + b.w && a.x + a.w > b.x &&
           a.y < b.y + b.h && a.y + a.h > b.y) {
         collisions.add(a.id);
@@ -1454,7 +1503,14 @@ function onCanvasMouseDown(e) {
     if (!item) return;
     const c = toCanvas(e);
     // Snapshot offsets for every selected item so drags translate the group.
-    const offsets = state.selectedIds.map(function(id) {
+    // When a selected item is itself a group, its descendants must ride along
+    // so the group moves as a unit.
+    const dragIds = new Set(state.selectedIds);
+    state.selectedIds.forEach(function(id) {
+      const sel = findItem(id);
+      if (sel && sel.type === 'group') collectDescendants(id, dragIds);
+    });
+    const offsets = Array.from(dragIds).map(function(id) {
       const it = findItem(id);
       return it ? { id: id, ox: it.x, oy: it.y } : null;
     }).filter(Boolean);
@@ -1672,6 +1728,7 @@ function renderCanvas() {
   const sorted = state.items.slice().sort(function(a, b) { return a.z_index - b.z_index; });
   sorted.forEach(function(item) { canvas.appendChild(makeEl(item)); });
   updateCollisionIndicators();
+  renderOutliner();
 }
 
 const COLORS = {
@@ -1680,19 +1737,28 @@ const COLORS = {
   static_datetime: { bg: 'rgba(136,100,232,0.22)', border: '#8864e8' },
   static_divider:  { bg: 'rgba(210,153,34,0.22)',  border: '#d29922' },
   data_field:      { bg: 'rgba(240,136,62,0.22)',   border: '#f0883e' },
+  group:           { bg: 'rgba(139,148,158,0.08)', border: '#8b949e' },
 };
 
 function makeEl(item) {
   const el = document.createElement('div');
   const isSelected = state.selectedIds.indexOf(item.id) >= 0;
   el.className = 'canvas-item' + (isSelected ? ' selected' : '');
+  if (item.type === 'group') el.classList.add('group-item');
   el.dataset.id = item.id;
   const col = COLORS[item.type] || { bg: '#21262d', border: '#30363d' };
+  const borderStyle = item.type === 'group' ? '2px dashed ' + col.border : '1px solid ' + col.border;
+  // Group bg preview in the editor: show the card tint when that mode is set
+  // so authors can see what will be rendered.
+  let bg = col.bg;
+  if (item.type === 'group' && item.background === 'card') {
+    bg = 'rgba(255,255,255,0.9)';
+  }
   el.style.cssText =
     'left:' + item.x + 'px;top:' + item.y + 'px;' +
     'width:' + item.w + 'px;height:' + item.h + 'px;' +
     'z-index:' + item.z_index + ';' +
-    'background:' + col.bg + ';border:1px solid ' + col.border + ';';
+    'background:' + bg + ';border:' + borderStyle + ';';
 
   const label = document.createElement('span');
   label.className = 'item-label';
@@ -1732,6 +1798,10 @@ function itemLabel(item) {
   if (item.type === 'data_field') {
     var lbl = item.label || item.format_string || '{{value}}';
     return lbl + ' (' + (item.font_size || 24) + 'px)';
+  }
+  if (item.type === 'group') {
+    var bg = item.background ? ' [' + item.background + ']' : '';
+    return '\u25A2 ' + (item.label || 'Group') + bg;
   }
   return item.type;
 }
@@ -1791,6 +1861,19 @@ function renderProps() {
       '<label>Font size</label>' +
       '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">' +
       textFormatFields(item);
+  } else if (item.type === 'group') {
+    const bgOpts = [
+      { v: '',     label: 'none' },
+      { v: 'card', label: 'card (white + border)' },
+    ].map(function(o) {
+      const sel = (item.background || '') === o.v ? ' selected' : '';
+      return '<option value="' + esc(o.v) + '"' + sel + '>' + esc(o.label) + '</option>';
+    }).join('');
+    typeFields =
+      '<label>Label</label>' +
+      '<input type="text" value="' + esc(item.label || '') + '" oninput="updateProp(\'label\',this.value)">' +
+      '<label>Background</label>' +
+      '<select onchange="updateGroupBackground(this.value)">' + bgOpts + '</select>';
   }
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
@@ -1877,9 +1960,23 @@ function updatePropRender(key, value) {
 
 function deleteSelected() {
   if (!state.selectedIds.length) return;
+  // Collect deletion set, cascading into any selected group's descendants.
+  const toDelete = new Set(state.selectedIds);
+  const hasGroup = state.selectedIds.some(function(id) {
+    const it = findItem(id);
+    if (it && it.type === 'group') {
+      collectDescendants(id, toDelete);
+      return true;
+    }
+    return false;
+  });
+  if (hasGroup) {
+    const n = toDelete.size;
+    if (!confirm('Delete group and ' + (n - state.selectedIds.length) +
+                 ' descendant item(s)?')) return;
+  }
   saveHistory();
-  const ids = new Set(state.selectedIds);
-  state.items = state.items.filter(function(i) { return !ids.has(i.id); });
+  state.items = state.items.filter(function(i) { return !toDelete.has(i.id); });
   clearSelection();
   updateCollisionIndicators();
   renderCanvas();
@@ -2388,6 +2485,121 @@ async function submitDataFieldModal() {
 function cancelDataFieldModal() {
   document.getElementById('datafield-modal').classList.add('hidden');
   document.getElementById('df-explorer-inline').classList.add('hidden');
+}
+
+// ────────────────────────────────────────
+// Groups
+// ────────────────────────────────────────
+function collectDescendants(parentId, outSet) {
+  state.items.forEach(function(it) {
+    if (it.parent_id === parentId && !outSet.has(it.id)) {
+      outSet.add(it.id);
+      if (it.type === 'group') collectDescendants(it.id, outSet);
+    }
+  });
+}
+
+function groupSelected() {
+  const items = selectedItems();
+  if (items.length < 2) {
+    showToast('Select at least two items to group', 'error');
+    return;
+  }
+  // Don't nest existing groups for MVP — they may already belong to another group.
+  saveHistory();
+  const minX = Math.min.apply(null, items.map(function(i) { return i.x; }));
+  const minY = Math.min.apply(null, items.map(function(i) { return i.y; }));
+  const maxX = Math.max.apply(null, items.map(function(i) { return i.x + i.w; }));
+  const maxY = Math.max.apply(null, items.map(function(i) { return i.y + i.h; }));
+  const minZ = Math.min.apply(null, items.map(function(i) { return i.z_index; }));
+  const groupId = uid();
+  const group = {
+    id: groupId, type: 'group',
+    // Lower z so the group paints before its children in the compositor.
+    z_index: minZ - 1,
+    x: minX, y: minY, w: maxX - minX, h: maxY - minY,
+    plugin_id: '', variant: 'full', text: '', font_size: 24, orientation: 'horizontal',
+    label: 'Group', background: null, parent_id: null,
+  };
+  state.items.push(group);
+  items.forEach(function(it) { it.parent_id = groupId; });
+  selectItem(groupId);
+  renderCanvas();
+  renderProps();
+  renderOutliner();
+}
+
+function ungroupSelected() {
+  const groupIds = state.selectedIds.filter(function(id) {
+    const it = findItem(id);
+    return it && it.type === 'group';
+  });
+  if (!groupIds.length) {
+    showToast('Select a group to ungroup', 'error');
+    return;
+  }
+  saveHistory();
+  const gset = new Set(groupIds);
+  state.items.forEach(function(it) {
+    if (it.parent_id && gset.has(it.parent_id)) it.parent_id = null;
+  });
+  state.items = state.items.filter(function(i) { return !gset.has(i.id); });
+  clearSelection();
+  renderCanvas();
+  renderProps();
+  renderOutliner();
+}
+
+/// Toggle a group's background mode. Converting the <select>'s empty-string
+/// value back to null keeps payloads canonical.
+function updateGroupBackground(val) {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  item.background = val ? val : null;
+  renderCanvas();
+  renderOutliner();
+}
+
+// ────────────────────────────────────────
+// Outliner panel
+// ────────────────────────────────────────
+function renderOutliner() {
+  const el = document.getElementById('outliner-tree');
+  if (!el) return;
+  if (!state.items.length) {
+    el.innerHTML = '<div class="outliner-empty">No items</div>';
+    return;
+  }
+  const byParent = {};
+  state.items.forEach(function(it) {
+    const pid = it.parent_id || '';
+    (byParent[pid] = byParent[pid] || []).push(it);
+  });
+  Object.keys(byParent).forEach(function(k) {
+    byParent[k].sort(function(a, b) { return a.z_index - b.z_index; });
+  });
+
+  function buildLevel(pid, depth) {
+    const list = byParent[pid] || [];
+    return list.map(function(it) {
+      const isSel = state.selectedIds.indexOf(it.id) >= 0;
+      const cls = 'outliner-row' + (isSel ? ' selected' : '') +
+        (it.type === 'group' ? ' group-row' : '');
+      const pad = depth * 10 + 8;
+      const row =
+        '<div class="' + cls + '" data-id="' + esc(it.id) + '" ' +
+        'onclick="onOutlinerClick(event, \'' + esc(it.id) + '\')" ' +
+        'style="padding-left:' + pad + 'px">' +
+        esc(itemLabel(it)) + '</div>';
+      return row + (it.type === 'group' ? buildLevel(it.id, depth + 1) : '');
+    }).join('');
+  }
+  el.innerHTML = buildLevel('', 0);
+}
+
+function onOutlinerClick(e, id) {
+  const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+  selectItem(id, additive);
 }
 
 // ────────────────────────────────────────
