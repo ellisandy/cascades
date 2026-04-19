@@ -629,6 +629,10 @@ struct ItemPayload {
     underline: Option<bool>,
     #[serde(default)]
     font_family: Option<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    background: Option<String>,
 }
 
 impl ItemPayload {
@@ -643,6 +647,7 @@ impl ItemPayload {
                 height: self.height,
                 plugin_instance_id: self.plugin_instance_id.unwrap_or_default(),
                 layout_variant: self.layout_variant.unwrap_or_else(|| "full".to_string()),
+                parent_id: self.parent_id,
             }),
             "static_text" => Ok(LayoutItem::StaticText {
                 id: self.id,
@@ -658,6 +663,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                parent_id: self.parent_id,
             }),
             "static_datetime" => Ok(LayoutItem::StaticDateTime {
                 id: self.id,
@@ -673,6 +679,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                parent_id: self.parent_id,
             }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
                 id: self.id,
@@ -682,6 +689,7 @@ impl ItemPayload {
                 width: self.width,
                 height: self.height,
                 orientation: self.orientation,
+                parent_id: self.parent_id,
             }),
             "data_field" => Ok(LayoutItem::DataField {
                 id: self.id,
@@ -701,10 +709,108 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                parent_id: self.parent_id,
+            }),
+            "group" => Ok(LayoutItem::Group {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                plugin_instance_id: self.plugin_instance_id,
+                label: self.label,
+                background: self.background,
+                parent_id: self.parent_id,
             }),
             other => Err(format!("unknown item_type '{other}'")),
         }
     }
+}
+
+/// Collect known plugin instance IDs. Errors collapse to an empty set so
+/// validation fails closed on unknown refs.
+fn collect_instance_ids(app: &Arc<AppState>) -> std::collections::HashSet<String> {
+    app.instance_store
+        .list_instances()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
+}
+
+/// Validate a layout payload for structural integrity.
+///
+/// Returns a list of errors (one per issue) — empty on success. Checks:
+/// 1. Duplicate item ids.
+/// 2. Each `parent_id` references an item present in the same payload.
+/// 3. The parent chain contains no cycles.
+/// 4. A `group`'s `plugin_instance_id` (if set) references a valid instance.
+fn validate_layout_payload(
+    items: &[ItemPayload],
+    instance_ids: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut errors = Vec::new();
+
+    let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(items.len());
+    for (i, it) in items.iter().enumerate() {
+        if by_id.insert(it.id.as_str(), i).is_some() {
+            errors.push(format!("duplicate item id '{}'", it.id));
+        }
+    }
+
+    for it in items {
+        if let Some(pid) = it.parent_id.as_deref()
+            && !by_id.contains_key(pid)
+        {
+            errors.push(format!(
+                "item '{}' has parent_id '{}' which does not reference any item in the payload",
+                it.id, pid
+            ));
+        }
+    }
+
+    for it in items {
+        if it.item_type == "group"
+            && let Some(pi) = it.plugin_instance_id.as_deref()
+            && !pi.is_empty()
+            && !instance_ids.contains(pi)
+        {
+            errors.push(format!(
+                "group '{}' references unknown plugin_instance_id '{}'",
+                it.id, pi
+            ));
+        }
+    }
+
+    for it in items {
+        if it.parent_id.is_none() {
+            continue;
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cursor = it.id.as_str();
+        loop {
+            if !seen.insert(cursor) {
+                errors.push(format!(
+                    "cycle detected in parent chain starting at item '{}'",
+                    it.id
+                ));
+                break;
+            }
+            let idx = match by_id.get(cursor) {
+                Some(&i) => i,
+                None => break,
+            };
+            match items[idx].parent_id.as_deref() {
+                Some(p) => cursor = p,
+                None => break,
+            }
+        }
+    }
+
+    errors
 }
 
 /// Body for `PUT /api/admin/layout/{id}`.
@@ -918,6 +1024,18 @@ async fn admin_put_layout(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    let instance_ids = collect_instance_ids(&app);
+    let errs = validate_layout_payload(&payload.items, &instance_ids);
+    if !errs.is_empty() {
+        return Response::builder()
+            .status(StatusCode::UNPROCESSABLE_ENTITY)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "errors": errs })).unwrap(),
+            ))
+            .unwrap();
+    }
+
     let items: Result<Vec<LayoutItem>, String> =
         payload.items.into_iter().map(|p| p.into_layout_item()).collect();
 
@@ -965,6 +1083,18 @@ async fn admin_post_layout(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis());
+
+    let instance_ids = collect_instance_ids(&app);
+    let errs = validate_layout_payload(&payload.items, &instance_ids);
+    if !errs.is_empty() {
+        return Response::builder()
+            .status(StatusCode::UNPROCESSABLE_ENTITY)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "errors": errs })).unwrap(),
+            ))
+            .unwrap();
+    }
 
     let items: Result<Vec<LayoutItem>, String> =
         payload.items.into_iter().map(|p| p.into_layout_item()).collect();
@@ -2247,6 +2377,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_put_layout_rejects_dangling_parent_id() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Bad",
+            "items": [
+                {
+                    "id": "t0",
+                    "item_type": "static_text",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 100, "height": 30,
+                    "text_content": "x",
+                    "font_size": 16,
+                    "parent_id": "nonexistent"
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let errs = v["errors"].as_array().unwrap();
+        assert!(errs.iter().any(|e| e.as_str().unwrap().contains("nonexistent")));
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_rejects_self_parent_cycle() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Bad",
+            "items": [
+                {
+                    "id": "g",
+                    "item_type": "group",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 100, "height": 100,
+                    "parent_id": "g"
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let errs = v["errors"].as_array().unwrap();
+        assert!(errs.iter().any(|e| e.as_str().unwrap().contains("cycle")));
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_rejects_three_item_cycle() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Bad",
+            "items": [
+                { "id": "a", "item_type": "group", "z_index": 0,
+                  "x": 0, "y": 0, "width": 100, "height": 100, "parent_id": "c" },
+                { "id": "b", "item_type": "group", "z_index": 1,
+                  "x": 0, "y": 0, "width": 100, "height": 100, "parent_id": "a" },
+                { "id": "c", "item_type": "group", "z_index": 2,
+                  "x": 0, "y": 0, "width": 100, "height": 100, "parent_id": "b" },
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_accepts_group_with_valid_parent() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "OK",
+            "items": [
+                { "id": "g", "item_type": "group", "z_index": 0,
+                  "x": 0, "y": 0, "width": 200, "height": 200,
+                  "label": "G", "background": "card" },
+                { "id": "t", "item_type": "static_text", "z_index": 1,
+                  "x": 10, "y": 10, "width": 100, "height": 30,
+                  "text_content": "Hi", "font_size": 16,
+                  "parent_id": "g" },
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        // Group variant serialises with "type":"group" and background preserved.
+        let group = items.iter().find(|i| i["id"] == "g").unwrap();
+        assert_eq!(group["type"], "group");
+        assert_eq!(group["background"], "card");
+        let text = items.iter().find(|i| i["id"] == "t").unwrap();
+        assert_eq!(text["parent_id"], "g");
+    }
+
+    #[tokio::test]
+    async fn admin_put_layout_rejects_group_with_unknown_plugin_instance() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "name": "Bad",
+            "items": [
+                { "id": "g", "item_type": "group", "z_index": 0,
+                  "x": 0, "y": 0, "width": 200, "height": 200,
+                  "plugin_instance_id": "does-not-exist" },
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn admin_list_plugins_returns_instances() {
         let state = make_test_state();
         let app = build_router(Arc::clone(&state));
@@ -2325,6 +2610,7 @@ mod tests {
                 id: "div-1".to_string(),
                 z_index: 0, x: 0, y: 240, width: 800, height: 2,
                 orientation: None,
+                parent_id: None,
             }],
             updated_at: 0,
         }).unwrap();
@@ -2373,6 +2659,7 @@ mod tests {
                 italic: None,
                 underline: None,
                 font_family: None,
+                parent_id: None,
             }],
             updated_at: 0,
         }).unwrap();

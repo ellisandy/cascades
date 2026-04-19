@@ -145,6 +145,7 @@ impl DisplayConfiguration {
                     height: s.height.unwrap_or(default_h) as i32,
                     plugin_instance_id: s.plugin.clone(),
                     layout_variant: s.variant.clone(),
+                    parent_id: None,
                 })
             })
             .collect::<Result<Vec<_>, CompositorError>>()?;
@@ -399,6 +400,10 @@ impl Compositor {
                 }
                 LayoutItem::StaticDivider { .. } => {
                     // Drawn directly — no async task needed.
+                    None
+                }
+                LayoutItem::Group { .. } => {
+                    // Phase 1: pure container, no render output.
                     None
                 }
             };
@@ -839,6 +844,10 @@ fn composite_to_png(
                     (*height).max(0) as u32,
                 );
             }
+            LayoutItem::Group { .. } => {
+                // Phase 1: groups are pure visual containers with no compositor
+                // output. Phase 2 adds optional card/chrome backgrounds.
+            }
         }
     }
 
@@ -1017,6 +1026,7 @@ mod tests {
                     x: 0, y: 0, width: 400, height: 240,
                     plugin_instance_id: "river".to_string(),
                     layout_variant: "quadrant".to_string(),
+                    parent_id: None,
                 },
                 LayoutItem::StaticText {
                     id: "t0".to_string(),
@@ -1029,12 +1039,14 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    parent_id: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
                     z_index: 2,
                     x: 0, y: 240, width: 800, height: 2,
                     orientation: Some("horizontal".to_string()),
+                    parent_id: None,
                 },
             ],
         };
@@ -1058,12 +1070,14 @@ mod tests {
                     x: 0, y: 0, width: 400, height: 240,
                     plugin_instance_id: "river".to_string(),
                     layout_variant: "bogus_variant".to_string(),
+                    parent_id: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
                     z_index: 1,
                     x: 0, y: 240, width: 800, height: 2,
                     orientation: None,
+                    parent_id: None,
                 },
             ],
         };
@@ -1119,6 +1133,7 @@ mod tests {
             width: slot_w as i32, height: slot_h as i32,
             plugin_instance_id: "test".to_string(),
             layout_variant: "quadrant".to_string(),
+            parent_id: None,
         };
 
         let task_for_item = vec![Some(0usize)];
@@ -1141,6 +1156,7 @@ mod tests {
             x: 0, y: 200,
             width: 800, height: 2,
             orientation: Some("horizontal".to_string()),
+            parent_id: None,
         };
 
         let task_for_item = vec![None];
@@ -1181,6 +1197,7 @@ mod tests {
             italic: None,
             underline: None,
             font_family: None,
+            parent_id: None,
         };
 
         let task_for_item = vec![Some(0usize)];
@@ -1229,12 +1246,14 @@ mod tests {
                 x: 0, y: 0, width: w as i32, height: h as i32,
                 plugin_instance_id: "white".to_string(),
                 layout_variant: "quadrant".to_string(),
+                parent_id: None,
             },
             LayoutItem::PluginSlot {
                 id: "s1".to_string(), z_index: 1,
                 x: 0, y: 0, width: w as i32, height: h as i32,
                 plugin_instance_id: "black".to_string(),
                 layout_variant: "quadrant".to_string(),
+                parent_id: None,
             },
         ];
         let task_for_item = vec![Some(0usize), Some(1usize)];

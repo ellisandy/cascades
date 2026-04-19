@@ -541,6 +541,29 @@
   <span id="status-msg"></span>
 </div>
 
+<!-- ── Arrangement toolbar (visible when 2+ items selected) ── -->
+<div id="arrange-bar" class="hidden" style="
+  display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid #30363d;
+  background:#161b22; align-items:center; font-size:12px;">
+  <span style="color:#8b949e;">Arrange:</span>
+  <button class="btn" onclick="alignSelected('left')"    title="Align left">⇤ L</button>
+  <button class="btn" onclick="alignSelected('center_h')" title="Center horizontally">↔ C</button>
+  <button class="btn" onclick="alignSelected('right')"   title="Align right">⇥ R</button>
+  <div class="toolbar-sep"></div>
+  <button class="btn" onclick="alignSelected('top')"      title="Align top">⇧ T</button>
+  <button class="btn" onclick="alignSelected('middle_v')" title="Center vertically">↕ M</button>
+  <button class="btn" onclick="alignSelected('bottom')"   title="Align bottom">⇩ B</button>
+  <div class="toolbar-sep"></div>
+  <button class="btn" onclick="distributeSelected('h')"  title="Distribute horizontally">⟷ Dist H</button>
+  <button class="btn" onclick="distributeSelected('v')"  title="Distribute vertically">⟺ Dist V</button>
+  <span id="selection-count" style="margin-left:auto; color:#8b949e;"></span>
+</div>
+
+<!-- ── Marquee rectangle ── -->
+<div id="marquee" style="position:absolute; border:1px dashed #58a6ff;
+     background:rgba(88,166,255,0.10); pointer-events:none; display:none;
+     z-index:500;"></div>
+
 <!-- ── Main ── -->
 <div id="main">
 
@@ -771,6 +794,7 @@ const state = {
   activeLayoutId: null,
   items: [],
   selectedId: null,
+  selectedIds: [],     // Multi-select: ids in selection order; selectedId == last entry.
   pendingDrop: null,
   history: [],
   historyIndex: -1,
@@ -816,9 +840,9 @@ window.addEventListener('DOMContentLoaded', () => {
       deleteSelected();
     }
     // Escape = Deselect
-    else if (e.key === 'Escape' && state.selectedId) {
+    else if (e.key === 'Escape' && state.selectedIds.length) {
       e.preventDefault();
-      state.selectedId = null;
+      clearSelection();
       renderCanvas();
       renderProps();
     }
@@ -1152,7 +1176,7 @@ async function loadLayout(id) {
     state.currentLayoutId = layout.id;
     state.currentLayoutName = layout.name;
     state.items = apiToItems(layout.items || []);
-    state.selectedId = null;
+    clearSelection();
     // Reset history for new layout
     state.history = [JSON.parse(JSON.stringify(state.items))];
     state.historyIndex = 0;
@@ -1214,6 +1238,8 @@ function apiToItems(apiItems) {
       italic:           !!item.italic,
       underline:        !!item.underline,
       font_family:      item.font_family         || '',
+      parent_id:        item.parent_id           || null,
+      background:       item.background          || null,
     };
   });
 }
@@ -1221,6 +1247,7 @@ function apiToItems(apiItems) {
 function itemsToPayload(items) {
   return items.map(function(item) {
     const isTextLike = item.type === 'static_text' || item.type === 'static_datetime' || item.type === 'data_field';
+    const isGroup = item.type === 'group';
     return {
       id:                  item.id,
       item_type:           item.type,
@@ -1229,7 +1256,7 @@ function itemsToPayload(items) {
       y:                   item.y,
       width:               item.w,
       height:              item.h,
-      plugin_instance_id:  item.type === 'plugin_slot'   ? item.plugin_id  : null,
+      plugin_instance_id:  (item.type === 'plugin_slot' || isGroup) ? (item.plugin_id || null) : null,
       layout_variant:      item.type === 'plugin_slot'   ? item.variant    : null,
       text_content:        item.type === 'static_text'   ? item.text
                            : item.type === 'static_datetime' ? item.format : null,
@@ -1238,11 +1265,13 @@ function itemsToPayload(items) {
                              ? item.orientation : null,
       field_mapping_id:    item.type === 'data_field'    ? item.field_mapping_id : null,
       format_string:       item.type === 'data_field'    ? item.format_string    : null,
-      label:               item.type === 'data_field'    ? (item.label || null)  : null,
+      label:               (item.type === 'data_field' || isGroup) ? (item.label || null) : null,
       bold:                isTextLike ? !!item.bold      : null,
       italic:              isTextLike ? !!item.italic    : null,
       underline:           isTextLike ? !!item.underline : null,
       font_family:         isTextLike ? (item.font_family || null) : null,
+      parent_id:           item.parent_id || null,
+      background:          isGroup ? (item.background || null) : null,
     };
   });
 }
@@ -1411,18 +1440,45 @@ function onCanvasMouseDown(e) {
     const itemId = itemEl.dataset.id;
     if (!itemId) return;
     e.preventDefault();
-    selectItem(itemId);
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    // When shift-clicking a non-selected item, add it without deselecting others.
+    // When clicking a non-selected item without shift, replace selection.
+    // When clicking an already-selected item, keep selection (lets user drag multi).
+    const alreadySelected = state.selectedIds.indexOf(itemId) >= 0;
+    if (additive) {
+      selectItem(itemId, true);
+    } else if (!alreadySelected) {
+      selectItem(itemId, false);
+    }
     const item = findItem(itemId);
     if (!item) return;
     const c = toCanvas(e);
-    dragCtx = { itemId: itemId, sx: c.x, sy: c.y, ox: item.x, oy: item.y };
+    // Snapshot offsets for every selected item so drags translate the group.
+    const offsets = state.selectedIds.map(function(id) {
+      const it = findItem(id);
+      return it ? { id: id, ox: it.x, oy: it.y } : null;
+    }).filter(Boolean);
+    dragCtx = { itemId: itemId, sx: c.x, sy: c.y, offsets: offsets };
     document.addEventListener('mousemove', onDragMove);
     document.addEventListener('mouseup', onDragUp);
     return;
   }
 
-  // Click on empty canvas — deselect
-  state.selectedId = null;
+  // Click on empty canvas — start marquee if primary button, else clear selection.
+  const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+  if (!additive) clearSelection();
+  e.preventDefault();
+  const c = toCanvas(e);
+  marqueeCtx = {
+    sx: c.x, sy: c.y, cx: c.x, cy: c.y,
+    additive: additive,
+    baseSelection: state.selectedIds.slice(),
+  };
+  const m = document.getElementById('marquee');
+  m.style.display = 'block';
+  positionMarquee(c.x, c.y, c.x, c.y);
+  document.addEventListener('mousemove', onMarqueeMove);
+  document.addEventListener('mouseup', onMarqueeUp);
   renderCanvas();
   renderProps();
 }
@@ -1430,19 +1486,30 @@ function onCanvasMouseDown(e) {
 function onDragMove(e) {
   if (!dragCtx) return;
   const c = toCanvas(e);
-  const item = findItem(dragCtx.itemId);
-  if (!item) return;
-  let x = clamp(dragCtx.ox + c.x - dragCtx.sx, 0, CANVAS_W - item.w);
-  let y = clamp(dragCtx.oy + c.y - dragCtx.sy, 0, CANVAS_H - item.h);
-  // Apply snap-to-grid if enabled
+  const primary = findItem(dragCtx.itemId);
+  if (!primary) return;
+  // Compute delta from the primary item's anchor; clamp so primary stays on canvas.
+  const primaryOff = dragCtx.offsets.find(function(o) { return o.id === dragCtx.itemId; })
+    || { ox: primary.x, oy: primary.y };
+  let dx = c.x - dragCtx.sx;
+  let dy = c.y - dragCtx.sy;
+  // Clamp so the primary item stays in bounds.
+  const maxX = CANVAS_W - primary.w;
+  const maxY = CANVAS_H - primary.h;
+  dx = Math.max(-primaryOff.ox, Math.min(maxX - primaryOff.ox, dx));
+  dy = Math.max(-primaryOff.oy, Math.min(maxY - primaryOff.oy, dy));
   if (state.snapToGrid) {
-    x = Math.round(x / 10) * 10;
-    y = Math.round(y / 10) * 10;
+    dx = Math.round(dx / 10) * 10;
+    dy = Math.round(dy / 10) * 10;
   }
-  item.x = x;
-  item.y = y;
-  const el = document.querySelector('#canvas [data-id="' + dragCtx.itemId + '"]');
-  if (el) { el.style.left = item.x + 'px'; el.style.top = item.y + 'px'; }
+  dragCtx.offsets.forEach(function(o) {
+    const it = findItem(o.id);
+    if (!it) return;
+    it.x = o.ox + dx;
+    it.y = o.oy + dy;
+    const el = document.querySelector('#canvas [data-id="' + o.id + '"]');
+    if (el) { el.style.left = it.x + 'px'; el.style.top = it.y + 'px'; }
+  });
 }
 
 function onDragUp() {
@@ -1493,10 +1560,46 @@ function onResizeUp() {
   renderProps();
 }
 
-function selectItem(id) {
-  state.selectedId = id;
+function selectItem(id, additive) {
+  if (additive) {
+    const i = state.selectedIds.indexOf(id);
+    if (i >= 0) {
+      state.selectedIds.splice(i, 1);
+      state.selectedId = state.selectedIds.length
+        ? state.selectedIds[state.selectedIds.length - 1]
+        : null;
+    } else {
+      state.selectedIds.push(id);
+      state.selectedId = id;
+    }
+  } else {
+    state.selectedIds = [id];
+    state.selectedId = id;
+  }
+  updateArrangeBar();
   renderCanvas();
   renderProps();
+}
+
+function clearSelection() {
+  state.selectedIds = [];
+  state.selectedId = null;
+  updateArrangeBar();
+}
+
+function updateArrangeBar() {
+  const bar = document.getElementById('arrange-bar');
+  const count = document.getElementById('selection-count');
+  if (!bar) return;
+  if (state.selectedIds.length >= 2) {
+    bar.classList.remove('hidden');
+    bar.style.display = 'flex';
+    count.textContent = state.selectedIds.length + ' selected';
+  } else {
+    bar.classList.add('hidden');
+    bar.style.display = 'none';
+    count.textContent = '';
+  }
 }
 
 // ────────────────────────────────────────
@@ -1510,7 +1613,7 @@ function onCanvasTouchStart(e) {
   const itemEl = document.elementFromPoint(touch.clientX, touch.clientY).closest('.canvas-item');
   if (!itemEl) {
     // Touch on empty canvas — deselect
-    state.selectedId = null;
+    clearSelection();
     renderCanvas();
     renderProps();
     return;
@@ -1581,7 +1684,8 @@ const COLORS = {
 
 function makeEl(item) {
   const el = document.createElement('div');
-  el.className = 'canvas-item' + (item.id === state.selectedId ? ' selected' : '');
+  const isSelected = state.selectedIds.indexOf(item.id) >= 0;
+  el.className = 'canvas-item' + (isSelected ? ' selected' : '');
   el.dataset.id = item.id;
   const col = COLORS[item.type] || { bg: '#21262d', border: '#30363d' };
   el.style.cssText =
@@ -1608,7 +1712,8 @@ function makeEl(item) {
   label.textContent = itemLabel(item);
   el.appendChild(label);
 
-  if (item.id === state.selectedId) {
+  // Show resize handles only in single-select mode to avoid ambiguity.
+  if (isSelected && state.selectedIds.length === 1) {
     ['nw','n','ne','e','se','s','sw','w'].forEach(function(h) {
       const handle = document.createElement('div');
       handle.className = 'resize-handle resize-' + h;
@@ -1771,9 +1876,11 @@ function updatePropRender(key, value) {
 }
 
 function deleteSelected() {
+  if (!state.selectedIds.length) return;
   saveHistory();
-  state.items = state.items.filter(function(i) { return i.id !== state.selectedId; });
-  state.selectedId = null;
+  const ids = new Set(state.selectedIds);
+  state.items = state.items.filter(function(i) { return !ids.has(i.id); });
+  clearSelection();
   updateCollisionIndicators();
   renderCanvas();
   renderProps();
@@ -1794,6 +1901,123 @@ function sendBack() {
   if (!item) return;
   saveHistory();
   item.z_index = Math.max(0, item.z_index - 1);
+  renderCanvas();
+  renderProps();
+}
+
+// ────────────────────────────────────────
+// Marquee rubber-band selection
+// ────────────────────────────────────────
+let marqueeCtx = null;
+
+function positionMarquee(x1, y1, x2, y2) {
+  const m = document.getElementById('marquee');
+  const canvas = document.getElementById('canvas');
+  const rect = canvas.getBoundingClientRect();
+  const left = Math.min(x1, x2), top = Math.min(y1, y2);
+  const w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
+  m.style.left  = (rect.left + window.scrollX + left * canvasScale) + 'px';
+  m.style.top   = (rect.top  + window.scrollY + top  * canvasScale) + 'px';
+  m.style.width  = (w * canvasScale) + 'px';
+  m.style.height = (h * canvasScale) + 'px';
+}
+
+function onMarqueeMove(e) {
+  if (!marqueeCtx) return;
+  const c = toCanvas(e);
+  marqueeCtx.cx = c.x;
+  marqueeCtx.cy = c.y;
+  positionMarquee(marqueeCtx.sx, marqueeCtx.sy, c.x, c.y);
+  // Live update selection: items whose bounding box intersects the marquee.
+  const x1 = Math.min(marqueeCtx.sx, c.x), x2 = Math.max(marqueeCtx.sx, c.x);
+  const y1 = Math.min(marqueeCtx.sy, c.y), y2 = Math.max(marqueeCtx.sy, c.y);
+  const hits = state.items.filter(function(it) {
+    return it.x < x2 && it.x + it.w > x1 && it.y < y2 && it.y + it.h > y1;
+  }).map(function(it) { return it.id; });
+  if (marqueeCtx.additive) {
+    const combined = marqueeCtx.baseSelection.slice();
+    hits.forEach(function(id) { if (combined.indexOf(id) < 0) combined.push(id); });
+    state.selectedIds = combined;
+  } else {
+    state.selectedIds = hits;
+  }
+  state.selectedId = state.selectedIds.length
+    ? state.selectedIds[state.selectedIds.length - 1]
+    : null;
+  updateArrangeBar();
+  renderCanvas();
+}
+
+function onMarqueeUp() {
+  if (!marqueeCtx) return;
+  document.getElementById('marquee').style.display = 'none';
+  marqueeCtx = null;
+  document.removeEventListener('mousemove', onMarqueeMove);
+  document.removeEventListener('mouseup', onMarqueeUp);
+  renderProps();
+}
+
+// ────────────────────────────────────────
+// Align & distribute
+// ────────────────────────────────────────
+function selectedItems() {
+  return state.selectedIds
+    .map(function(id) { return findItem(id); })
+    .filter(Boolean);
+}
+
+function alignSelected(mode) {
+  const items = selectedItems();
+  if (items.length < 2) return;
+  saveHistory();
+  const minX = Math.min.apply(null, items.map(function(i) { return i.x; }));
+  const maxR = Math.max.apply(null, items.map(function(i) { return i.x + i.w; }));
+  const minY = Math.min.apply(null, items.map(function(i) { return i.y; }));
+  const maxB = Math.max.apply(null, items.map(function(i) { return i.y + i.h; }));
+  const midX = Math.round((minX + maxR) / 2);
+  const midY = Math.round((minY + maxB) / 2);
+  items.forEach(function(it) {
+    if (mode === 'left')     it.x = minX;
+    else if (mode === 'right')  it.x = maxR - it.w;
+    else if (mode === 'center_h') it.x = midX - Math.round(it.w / 2);
+    else if (mode === 'top')    it.y = minY;
+    else if (mode === 'bottom') it.y = maxB - it.h;
+    else if (mode === 'middle_v') it.y = midY - Math.round(it.h / 2);
+  });
+  updateCollisionIndicators();
+  renderCanvas();
+  renderProps();
+}
+
+function distributeSelected(axis) {
+  const items = selectedItems();
+  if (items.length < 3) return;
+  saveHistory();
+  // Sort along the axis.
+  items.sort(function(a, b) {
+    return axis === 'h' ? a.x - b.x : a.y - b.y;
+  });
+  const first = items[0], last = items[items.length - 1];
+  if (axis === 'h') {
+    const gapTotal = (last.x) - (first.x + first.w)
+      - items.slice(1, -1).reduce(function(s, it) { return s + it.w; }, 0);
+    const gap = Math.round(gapTotal / (items.length - 1));
+    let cursor = first.x + first.w + gap;
+    for (let i = 1; i < items.length - 1; i++) {
+      items[i].x = cursor;
+      cursor += items[i].w + gap;
+    }
+  } else {
+    const gapTotal = (last.y) - (first.y + first.h)
+      - items.slice(1, -1).reduce(function(s, it) { return s + it.h; }, 0);
+    const gap = Math.round(gapTotal / (items.length - 1));
+    let cursor = first.y + first.h + gap;
+    for (let i = 1; i < items.length - 1; i++) {
+      items[i].y = cursor;
+      cursor += items[i].h + gap;
+    }
+  }
+  updateCollisionIndicators();
   renderCanvas();
   renderProps();
 }

@@ -1119,6 +1119,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
                 height: 480,
                 plugin_instance_id: "river".to_string(),
                 layout_variant: "full".to_string(),
+                parent_id: None,
             }],
             updated_at: 0,
         })

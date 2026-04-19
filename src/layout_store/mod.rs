@@ -58,7 +58,9 @@ pub struct LayoutConfig {
 
 /// A single item in a layout.
 ///
-/// Three variants correspond to the three `item_type` values in the database.
+/// Variants correspond to the `item_type` values in the database. `parent_id`
+/// (optional on every variant) links an item to a container [`LayoutItem::Group`];
+/// a null `parent_id` means the item is at the layout root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LayoutItem {
@@ -72,6 +74,8 @@ pub enum LayoutItem {
         height: i32,
         plugin_instance_id: String,
         layout_variant: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     /// A static text element rendered directly.
     StaticText {
@@ -92,6 +96,8 @@ pub enum LayoutItem {
         underline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     /// A static date/time element rendered via the sidecar.
     #[serde(rename = "static_datetime")]
@@ -113,6 +119,8 @@ pub enum LayoutItem {
         underline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     /// A horizontal or vertical divider line.
     StaticDivider {
@@ -123,6 +131,8 @@ pub enum LayoutItem {
         width: i32,
         height: i32,
         orientation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     /// A data field that extracts a value from cached source data via JSONPath.
     DataField {
@@ -148,6 +158,33 @@ pub enum LayoutItem {
         underline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+    },
+    /// A container item whose children's `parent_id` points at its `id`.
+    ///
+    /// Groups have geometry (a visual frame) and an optional background, but
+    /// no content of their own. Child coordinates are canvas-absolute; the
+    /// parent's rectangle is a visual hint, not a clip region.
+    Group {
+        id: String,
+        z_index: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        /// Plugin instance binding — when set, this is a "plugin group"
+        /// whose descendants are the decomposed elements of that instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plugin_instance_id: Option<String>,
+        /// Human label shown in the outliner / z-order list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Background mode: `"none"`, `"card"`, or `"plugin_chrome"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
 }
 
@@ -159,6 +196,7 @@ impl LayoutItem {
             Self::StaticDateTime { id, .. } => id,
             Self::StaticDivider { id, .. } => id,
             Self::DataField { id, .. } => id,
+            Self::Group { id, .. } => id,
         }
     }
 
@@ -169,6 +207,19 @@ impl LayoutItem {
             Self::StaticDateTime { z_index, .. } => *z_index,
             Self::StaticDivider { z_index, .. } => *z_index,
             Self::DataField { z_index, .. } => *z_index,
+            Self::Group { z_index, .. } => *z_index,
+        }
+    }
+
+    /// Returns the `parent_id` of this item if it is nested inside a [`LayoutItem::Group`].
+    pub fn parent_id(&self) -> Option<&str> {
+        match self {
+            Self::PluginSlot { parent_id, .. } => parent_id.as_deref(),
+            Self::StaticText { parent_id, .. } => parent_id.as_deref(),
+            Self::StaticDateTime { parent_id, .. } => parent_id.as_deref(),
+            Self::StaticDivider { parent_id, .. } => parent_id.as_deref(),
+            Self::DataField { parent_id, .. } => parent_id.as_deref(),
+            Self::Group { parent_id, .. } => parent_id.as_deref(),
         }
     }
 }
@@ -238,7 +289,10 @@ impl LayoutStore {
             );",
         )?;
 
-        // Add nullable columns for DataField items (SQLite ignores if already present).
+        // Add nullable columns for later variants. SQLite ignores if already present.
+        // `parent_id` + `background` support the Group variant introduced in Phase 1
+        // of the layout composer; existing `plugin_instance_id` is reused for a
+        // Group's optional plugin binding.
         let columns = [
             ("field_mapping_id", "TEXT"),
             ("format_string", "TEXT"),
@@ -247,6 +301,8 @@ impl LayoutStore {
             ("italic", "INTEGER"),
             ("underline", "INTEGER"),
             ("font_family", "TEXT"),
+            ("parent_id", "TEXT"),
+            ("background", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -310,7 +366,8 @@ impl LayoutStore {
             "SELECT id, item_type, z_index, x, y, width, height,
                     plugin_instance_id, layout_variant, text_content, font_size, orientation,
                     field_mapping_id, format_string, label,
-                    bold, italic, underline, font_family
+                    bold, italic, underline, font_family,
+                    parent_id, background
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -337,6 +394,8 @@ impl LayoutStore {
                 row.get::<_, Option<i32>>(16)?,
                 row.get::<_, Option<i32>>(17)?,
                 row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<String>>(19)?,
+                row.get::<_, Option<String>>(20)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -345,7 +404,8 @@ impl LayoutStore {
         for (item_id, item_type, z_index, x, y, width, height,
              plugin_instance_id, layout_variant, text_content, font_size, orientation,
              field_mapping_id, format_string, label,
-             bold, italic, underline, font_family) in rows
+             bold, italic, underline, font_family,
+             parent_id, background) in rows
         {
             let bold = bold.map(|v| v != 0);
             let italic = italic.map(|v| v != 0);
@@ -361,6 +421,7 @@ impl LayoutStore {
                     plugin_instance_id: plugin_instance_id.unwrap_or_default(),
                     layout_variant: layout_variant
                         .unwrap_or_else(|| "full".to_string()),
+                    parent_id,
                 },
                 "static_text" => LayoutItem::StaticText {
                     id: item_id,
@@ -376,6 +437,7 @@ impl LayoutStore {
                     italic,
                     underline,
                     font_family,
+                    parent_id,
                 },
                 "static_datetime" => LayoutItem::StaticDateTime {
                     id: item_id,
@@ -391,6 +453,7 @@ impl LayoutStore {
                     italic,
                     underline,
                     font_family,
+                    parent_id,
                 },
                 "static_divider" => LayoutItem::StaticDivider {
                     id: item_id,
@@ -400,6 +463,7 @@ impl LayoutStore {
                     width,
                     height,
                     orientation,
+                    parent_id,
                 },
                 "data_field" => LayoutItem::DataField {
                     id: item_id,
@@ -418,6 +482,19 @@ impl LayoutStore {
                     italic,
                     underline,
                     font_family,
+                    parent_id,
+                },
+                "group" => LayoutItem::Group {
+                    id: item_id,
+                    z_index,
+                    x,
+                    y,
+                    width,
+                    height,
+                    plugin_instance_id,
+                    label,
+                    background,
+                    parent_id,
                 },
                 other => {
                     return Err(LayoutStoreError::InvalidItemType(other.to_string()))
@@ -449,29 +526,30 @@ impl LayoutStore {
             match item {
                 LayoutItem::PluginSlot {
                     id, z_index, x, y, width, height, plugin_instance_id, layout_variant,
+                    parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          plugin_instance_id, layout_variant)
-                         VALUES (?1, ?2, 'plugin_slot', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                          plugin_instance_id, layout_variant, parent_id)
+                         VALUES (?1, ?2, 'plugin_slot', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
-                            plugin_instance_id, layout_variant
+                            plugin_instance_id, layout_variant, parent_id
                         ],
                     )?;
                 }
                 LayoutItem::StaticText {
                     id, z_index, x, y, width, height, text_content, font_size, orientation,
-                    bold, italic, underline, font_family,
+                    bold, italic, underline, font_family, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           text_content, font_size, orientation,
-                          bold, italic, underline, font_family)
+                          bold, italic, underline, font_family, parent_id)
                          VALUES (?1, ?2, 'static_text', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                 ?11, ?12, ?13, ?14)",
+                                 ?11, ?12, ?13, ?14, ?15)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             text_content, font_size, orientation,
@@ -479,20 +557,21 @@ impl LayoutStore {
                             italic.map(|b| b as i32),
                             underline.map(|b| b as i32),
                             font_family,
+                            parent_id,
                         ],
                     )?;
                 }
                 LayoutItem::StaticDateTime {
                     id, z_index, x, y, width, height, font_size, format, orientation,
-                    bold, italic, underline, font_family,
+                    bold, italic, underline, font_family, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           text_content, font_size, orientation,
-                          bold, italic, underline, font_family)
+                          bold, italic, underline, font_family, parent_id)
                          VALUES (?1, ?2, 'static_datetime', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                 ?11, ?12, ?13, ?14)",
+                                 ?11, ?12, ?13, ?14, ?15)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             format, font_size, orientation,
@@ -500,31 +579,34 @@ impl LayoutStore {
                             italic.map(|b| b as i32),
                             underline.map(|b| b as i32),
                             font_family,
+                            parent_id,
                         ],
                     )?;
                 }
                 LayoutItem::StaticDivider {
-                    id, z_index, x, y, width, height, orientation,
+                    id, z_index, x, y, width, height, orientation, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
-                         (id, layout_id, item_type, z_index, x, y, width, height, orientation)
-                         VALUES (?1, ?2, 'static_divider', ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![id, layout.id, z_index, x, y, width, height, orientation],
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          orientation, parent_id)
+                         VALUES (?1, ?2, 'static_divider', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![id, layout.id, z_index, x, y, width, height,
+                                orientation, parent_id],
                     )?;
                 }
                 LayoutItem::DataField {
                     id, z_index, x, y, width, height,
                     field_mapping_id, font_size, format_string, label, orientation,
-                    bold, italic, underline, font_family,
+                    bold, italic, underline, font_family, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           field_mapping_id, font_size, format_string, label, orientation,
-                          bold, italic, underline, font_family)
+                          bold, italic, underline, font_family, parent_id)
                          VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                                 ?13, ?14, ?15, ?16)",
+                                 ?13, ?14, ?15, ?16, ?17)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             field_mapping_id, font_size, format_string, label, orientation,
@@ -532,6 +614,22 @@ impl LayoutStore {
                             italic.map(|b| b as i32),
                             underline.map(|b| b as i32),
                             font_family,
+                            parent_id,
+                        ],
+                    )?;
+                }
+                LayoutItem::Group {
+                    id, z_index, x, y, width, height,
+                    plugin_instance_id, label, background, parent_id,
+                } => {
+                    tx.execute(
+                        "INSERT INTO layout_items
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          plugin_instance_id, label, background, parent_id)
+                         VALUES (?1, ?2, 'group', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            id, layout.id, z_index, x, y, width, height,
+                            plugin_instance_id, label, background, parent_id,
                         ],
                     )?;
                 }
@@ -611,6 +709,7 @@ impl LayoutStore {
                     height: slot.height.unwrap_or(default_h) as i32,
                     plugin_instance_id: slot.plugin.clone(),
                     layout_variant: slot.variant.clone(),
+                    parent_id: None,
                 });
             }
             let layout = LayoutConfig {
@@ -787,6 +886,7 @@ mod tests {
             height: 480,
             plugin_instance_id: plugin.to_string(),
             layout_variant: "full".to_string(),
+            parent_id: None,
         }
     }
 
@@ -981,12 +1081,14 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    parent_id: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
                     z_index: 1,
                     x: 0, y: 240, width: 800, height: 2,
                     orientation: Some("horizontal".to_string()),
+                    parent_id: None,
                 },
             ],
             updated_at: 0,
@@ -1006,6 +1108,7 @@ mod tests {
             x: 0, y: 0, width: 800, height: 480,
             plugin_instance_id: "river".to_string(),
             layout_variant: "full".to_string(),
+            parent_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
@@ -1056,6 +1159,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    parent_id: None,
                 },
                 LayoutItem::DataField {
                     id: "df1".to_string(),
@@ -1073,6 +1177,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    parent_id: None,
                 },
             ],
             updated_at: 0,
@@ -1126,6 +1231,7 @@ mod tests {
             italic: None,
             underline: None,
             font_family: None,
+            parent_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
@@ -1153,6 +1259,7 @@ mod tests {
                     italic: Some(true),
                     underline: Some(false),
                     font_family: Some("Georgia, serif".to_string()),
+                    parent_id: None,
                 },
                 LayoutItem::DataField {
                     id: "df0".to_string(),
@@ -1167,6 +1274,7 @@ mod tests {
                     italic: None,
                     underline: Some(true),
                     font_family: Some("monospace".to_string()),
+                    parent_id: None,
                 },
             ],
             updated_at: 0,
@@ -1235,5 +1343,124 @@ mod tests {
         let remaining = store.list_field_mappings("river-source").unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, "fm-2");
+    }
+
+    #[test]
+    fn group_variant_roundtrip_through_store() {
+        let (store, _dir) = open_store();
+        let layout = LayoutConfig {
+            id: "with-group".to_string(),
+            name: "With Group".to_string(),
+            items: vec![
+                LayoutItem::Group {
+                    id: "g0".to_string(),
+                    z_index: 0,
+                    x: 20, y: 30, width: 240, height: 120,
+                    plugin_instance_id: Some("weather".to_string()),
+                    label: Some("Weather".to_string()),
+                    background: Some("card".to_string()),
+                    parent_id: None,
+                },
+                LayoutItem::StaticText {
+                    id: "t0".to_string(),
+                    z_index: 1,
+                    x: 30, y: 40, width: 180, height: 24,
+                    text_content: "Temp".to_string(),
+                    font_size: 16,
+                    orientation: None,
+                    bold: None, italic: None, underline: None, font_family: None,
+                    parent_id: Some("g0".to_string()),
+                },
+            ],
+            updated_at: 0,
+        };
+        store.upsert_layout(&layout).unwrap();
+        let got = store.get_layout("with-group").unwrap().unwrap();
+        assert_eq!(got.items.len(), 2);
+
+        match &got.items[0] {
+            LayoutItem::Group {
+                id, plugin_instance_id, label, background, parent_id, ..
+            } => {
+                assert_eq!(id, "g0");
+                assert_eq!(plugin_instance_id.as_deref(), Some("weather"));
+                assert_eq!(label.as_deref(), Some("Weather"));
+                assert_eq!(background.as_deref(), Some("card"));
+                assert!(parent_id.is_none());
+            }
+            other => panic!("expected Group, got {:?}", other),
+        }
+        assert_eq!(got.items[1].parent_id(), Some("g0"));
+    }
+
+    #[test]
+    fn group_serde_roundtrip() {
+        let item = LayoutItem::Group {
+            id: "g1".to_string(),
+            z_index: 5,
+            x: 0, y: 0, width: 100, height: 100,
+            plugin_instance_id: None,
+            label: Some("Hello".to_string()),
+            background: None,
+            parent_id: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        // None fields should be omitted by skip_serializing_if.
+        assert!(json.contains(r#""type":"group""#));
+        assert!(!json.contains("plugin_instance_id"));
+        assert!(!json.contains("background"));
+        assert!(!json.contains("parent_id"));
+        let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
+        match decoded {
+            LayoutItem::Group { id, label, .. } => {
+                assert_eq!(id, "g1");
+                assert_eq!(label.as_deref(), Some("Hello"));
+            }
+            _ => panic!("expected Group"),
+        }
+    }
+
+    #[test]
+    fn parent_id_roundtrip_for_non_group_variants() {
+        let (store, _dir) = open_store();
+        let layout = LayoutConfig {
+            id: "nested".to_string(),
+            name: "Nested".to_string(),
+            items: vec![
+                LayoutItem::Group {
+                    id: "g".to_string(),
+                    z_index: 0,
+                    x: 0, y: 0, width: 200, height: 200,
+                    plugin_instance_id: None, label: None, background: None,
+                    parent_id: None,
+                },
+                LayoutItem::StaticDivider {
+                    id: "d".to_string(),
+                    z_index: 1,
+                    x: 0, y: 100, width: 200, height: 2,
+                    orientation: Some("horizontal".to_string()),
+                    parent_id: Some("g".to_string()),
+                },
+            ],
+            updated_at: 0,
+        };
+        store.upsert_layout(&layout).unwrap();
+        let got = store.get_layout("nested").unwrap().unwrap();
+        assert_eq!(got.items[1].parent_id(), Some("g"));
+    }
+
+    #[test]
+    fn existing_rows_have_null_parent_id() {
+        // Existing rows (from the pre-Phase-1 schema) should decode with parent_id = None.
+        let (store, _dir) = open_store();
+        let layout = LayoutConfig {
+            id: "flat".to_string(),
+            name: "Flat".to_string(),
+            items: vec![plugin_slot("s", "river", 0)],
+            updated_at: 0,
+        };
+        store.upsert_layout(&layout).unwrap();
+        let got = store.get_layout("flat").unwrap().unwrap();
+        assert!(got.items[0].parent_id().is_none());
     }
 }

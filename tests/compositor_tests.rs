@@ -144,6 +144,7 @@ async fn default_config_composite_returns_800x480_png() {
             height: 480,
             plugin_instance_id: "river".to_string(),
             layout_variant: "full".to_string(),
+            parent_id: None,
         }],
     };
 
@@ -176,6 +177,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
                 x: 0, y: 0, width: 800, height: 240,
                 plugin_instance_id: "weather".to_string(),
                 layout_variant: "half_horizontal".to_string(),
+                parent_id: None,
             },
             LayoutItem::PluginSlot {
                 id: "s1".to_string(),
@@ -183,6 +185,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
                 x: 0, y: 240, width: 400, height: 240,
                 plugin_instance_id: "river".to_string(),
                 layout_variant: "quadrant".to_string(),
+                parent_id: None,
             },
             LayoutItem::PluginSlot {
                 id: "s2".to_string(),
@@ -190,6 +193,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
                 x: 400, y: 240, width: 400, height: 240,
                 plugin_instance_id: "ferry".to_string(),
                 layout_variant: "quadrant".to_string(),
+                parent_id: None,
             },
         ],
     };
@@ -272,18 +276,21 @@ async fn compositor_runs_slots_concurrently_and_joins() {
                 x: 0, y: 0, width: 800, height: 240,
                 plugin_instance_id: "weather".to_string(),
                 layout_variant: "half_horizontal".to_string(),
+                parent_id: None,
             },
             LayoutItem::PluginSlot {
                 id: "s1".to_string(), z_index: 1,
                 x: 0, y: 240, width: 400, height: 240,
                 plugin_instance_id: "river".to_string(),
                 layout_variant: "quadrant".to_string(),
+                parent_id: None,
             },
             LayoutItem::PluginSlot {
                 id: "s2".to_string(), z_index: 2,
                 x: 400, y: 240, width: 400, height: 240,
                 plugin_instance_id: "ferry".to_string(),
                 layout_variant: "quadrant".to_string(),
+                parent_id: None,
             },
         ],
     };
@@ -334,6 +341,7 @@ async fn static_divider_composited_without_sidecar() {
             x: 0, y: 240,
             width: 800, height: 2,
             orientation: Some("horizontal".to_string()),
+            parent_id: None,
         }],
     };
 
@@ -369,6 +377,7 @@ async fn static_text_renders_via_sidecar() {
             font_size: 18,
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None,
+            parent_id: None,
         }],
     };
 
@@ -397,6 +406,7 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
                 x: 0, y: 0, width: 800, height: 240,
                 plugin_instance_id: "weather".to_string(),
                 layout_variant: "half_horizontal".to_string(),
+                parent_id: None,
             },
             LayoutItem::StaticText {
                 id: "t0".to_string(), z_index: 1,
@@ -405,11 +415,13 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
                 font_size: 20,
                 orientation: None,
                 bold: None, italic: None, underline: None, font_family: None,
+                parent_id: None,
             },
             LayoutItem::StaticDivider {
                 id: "d0".to_string(), z_index: 2,
                 x: 0, y: 240, width: 800, height: 2,
                 orientation: Some("horizontal".to_string()),
+                parent_id: None,
             },
         ],
     };
@@ -481,6 +493,7 @@ async fn data_field_renders_extracted_value_via_sidecar() {
             label: None,
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None,
+            parent_id: None,
         }],
     };
 
@@ -527,6 +540,7 @@ async fn data_field_missing_mapping_renders_placeholder() {
             label: Some("Water Level".to_string()),
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None,
+            parent_id: None,
         }],
     };
 
@@ -589,6 +603,7 @@ async fn data_field_with_label_renders_successfully() {
             label: Some("Streamflow".to_string()),
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None,
+            parent_id: None,
         }],
     };
 
