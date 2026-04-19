@@ -10,6 +10,9 @@ state.json
 CLAUDE.md
 CLAUDE.local.md
 
+# Secrets
+config/secrets.toml
+
 # Beads / Dolt
 .dolt/
 *.db
