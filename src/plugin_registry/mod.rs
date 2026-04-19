@@ -22,7 +22,7 @@
 //! `plugins.d/`. On any `Create` or `Modify` event the affected file is reloaded
 //! into the registry. SIGHUP (Unix only) triggers a full reload of both files.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -165,6 +165,57 @@ pub struct PluginDefinition {
     /// Fields the user can configure for this plugin.
     #[serde(default)]
     pub settings_schema: Vec<SettingsField>,
+
+    // ── Default layout elements ──────────────────────────────────────────────
+    /// Elements spawned when this plugin is first dropped on the canvas.
+    /// Empty means "drop as a single opaque `PluginSlot`" (legacy behaviour).
+    /// Non-empty means "drop as a `Group` containing these children".
+    #[serde(default)]
+    pub default_elements: Vec<DefaultElement>,
+}
+
+/// One element in a plugin's default layout composition.
+///
+/// Declared in plugin manifests under `[[default_elements]]`. When the plugin is
+/// dragged from the palette onto the canvas, the admin UI materialises one child
+/// item per entry, nested in a `Group`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct DefaultElement {
+    /// What variant of [`crate::layout_store::LayoutItem`] to spawn. One of:
+    /// `"data_field"`, `"static_text"`, `"static_datetime"`, `"static_divider"`.
+    pub kind: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    #[serde(default)]
+    pub z_index: i32,
+
+    // ── data_field ──────────────────────────────────────────────────────────
+    /// JSONPath into the plugin's cached data (e.g. `"$.current.temp_f"`).
+    /// Used to bootstrap a field mapping in `data_source_fields`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_path: Option<String>,
+    /// Optional human label; also used as the bootstrapped mapping's `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Format string for `data_field` rendering (e.g. `"{{value}}°F"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_string: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<i32>,
+
+    // ── static_text ─────────────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_content: Option<String>,
+
+    // ── static_datetime ─────────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+
+    // ── shared ──────────────────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
 }
 
 fn default_refresh_interval() -> u64 {
@@ -661,6 +712,78 @@ source = "src"
         write_plugin_toml(dir.path(), "weather.toml", &minimal_plugin("weather", "noaa"));
         registry.load_dir(dir.path()).unwrap();
         assert_eq!(clone.len(), 2);
+    }
+
+    #[test]
+    fn plugin_with_default_elements_parses() {
+        let dir = TempDir::new().unwrap();
+        let toml = r#"
+[[plugin]]
+id = "weather"
+name = "Weather"
+source = "noaa"
+template_full = "templates/weather_full.html.jinja"
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.temperature_f"
+label = "Temp"
+format_string = "{{value}}°F"
+x = 10
+y = 10
+width = 120
+height = 48
+font_size = 36
+
+[[plugin.default_elements]]
+kind = "static_divider"
+orientation = "horizontal"
+x = 10
+y = 86
+width = 180
+height = 2
+"#;
+        write_plugin_toml(dir.path(), "weather.toml", toml);
+        let registry = PluginRegistry::new();
+        registry.load_dir(dir.path()).unwrap();
+        let plugin = registry.get("weather").unwrap();
+        assert_eq!(plugin.default_elements.len(), 2);
+        assert_eq!(plugin.default_elements[0].kind, "data_field");
+        assert_eq!(
+            plugin.default_elements[0].field_path.as_deref(),
+            Some("$.temperature_f")
+        );
+        assert_eq!(plugin.default_elements[0].font_size, Some(36));
+        assert_eq!(plugin.default_elements[1].kind, "static_divider");
+    }
+
+    #[test]
+    fn default_elements_default_to_empty() {
+        let dir = TempDir::new().unwrap();
+        write_plugin_toml(dir.path(), "x.toml", &minimal_plugin("x", "src"));
+        let registry = PluginRegistry::new();
+        registry.load_dir(dir.path()).unwrap();
+        let plugin = registry.get("x").unwrap();
+        assert!(plugin.default_elements.is_empty());
+    }
+
+    #[test]
+    fn bundled_config_plugins_d_all_declare_default_elements() {
+        let manifest_dir = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
+        );
+        let config_dir = manifest_dir.join("config");
+        if !config_dir.is_dir() {
+            return;
+        }
+        let registry = load_registry(&config_dir).expect("bundled plugins.d/ should parse");
+        for id in &["weather", "river", "ferry", "trail", "road"] {
+            let p = registry.get(id).expect("plugin present");
+            assert!(
+                !p.default_elements.is_empty(),
+                "plugin '{id}' must declare [[default_elements]] for Phase 3"
+            );
+        }
     }
 
     /// Verify the bundled config/plugins.d/ files parse correctly and contain

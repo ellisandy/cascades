@@ -38,3 +38,42 @@ label = "Display Name"
 type = "text"
 required = false
 default = "River"
+
+[[plugin.default_elements]]
+kind = "static_text"
+text_content = "River"
+x = 10
+y = 10
+width = 180
+height = 24
+font_size = 16
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.water_level_ft"
+label = "Level"
+format_string = "{{value}} ft"
+x = 10
+y = 40
+width = 160
+height = 56
+font_size = 40
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.streamflow_cfs"
+label = "Flow"
+format_string = "{{value}} cfs"
+x = 10
+y = 104
+width = 180
+height = 24
+font_size = 16
+
+[[plugin.default_elements]]
+kind = "static_divider"
+orientation = "horizontal"
+x = 10
+y = 136
+width = 180
+height = 2

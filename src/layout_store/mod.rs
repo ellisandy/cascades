@@ -823,6 +823,68 @@ impl LayoutStore {
         self.get_field_mapping(id)
     }
 
+    /// Upsert a field mapping keyed by `(data_source_id, json_path)`.
+    ///
+    /// If a mapping with that pair exists, its `name` is refreshed (if different)
+    /// and the existing row is returned unchanged. Otherwise a new row is inserted
+    /// with `new_id` as its primary key. This is the bootstrap path used when a
+    /// plugin manifest declares `[[default_elements]]` — it gives decomposed
+    /// elements a stable `field_mapping_id` across plugin reloads.
+    pub fn upsert_field_mapping_by_path(
+        &self,
+        new_id: &str,
+        data_source_id: &str,
+        source_type: &str,
+        name: &str,
+        json_path: &str,
+    ) -> Result<FieldMapping, LayoutStoreError> {
+        let conn = self.conn.lock().unwrap();
+        // Look up by (data_source_id, json_path).
+        let existing: Option<(String, i64, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, created_at, name FROM data_source_fields
+                 WHERE data_source_id = ?1 AND json_path = ?2 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![data_source_id, json_path])?;
+            match rows.next()? {
+                Some(row) => Some((row.get(0)?, row.get(1)?, row.get(2)?)),
+                None => None,
+            }
+        };
+
+        if let Some((id, created_at, existing_name)) = existing {
+            if existing_name != name {
+                conn.execute(
+                    "UPDATE data_source_fields SET name = ?1 WHERE id = ?2",
+                    params![name, id],
+                )?;
+            }
+            return Ok(FieldMapping {
+                id,
+                data_source_id: data_source_id.to_string(),
+                source_type: source_type.to_string(),
+                name: name.to_string(),
+                json_path: json_path.to_string(),
+                created_at,
+            });
+        }
+
+        let now = unix_now();
+        conn.execute(
+            "INSERT INTO data_source_fields (id, data_source_id, source_type, name, json_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![new_id, data_source_id, source_type, name, json_path, now],
+        )?;
+        Ok(FieldMapping {
+            id: new_id.to_string(),
+            data_source_id: data_source_id.to_string(),
+            source_type: source_type.to_string(),
+            name: name.to_string(),
+            json_path: json_path.to_string(),
+            created_at: now,
+        })
+    }
+
     /// Delete a field mapping by ID.
     pub fn delete_field_mapping(&self, id: &str) -> Result<(), LayoutStoreError> {
         let conn = self.conn.lock().unwrap();
@@ -1447,6 +1509,40 @@ mod tests {
         store.upsert_layout(&layout).unwrap();
         let got = store.get_layout("nested").unwrap().unwrap();
         assert_eq!(got.items[1].parent_id(), Some("g"));
+    }
+
+    #[test]
+    fn upsert_field_mapping_by_path_inserts_and_deduplicates() {
+        let (store, _dir) = open_store();
+
+        // First upsert inserts a new row with the proposed id.
+        let fm1 = store
+            .upsert_field_mapping_by_path(
+                "fm-weather-temp",
+                "weather",
+                "builtin",
+                "Temp",
+                "$.temperature_f",
+            )
+            .unwrap();
+        assert_eq!(fm1.id, "fm-weather-temp");
+
+        // Second call with the same (data_source_id, json_path) returns the
+        // existing row, even with a different proposed id.
+        let fm2 = store
+            .upsert_field_mapping_by_path(
+                "fm-weather-DIFFERENT",
+                "weather",
+                "builtin",
+                "Temperature",
+                "$.temperature_f",
+            )
+            .unwrap();
+        assert_eq!(fm2.id, "fm-weather-temp");
+        assert_eq!(fm2.name, "Temperature"); // name refreshed
+
+        let mappings = store.list_field_mappings("weather").unwrap();
+        assert_eq!(mappings.len(), 1);
     }
 
     #[test]

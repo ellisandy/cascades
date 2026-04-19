@@ -20,3 +20,42 @@ key = "nps_api_key"
 label = "NPS API Key"
 type = "text"
 required = false
+
+[[plugin.default_elements]]
+kind = "static_text"
+text_content = "Trail Conditions"
+x = 10
+y = 10
+width = 220
+height = 24
+font_size = 16
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.destination_name"
+label = "Destination"
+format_string = "{{value}}"
+x = 10
+y = 40
+width = 220
+height = 32
+font_size = 22
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.suitability_summary"
+label = "Status"
+format_string = "{{value}}"
+x = 10
+y = 80
+width = 220
+height = 24
+font_size = 14
+
+[[plugin.default_elements]]
+kind = "static_divider"
+orientation = "horizontal"
+x = 10
+y = 112
+width = 220
+height = 2

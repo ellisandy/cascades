@@ -6,6 +6,7 @@ use cascades::{
     domain::DomainState,
     instance_store::{seed_from_config, InstanceStore},
     layout_store::LayoutStore,
+    plugin_registry::{self, PluginRegistry},
     source_store::SourceStore,
     sources::generic::GenericHttpSource,
     template::TemplateEngine,
@@ -58,6 +59,15 @@ async fn main() {
     let source_store = Arc::new(
         SourceStore::open(store_path).expect("failed to open source store"),
     );
+
+    // Plugin registry — load definitions from config/plugins.d/.
+    let plugin_registry = plugin_registry::load_registry(Path::new("config"))
+        .unwrap_or_else(|e| {
+            log::warn!("failed to load plugin registry: {e}");
+            PluginRegistry::new()
+        });
+    // Bootstrap field mappings for plugins that declare [[default_elements]].
+    bootstrap_default_field_mappings(&plugin_registry, &layout_store);
 
     // Template engine — load from templates/ directory.
     let template_engine = Arc::new(
@@ -137,6 +147,7 @@ async fn main() {
         source_store,
         scheduler,
         image_cache: Arc::new(RwLock::new(HashMap::new())),
+        plugin_registry,
         api_key: secrets.api_key,
         refresh_rate_secs,
         started_at: std::time::Instant::now(),
@@ -149,4 +160,41 @@ async fn main() {
     let listener = TcpListener::bind(&addr).await.expect("failed to bind");
     println!("Listening on http://{}", addr);
     axum::serve(listener, app).await.expect("server error");
+}
+
+/// Upsert `data_source_fields` rows for every `data_field` entry declared by a
+/// plugin's `[[default_elements]]`. Keys on `(data_source_id, json_path)` so
+/// repeated boots are idempotent. `data_source_id` is the plugin id (which
+/// matches the seeded plugin-instance id for built-ins).
+fn bootstrap_default_field_mappings(registry: &PluginRegistry, layout_store: &LayoutStore) {
+    for def in registry.all() {
+        for el in &def.default_elements {
+            if el.kind != "data_field" {
+                continue;
+            }
+            let Some(path) = el.field_path.as_deref() else {
+                continue;
+            };
+            let name = el.label.clone().unwrap_or_else(|| path.to_string());
+            let sanitized: String = path
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let new_id = format!("fm-{}-{}", def.id, sanitized);
+            if let Err(e) = layout_store.upsert_field_mapping_by_path(
+                &new_id,
+                &def.id,
+                "builtin",
+                &name,
+                path,
+            ) {
+                log::warn!(
+                    "plugin_registry bootstrap: upsert failed for '{}' {}: {}",
+                    def.id,
+                    path,
+                    e
+                );
+            }
+        }
+    }
 }

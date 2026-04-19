@@ -46,6 +46,7 @@ use crate::{
     compositor::{Compositor, DisplayConfiguration},
     instance_store::InstanceStore,
     layout_store::{LayoutConfig, LayoutItem, LayoutStore},
+    plugin_registry::{DefaultElement, PluginRegistry},
     source_store::{DataSourceConfig, SourceStore},
     sources::{Source, generic::GenericHttpSource, presets},
 };
@@ -64,6 +65,9 @@ pub struct AppState {
     pub scheduler: Arc<SourceScheduler>,
     /// In-memory PNG cache: display_id → latest rendered PNG bytes.
     pub image_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    /// Plugin definitions loaded from `config/plugins.d/`. Used for
+    /// decomposition lookups (`default_elements`).
+    pub plugin_registry: PluginRegistry,
     /// Bearer token required for `GET /api/display`.
     pub api_key: String,
     /// Device refresh rate in seconds, returned by `GET /api/display`.
@@ -174,6 +178,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/active-layout", put(admin_set_active_layout))
         .route("/api/admin/preview/{id}", post(admin_post_preview))
         .route("/api/admin/plugins", get(admin_list_plugins))
+        .route(
+            "/api/admin/plugins/{id}/default_elements",
+            get(admin_get_default_elements),
+        )
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
         .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
         .route("/api/admin/layout/{id}/item/{item_id}", delete(admin_delete_item))
@@ -1250,6 +1258,98 @@ async fn admin_list_plugins(
     Json(plugins).into_response()
 }
 
+/// `GET /api/admin/plugins/{id}/default_elements` — return the decomposed
+/// elements for a plugin's palette drop. `{id}` is a plugin instance id; it's
+/// resolved to a plugin definition via `InstanceStore`.
+///
+/// Each `data_field` entry is enriched with a `field_mapping_id` pointing at a
+/// row that's been upserted into `data_source_fields` so the UI can create
+/// `DataField` items without a round-trip.
+///
+/// Returns `[]` when the plugin has no `default_elements` (UI falls back to a
+/// single `PluginSlot`). Returns `404` when the instance is unknown.
+async fn admin_get_default_elements(
+    headers: HeaderMap,
+    Path(instance_id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let instance = match app.instance_store.get_instance(&instance_id) {
+        Ok(Some(i)) => i,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_get_default_elements instance '{}': {}", instance_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let Some(def) = app.plugin_registry.get(&instance.plugin_id) else {
+        return Json(Vec::<DefaultElementResponse>::new()).into_response();
+    };
+
+    let mut out: Vec<DefaultElementResponse> = Vec::with_capacity(def.default_elements.len());
+    for el in &def.default_elements {
+        let field_mapping_id = if el.kind == "data_field" {
+            match el.field_path.as_deref() {
+                Some(path) => {
+                    let name = el.label.clone().unwrap_or_else(|| path.to_string());
+                    let new_id = stable_field_mapping_id(&instance_id, path);
+                    match app.layout_store.upsert_field_mapping_by_path(
+                        &new_id,
+                        &instance_id,
+                        "builtin",
+                        &name,
+                        path,
+                    ) {
+                        Ok(fm) => Some(fm.id),
+                        Err(e) => {
+                            log::warn!(
+                                "default_elements: upsert failed for '{}' {}: {}",
+                                instance_id,
+                                path,
+                                e
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        out.push(DefaultElementResponse {
+            element: el.clone(),
+            field_mapping_id,
+        });
+    }
+
+    Json(out).into_response()
+}
+
+/// Deterministic field-mapping id derived from `(data_source_id, json_path)`.
+/// Stable across reloads so UI references don't break.
+fn stable_field_mapping_id(data_source_id: &str, json_path: &str) -> String {
+    let sanitized: String = json_path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("fm-{data_source_id}-{sanitized}")
+}
+
+/// Wire shape for `GET /api/admin/plugins/{id}/default_elements`.
+#[derive(Debug, Serialize)]
+struct DefaultElementResponse {
+    #[serde(flatten)]
+    element: DefaultElement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field_mapping_id: Option<String>,
+}
+
 /// `POST /api/admin/layout/{id}/item` — add an item to an existing layout.
 async fn admin_post_item(
     headers: HeaderMap,
@@ -2031,6 +2131,7 @@ mod tests {
             source_store,
             scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
+            plugin_registry: PluginRegistry::new(),
             api_key: "test-key".to_string(),
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
@@ -2211,6 +2312,7 @@ mod tests {
             source_store,
             scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
+            plugin_registry: PluginRegistry::new(),
             api_key: "test-key".to_string(),
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),

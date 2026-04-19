@@ -38,3 +38,55 @@ label = "NOAA Station ID"
 type = "text"
 required = false
 placeholder = "KMWH"
+
+# Decomposition: dropping "weather" onto the canvas spawns a Group with these
+# children instead of a single opaque PluginSlot.
+[[plugin.default_elements]]
+kind = "static_text"
+text_content = "Weather"
+x = 10
+y = 10
+width = 180
+height = 24
+font_size = 16
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.temperature_f"
+label = "Temp"
+format_string = "{{value}}°F"
+x = 10
+y = 40
+width = 120
+height = 56
+font_size = 44
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.sky_condition"
+label = "Sky"
+format_string = "{{value}}"
+x = 10
+y = 104
+width = 180
+height = 24
+font_size = 16
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.wind_speed_mph"
+label = "Wind"
+format_string = "{{value}} mph"
+x = 10
+y = 134
+width = 180
+height = 20
+font_size = 14
+
+[[plugin.default_elements]]
+kind = "static_divider"
+orientation = "horizontal"
+x = 10
+y = 162
+width = 180
+height = 2

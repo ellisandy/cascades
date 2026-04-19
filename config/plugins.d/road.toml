@@ -29,3 +29,53 @@ key = "wsdot_access_code"
 label = "WSDOT Access Code"
 type = "text"
 required = false
+
+[[plugin.default_elements]]
+kind = "static_text"
+text_content = "Roads"
+x = 10
+y = 10
+width = 220
+height = 24
+font_size = 16
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.road_name"
+label = "Road"
+format_string = "{{value}}"
+x = 10
+y = 40
+width = 220
+height = 32
+font_size = 22
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.status"
+label = "Status"
+format_string = "{{value}}"
+x = 10
+y = 80
+width = 220
+height = 28
+font_size = 18
+
+[[plugin.default_elements]]
+kind = "data_field"
+field_path = "$.affected_segment"
+label = "Segment"
+format_string = "{{value}}"
+x = 10
+y = 116
+width = 220
+height = 20
+font_size = 12
+
+[[plugin.default_elements]]
+kind = "static_divider"
+orientation = "horizontal"
+x = 10
+y = 144
+width = 220
+height = 2

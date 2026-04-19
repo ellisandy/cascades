@@ -1390,12 +1390,78 @@ function buildPalette(plugins) {
   }).join('');
 }
 
-function quickAdd(pluginId, variant) {
+async function quickAdd(pluginId, variant) {
   const x = Math.max(0, Math.min(CANVAS_W - 200, 20 + state.items.length * 10));
   const y = Math.max(0, Math.min(CANVAS_H - 150, 20 + state.items.length * 10));
-  pushItem({ id: uid(), type: 'plugin_slot', z_index: nextZ(), x: x, y: y, w: 200, h: 150,
-             plugin_id: pluginId, variant: variant, text: '', font_size: 24, orientation: 'horizontal' });
-  selectItem(state.items[state.items.length - 1].id);
+  const spawned = await spawnPluginAt(pluginId, variant, x, y);
+  if (!spawned) {
+    pushItem({ id: uid(), type: 'plugin_slot', z_index: nextZ(), x: x, y: y, w: 200, h: 150,
+               plugin_id: pluginId, variant: variant, text: '', font_size: 24, orientation: 'horizontal' });
+    selectItem(state.items[state.items.length - 1].id);
+  }
+}
+
+// Decompose a plugin drop into a Group + children when the manifest declares
+// [[default_elements]]. Returns true if the group was spawned; false when the
+// caller should fall back to a single plugin_slot.
+async function spawnPluginAt(pluginId, variant, dropX, dropY) {
+  let elements = null;
+  try {
+    const res = await apiFetch('/api/admin/plugins/' + encodeURIComponent(pluginId) + '/default_elements');
+    if (!res.ok) return false;
+    elements = await res.json();
+  } catch (e) {
+    return false;
+  }
+  if (!Array.isArray(elements) || elements.length === 0) return false;
+
+  // Compute group bounds = union of child rects, then translate children so
+  // the group's top-left sits at (dropX, dropY).
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  elements.forEach(function(el) {
+    if (el.x < minX) minX = el.x;
+    if (el.y < minY) minY = el.y;
+    if (el.x + el.width > maxX) maxX = el.x + el.width;
+    if (el.y + el.height > maxY) maxY = el.y + el.height;
+  });
+  const groupW = Math.max(20, maxX - minX);
+  const groupH = Math.max(20, maxY - minY);
+  const groupId = uid();
+  const baseZ = nextZ();
+
+  pushItem({
+    id: groupId, type: 'group', z_index: baseZ,
+    x: dropX, y: dropY, w: groupW, h: groupH,
+    plugin_id: pluginId, variant: variant,
+    text: '', font_size: 24, orientation: 'horizontal',
+    label: pluginId, background: 'card',
+  });
+
+  elements.forEach(function(el, i) {
+    const child = {
+      id: uid(),
+      type: el.kind,
+      z_index: baseZ + i + 1,
+      x: dropX + (el.x - minX),
+      y: dropY + (el.y - minY),
+      w: el.width,
+      h: el.height,
+      plugin_id: '',
+      variant: 'full',
+      text: el.text_content || '',
+      font_size: el.font_size || 16,
+      format: el.format || '',
+      orientation: el.orientation || 'horizontal',
+      field_mapping_id: el.field_mapping_id || '',
+      format_string: el.format_string || '{{value}}',
+      label: el.label || '',
+      parent_id: groupId,
+    };
+    pushItem(child);
+  });
+
+  selectItem(groupId);
+  return true;
 }
 
 // ────────────────────────────────────────
@@ -1416,7 +1482,7 @@ function onCanvasDragLeave() {
   document.getElementById('canvas').classList.remove('drag-over');
 }
 
-function onCanvasDrop(e) {
+async function onCanvasDrop(e) {
   e.preventDefault();
   document.getElementById('canvas').classList.remove('drag-over');
   let data;
@@ -1424,9 +1490,13 @@ function onCanvasDrop(e) {
   if (!data) return;
   const c = toCanvas(e);
   if (data.type === 'plugin') {
-    pushItem({ id: uid(), type: 'plugin_slot', z_index: nextZ(), x: c.x, y: c.y, w: 200, h: 150,
-               plugin_id: data.id, variant: data.variant || 'full', text: '', font_size: 24, orientation: 'horizontal' });
-    selectItem(state.items[state.items.length - 1].id);
+    const variant = data.variant || 'full';
+    const spawned = await spawnPluginAt(data.id, variant, c.x, c.y);
+    if (!spawned) {
+      pushItem({ id: uid(), type: 'plugin_slot', z_index: nextZ(), x: c.x, y: c.y, w: 200, h: 150,
+                 plugin_id: data.id, variant: variant, text: '', font_size: 24, orientation: 'horizontal' });
+      selectItem(state.items[state.items.length - 1].id);
+    }
   } else if (data.type === 'title') {
     state.pendingDrop = c;
     showTextModal();
