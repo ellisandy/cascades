@@ -298,6 +298,10 @@ impl Compositor {
                     height,
                     text_content,
                     font_size,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                     ..
                 } => {
                     let text = text_content.clone();
@@ -307,9 +311,15 @@ impl Compositor {
                     let url = self.sidecar_url.clone();
                     let iid = id.clone();
                     let mode = render_mode.to_string();
+                    let fmt = TextFormat {
+                        bold: bold.unwrap_or(false),
+                        italic: italic.unwrap_or(false),
+                        underline: underline.unwrap_or(false),
+                        font_family: font_family.clone(),
+                    };
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_text(&text, fs, w, h, &url, &iid, &mode).await
+                        render_static_text(&text, fs, w, h, &url, &iid, &mode, &fmt).await
                     }));
                     Some(idx)
                 }
@@ -319,18 +329,28 @@ impl Compositor {
                     height,
                     font_size,
                     format,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                     ..
                 } => {
-                    let fmt = format.clone();
+                    let fmt_str = format.clone();
                     let w = (*width).max(0) as u32;
                     let h = (*height).max(0) as u32;
                     let fs = *font_size;
                     let url = self.sidecar_url.clone();
                     let iid = id.clone();
                     let mode = render_mode.to_string();
+                    let fmt = TextFormat {
+                        bold: bold.unwrap_or(false),
+                        italic: italic.unwrap_or(false),
+                        underline: underline.unwrap_or(false),
+                        font_family: font_family.clone(),
+                    };
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_datetime(fmt.as_deref(), fs, w, h, &url, &iid, &mode).await
+                        render_static_datetime(fmt_str.as_deref(), fs, w, h, &url, &iid, &mode, &fmt).await
                     }));
                     Some(idx)
                 }
@@ -342,6 +362,10 @@ impl Compositor {
                     font_size,
                     format_string,
                     label,
+                    bold,
+                    italic,
+                    underline,
+                    font_family,
                     ..
                 } => {
                     let w = (*width).max(0) as u32;
@@ -353,6 +377,12 @@ impl Compositor {
                     let fmid = field_mapping_id.clone();
                     let fmt_str = format_string.clone();
                     let lbl = label.clone();
+                    let fmt = TextFormat {
+                        bold: bold.unwrap_or(false),
+                        italic: italic.unwrap_or(false),
+                        underline: underline.unwrap_or(false),
+                        font_family: font_family.clone(),
+                    };
                     let layout_store = Arc::clone(&self.layout_store);
                     let instance_store = Arc::clone(&self.instance_store);
                     let idx = handles.len();
@@ -361,6 +391,7 @@ impl Compositor {
                             &fmid, &fmt_str, lbl.as_deref(), fs, w, h,
                             &url, &iid, &mode,
                             layout_store, instance_store,
+                            &fmt,
                         )
                         .await
                     }));
@@ -448,12 +479,47 @@ fn json_object_to_map(
     }
 }
 
+// ─── Text formatting ─────────────────────────────────────────────────────────
+
+/// Text formatting options shared by static text, datetime, and data field items.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TextFormat {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub font_family: Option<String>,
+}
+
+impl TextFormat {
+    /// Return CSS declarations for this format (no trailing semicolon after last).
+    /// Always emits `font-family` so callers can rely on it.
+    fn css(&self) -> String {
+        let family = self
+            .font_family
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("sans-serif");
+        let mut css = format!("font-family:{family};");
+        if self.bold {
+            css.push_str("font-weight:bold;");
+        }
+        if self.italic {
+            css.push_str("font-style:italic;");
+        }
+        if self.underline {
+            css.push_str("text-decoration:underline;");
+        }
+        css
+    }
+}
+
 // ─── Static text render ──────────────────────────────────────────────────────
 
 /// Render a static text element via the sidecar.
 ///
 /// Generates a minimal self-contained HTML snippet and POSTs it to
 /// `{sidecar_url}/render` at the item's pixel dimensions.
+#[allow(clippy::too_many_arguments)]
 async fn render_static_text(
     text: &str,
     font_size: i32,
@@ -462,15 +528,17 @@ async fn render_static_text(
     sidecar_url: &str,
     item_id: &str,
     mode: &str,
+    format: &TextFormat,
 ) -> Result<Vec<u8>, CompositorError> {
     let safe = html_escape(text);
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
-         justify-content:center;font-family:sans-serif;font-size:{fs}px;\
+         justify-content:center;{tf}font-size:{fs}px;\
          color:#000;background:white;'>{text}</div>",
         w = width,
         h = height,
         fs = font_size,
+        tf = format.css(),
         text = safe,
     );
     call_sidecar(sidecar_url, html, width, height, item_id, mode).await
@@ -482,6 +550,7 @@ async fn render_static_text(
 ///
 /// Gets the current local time and formats it, then renders via the sidecar
 /// like `render_static_text`.
+#[allow(clippy::too_many_arguments)]
 async fn render_static_datetime(
     format: Option<&str>,
     font_size: i32,
@@ -490,6 +559,7 @@ async fn render_static_datetime(
     sidecar_url: &str,
     item_id: &str,
     mode: &str,
+    text_format: &TextFormat,
 ) -> Result<Vec<u8>, CompositorError> {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -503,11 +573,12 @@ async fn render_static_datetime(
     let safe = html_escape(&time_str);
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
-         justify-content:center;font-family:sans-serif;font-size:{fs}px;\
+         justify-content:center;{tf}font-size:{fs}px;\
          color:#000;background:white;'>{text}</div>",
         w = width,
         h = height,
         fs = font_size,
+        tf = text_format.css(),
         text = safe,
     );
     call_sidecar(sidecar_url, html, width, height, item_id, mode).await
@@ -520,6 +591,7 @@ async fn render_static_datetime(
 /// Looks up the field mapping, extracts the value from cached data via JSONPath,
 /// applies the format string, and renders the result as HTML through the sidecar.
 /// Falls back to `[no data]` if the field mapping is missing or JSONPath fails.
+#[allow(clippy::too_many_arguments)]
 async fn render_data_field(
     field_mapping_id: &str,
     format_string: &str,
@@ -532,6 +604,7 @@ async fn render_data_field(
     mode: &str,
     layout_store: Arc<LayoutStore>,
     instance_store: Arc<InstanceStore>,
+    text_format: &TextFormat,
 ) -> Result<Vec<u8>, CompositorError> {
     let fmid = field_mapping_id.to_string();
     let ls = Arc::clone(&layout_store);
@@ -569,34 +642,55 @@ async fn render_data_field(
         None => "[no data]".to_string(),
     };
 
-    // Build HTML with optional label
+    // Build HTML with optional label.  Text formatting (bold/italic/underline/
+    // font-family) applies to the value; the small grey label stays in the
+    // default sans-serif so it remains legible.
     let safe_value = html_escape(&display_text);
     let label_font_size = (font_size as f32 * 0.6) as i32;
+    let value_css = {
+        let mut css = format!("font-size:{font_size}px;");
+        if text_format.bold {
+            css.push_str("font-weight:bold;");
+        }
+        if text_format.italic {
+            css.push_str("font-style:italic;");
+        }
+        if text_format.underline {
+            css.push_str("text-decoration:underline;");
+        }
+        css
+    };
     let content = match label {
         Some(lbl) if !lbl.is_empty() => {
             let safe_label = html_escape(lbl);
             format!(
-                "<div style='font-size:{lfs}px;color:#666;margin-bottom:2px;'>{lbl}</div>\
-                 <div style='font-size:{fs}px;'>{val}</div>",
+                "<div style='font-size:{lfs}px;font-family:sans-serif;color:#666;margin-bottom:2px;'>{lbl}</div>\
+                 <div style='{vcss}'>{val}</div>",
                 lfs = label_font_size,
                 lbl = safe_label,
-                fs = font_size,
+                vcss = value_css,
                 val = safe_value,
             )
         }
         _ => format!(
-            "<div style='font-size:{fs}px;'>{val}</div>",
-            fs = font_size,
+            "<div style='{vcss}'>{val}</div>",
+            vcss = value_css,
             val = safe_value,
         ),
     };
 
+    let family = text_format
+        .font_family
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("sans-serif");
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;flex-direction:column;\
-         align-items:center;justify-content:center;font-family:sans-serif;\
+         align-items:center;justify-content:center;font-family:{family};\
          color:#000;background:white;'>{content}</div>",
         w = width,
         h = height,
+        family = family,
         content = content,
     );
     call_sidecar(sidecar_url, html, width, height, item_id, mode).await
@@ -931,6 +1025,10 @@ mod tests {
                     text_content: "Hello".to_string(),
                     font_size: 24,
                     orientation: None,
+                    bold: None,
+                    italic: None,
+                    underline: None,
+                    font_family: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
@@ -1079,6 +1177,10 @@ mod tests {
             text_content: "test".to_string(),
             font_size: 16,
             orientation: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_family: None,
         };
 
         let task_for_item = vec![Some(0usize)];
@@ -1143,6 +1245,36 @@ mod tests {
 
         // Black (z=1) overwrote white (z=0).
         assert_eq!(frame.get_pixel(10, 10).0[0], 0);
+    }
+
+    #[test]
+    fn text_format_css_defaults_to_sans_serif() {
+        let fmt = TextFormat::default();
+        assert_eq!(fmt.css(), "font-family:sans-serif;");
+    }
+
+    #[test]
+    fn text_format_css_emits_bold_italic_underline() {
+        let fmt = TextFormat {
+            bold: true,
+            italic: true,
+            underline: true,
+            font_family: Some("Georgia, serif".to_string()),
+        };
+        let css = fmt.css();
+        assert!(css.contains("font-family:Georgia, serif;"));
+        assert!(css.contains("font-weight:bold;"));
+        assert!(css.contains("font-style:italic;"));
+        assert!(css.contains("text-decoration:underline;"));
+    }
+
+    #[test]
+    fn text_format_css_falls_back_on_blank_font_family() {
+        let fmt = TextFormat {
+            font_family: Some("   ".to_string()),
+            ..TextFormat::default()
+        };
+        assert!(fmt.css().starts_with("font-family:sans-serif;"));
     }
 
     #[test]

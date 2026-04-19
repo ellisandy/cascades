@@ -368,6 +368,7 @@ async fn static_text_renders_via_sidecar() {
             text_content: "Hello".to_string(),
             font_size: 18,
             orientation: None,
+            bold: None, italic: None, underline: None, font_family: None,
         }],
     };
 
@@ -403,6 +404,7 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
                 text_content: "Skagit".to_string(),
                 font_size: 20,
                 orientation: None,
+                bold: None, italic: None, underline: None, font_family: None,
             },
             LayoutItem::StaticDivider {
                 id: "d0".to_string(), z_index: 2,
@@ -478,6 +480,7 @@ async fn data_field_renders_extracted_value_via_sidecar() {
             format_string: "{{value}} ft".to_string(),
             label: None,
             orientation: None,
+            bold: None, italic: None, underline: None, font_family: None,
         }],
     };
 
@@ -523,6 +526,7 @@ async fn data_field_missing_mapping_renders_placeholder() {
             format_string: "{{value}}".to_string(),
             label: Some("Water Level".to_string()),
             orientation: None,
+            bold: None, italic: None, underline: None, font_family: None,
         }],
     };
 
@@ -584,6 +588,7 @@ async fn data_field_with_label_renders_successfully() {
             format_string: "{{value | round(0) | number_with_delimiter}} cfs".to_string(),
             label: Some("Streamflow".to_string()),
             orientation: None,
+            bold: None, italic: None, underline: None, font_family: None,
         }],
     };
 

@@ -1211,12 +1211,17 @@ function apiToItems(apiItems) {
       field_mapping_id: item.field_mapping_id    || '',
       format_string:    item.format_string       || '{{value}}',
       label:            item.label               || '',
+      bold:             !!item.bold,
+      italic:           !!item.italic,
+      underline:        !!item.underline,
+      font_family:      item.font_family         || '',
     };
   });
 }
 
 function itemsToPayload(items) {
   return items.map(function(item) {
+    const isTextLike = item.type === 'static_text' || item.type === 'static_datetime' || item.type === 'data_field';
     return {
       id:                  item.id,
       item_type:           item.type,
@@ -1229,13 +1234,16 @@ function itemsToPayload(items) {
       layout_variant:      item.type === 'plugin_slot'   ? item.variant    : null,
       text_content:        item.type === 'static_text'   ? item.text
                            : item.type === 'static_datetime' ? item.format : null,
-      font_size:           (item.type === 'static_text' || item.type === 'static_datetime' || item.type === 'data_field')
-                             ? item.font_size : null,
+      font_size:           isTextLike ? item.font_size : null,
       orientation:         (item.type === 'static_divider' || item.type === 'static_text' || item.type === 'static_datetime')
                              ? item.orientation : null,
       field_mapping_id:    item.type === 'data_field'    ? item.field_mapping_id : null,
       format_string:       item.type === 'data_field'    ? item.format_string    : null,
       label:               item.type === 'data_field'    ? (item.label || null)  : null,
+      bold:                isTextLike ? !!item.bold      : null,
+      italic:              isTextLike ? !!item.italic    : null,
+      underline:           isTextLike ? !!item.underline : null,
+      font_family:         isTextLike ? (item.font_family || null) : null,
     };
   });
 }
@@ -1592,6 +1600,12 @@ function makeEl(item) {
   } else if (item.type === 'data_field') {
     label.style.fontSize = (item.font_size || 24) + 'px';
   }
+  if (item.type === 'static_text' || item.type === 'static_datetime' || item.type === 'data_field') {
+    if (item.bold)      label.style.fontWeight = 'bold';
+    if (item.italic)    label.style.fontStyle = 'italic';
+    if (item.underline) label.style.textDecoration = 'underline';
+    if (item.font_family) label.style.fontFamily = item.font_family;
+  }
   label.textContent = itemLabel(item);
   el.appendChild(label);
 
@@ -1644,13 +1658,15 @@ function renderProps() {
       '<label>Text</label>' +
       '<input type="text" value="' + esc(item.text) + '" oninput="updateProp(\'text\',this.value)">' +
       '<label>Font size</label>' +
-      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">';
+      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">' +
+      textFormatFields(item);
   } else if (item.type === 'static_datetime') {
     typeFields =
       '<label>Format</label>' +
       '<input type="text" value="' + esc(item.format || '') + '" placeholder="default" oninput="updateProp(\'format\',this.value)">' +
       '<label>Font size</label>' +
-      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">';
+      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">' +
+      textFormatFields(item);
   } else if (item.type === 'static_divider') {
     const opts = ['horizontal','vertical'].map(function(o) {
       return '<option value="' + o + '"' + ((item.orientation || 'horizontal') === o ? ' selected' : '') + '>' + o + '</option>';
@@ -1669,7 +1685,8 @@ function renderProps() {
       '<label>Label</label>' +
       '<input type="text" value="' + esc(item.label || '') + '" oninput="updateProp(\'label\',this.value)">' +
       '<label>Font size</label>' +
-      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">';
+      '<input type="number" value="' + item.font_size + '" min="8" max="200" onchange="updateProp(\'font_size\',+this.value)">' +
+      textFormatFields(item);
   }
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
@@ -1690,11 +1707,59 @@ function renderProps() {
     '</div>';
 }
 
+// Sensible set of fonts for e-ink rendering.  Generic families first
+// (always available in the sidecar's browser), then widely-shipped named
+// fonts that render well at low DPI.
+const FONT_FAMILIES = [
+  { value: '',                label: 'Default (sans-serif)' },
+  { value: 'sans-serif',      label: 'Sans-serif' },
+  { value: 'serif',           label: 'Serif' },
+  { value: 'monospace',       label: 'Monospace' },
+  { value: 'Georgia, serif',  label: 'Georgia' },
+  { value: 'Helvetica, Arial, sans-serif', label: 'Helvetica / Arial' },
+  { value: 'Times New Roman, serif',       label: 'Times New Roman' },
+  { value: 'Courier New, monospace',       label: 'Courier New' },
+  { value: 'Verdana, sans-serif',          label: 'Verdana' },
+];
+
+function textFormatFields(item) {
+  const fontOpts = FONT_FAMILIES.map(function(f) {
+    return '<option value="' + esc(f.value) + '"' +
+      ((item.font_family || '') === f.value ? ' selected' : '') + '>' + esc(f.label) + '</option>';
+  }).join('');
+  const btn = function(key, label, title) {
+    const pressed = !!item[key];
+    const style = pressed
+      ? 'background:#58a6ff;color:#0d1117;font-weight:bold;'
+      : 'background:#21262d;color:#c9d1d9;';
+    return '<button type="button" title="' + title + '" ' +
+      'style="' + style + 'border:1px solid #30363d;border-radius:4px;' +
+      'padding:4px 10px;font-size:12px;cursor:pointer;min-width:32px;" ' +
+      'onclick="toggleProp(\'' + key + '\')">' + label + '</button>';
+  };
+  return '<label>Format</label>' +
+    '<div style="display:flex;gap:4px;">' +
+      btn('bold',      '<b>B</b>', 'Bold') +
+      btn('italic',    '<i>I</i>', 'Italic') +
+      btn('underline', '<u>U</u>', 'Underline') +
+    '</div>' +
+    '<label>Font</label>' +
+    '<select onchange="updateProp(\'font_family\',this.value)">' + fontOpts + '</select>';
+}
+
 function updateProp(key, value) {
   const item = findItem(state.selectedId);
   if (!item) return;
   item[key] = value;
   renderCanvas();
+}
+
+function toggleProp(key) {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  item[key] = !item[key];
+  renderCanvas();
+  renderProps();
 }
 
 function updatePropRender(key, value) {

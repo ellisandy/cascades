@@ -621,6 +621,14 @@ struct ItemPayload {
     field_mapping_id: Option<String>,
     format_string: Option<String>,
     label: Option<String>,
+    #[serde(default)]
+    bold: Option<bool>,
+    #[serde(default)]
+    italic: Option<bool>,
+    #[serde(default)]
+    underline: Option<bool>,
+    #[serde(default)]
+    font_family: Option<String>,
 }
 
 impl ItemPayload {
@@ -646,6 +654,10 @@ impl ItemPayload {
                 text_content: self.text_content.unwrap_or_default(),
                 font_size: self.font_size.unwrap_or(16),
                 orientation: self.orientation,
+                bold: self.bold,
+                italic: self.italic,
+                underline: self.underline,
+                font_family: self.font_family,
             }),
             "static_datetime" => Ok(LayoutItem::StaticDateTime {
                 id: self.id,
@@ -657,6 +669,10 @@ impl ItemPayload {
                 font_size: self.font_size.unwrap_or(16),
                 format: self.text_content,
                 orientation: self.orientation,
+                bold: self.bold,
+                italic: self.italic,
+                underline: self.underline,
+                font_family: self.font_family,
             }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
                 id: self.id,
@@ -681,6 +697,10 @@ impl ItemPayload {
                     .unwrap_or_else(|| "{{value}}".to_string()),
                 label: self.label,
                 orientation: self.orientation,
+                bold: self.bold,
+                italic: self.italic,
+                underline: self.underline,
+                font_family: self.font_family,
             }),
             other => Err(format!("unknown item_type '{other}'")),
         }
@@ -2349,6 +2369,10 @@ mod tests {
                 text_content: "Old".to_string(),
                 font_size: 16,
                 orientation: None,
+                bold: None,
+                italic: None,
+                underline: None,
+                font_family: None,
             }],
             updated_at: 0,
         }).unwrap();
@@ -2412,6 +2436,49 @@ mod tests {
         let items = resp["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["font_size"], 48, "font_size should roundtrip as 48, not default to 16");
+    }
+
+    #[tokio::test]
+    async fn put_layout_roundtrips_text_formatting() {
+        let (state, _dir) = make_writable_test_state();
+        seed_default_layout(&state);
+        let app = build_router(Arc::clone(&state));
+
+        let body = serde_json::json!({
+            "name": "FormattingTest",
+            "items": [
+                {
+                    "id": "item-1",
+                    "item_type": "static_text",
+                    "z_index": 0,
+                    "x": 0, "y": 0, "width": 400, "height": 80,
+                    "text_content": "Bold italic",
+                    "font_size": 32,
+                    "bold": true,
+                    "italic": true,
+                    "underline": false,
+                    "font_family": "Georgia, serif"
+                }
+            ]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/layout/default")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let items = resp["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["bold"], true);
+        assert_eq!(items[0]["italic"], true);
+        assert_eq!(items[0]["underline"], false);
+        assert_eq!(items[0]["font_family"], "Georgia, serif");
     }
 
     #[tokio::test]
