@@ -505,6 +505,8 @@
       font-size: 11px;
     }
     #df-explorer-inline.hidden { display: none; }
+    #sources-panel { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:1001; }
+    #sources-panel.hidden { display: none; }
     #df-explorer-inline .jtree-node { padding-left: 14px; }
   </style>
 </head>
@@ -666,10 +668,7 @@
 </div>
 
 <!-- ── Sources panel overlay ── -->
-<div id="sources-panel" class="hidden" style="
-  position:fixed; inset:0; background:rgba(0,0,0,0.7);
-  display:flex; align-items:center; justify-content:center; z-index:1001;
-">
+<div id="sources-panel" class="hidden">
   <div style="
     background:#161b22; border:1px solid #30363d; border-radius:8px;
     width:700px; max-height:80vh; overflow-y:auto; padding:20px;
