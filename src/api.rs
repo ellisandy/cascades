@@ -169,6 +169,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Admin routes — all require X-Api-Key header or session cookie
         .route("/admin", get(get_admin_ui))
         .route("/admin/login", post(post_admin_login))
+        .route("/admin/logout", get(get_admin_logout))
         .route("/api/admin/layouts", get(admin_list_layouts))
         .route("/api/admin/layout", post(admin_post_layout))
         .route("/api/admin/layout/{id}", get(admin_get_layout))
@@ -924,6 +925,19 @@ async fn post_admin_login(
             )))
             .unwrap()
     }
+}
+
+/// `GET /admin/logout` — clear the session cookie and redirect to the login page.
+async fn get_admin_logout() -> impl IntoResponse {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/admin")
+        .header(
+            header::SET_COOKIE,
+            "cascades_admin_key=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+        )
+        .body(Body::empty())
+        .unwrap()
 }
 
 const ADMIN_HTML: &str = include_str!("../templates/admin.html");
@@ -3004,19 +3018,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_login_wrong_key_returns_401() {
+    async fn admin_login_wrong_key_rerenders_with_error() {
         let app = build_router(make_test_state());
         let req = Request::builder()
             .method("POST")
             .uri("/admin/login")
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from("api_key=wrong-key"))
+            .body(Body::from("key=wrong-key"))
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(
             response.status(),
-            StatusCode::UNAUTHORIZED,
-            "POST /admin/login with wrong key should return 401"
+            StatusCode::OK,
+            "POST /admin/login with wrong key should re-render the login page"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            body.contains("Invalid API key"),
+            "wrong-key response should include the error message, got: {body}"
         );
     }
 
@@ -3027,7 +3047,7 @@ mod tests {
             .method("POST")
             .uri("/admin/login")
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from("api_key=test-key"))
+            .body(Body::from("key=test-key"))
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert!(
@@ -3052,7 +3072,7 @@ mod tests {
             .method("POST")
             .uri("/admin/login")
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from("api_key=test-key"))
+            .body(Body::from("key=test-key"))
             .unwrap();
         let login_resp = app.oneshot(login_req).await.unwrap();
         let set_cookie = login_resp
@@ -3108,7 +3128,7 @@ mod tests {
             .method("POST")
             .uri("/admin/login")
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from("api_key=test-key"))
+            .body(Body::from("key=test-key"))
             .unwrap();
         let login_resp = app.oneshot(login_req).await.unwrap();
         let set_cookie = login_resp
