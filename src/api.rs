@@ -3517,4 +3517,468 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+
+    // ── POST /api/admin/layout (create layout) ────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_post_layout_creates_and_returns_201() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/layout")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"My Layout","items":[]}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["name"], "My Layout");
+        assert!(body["id"].as_str().unwrap().starts_with("layout-"));
+    }
+
+    #[tokio::test]
+    async fn admin_post_layout_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/layout")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"X","items":[]}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── DELETE /api/admin/layout/{id} ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_delete_layout_returns_204() {
+        let (state, _dir) = make_writable_test_state();
+        // First create a layout to delete.
+        seed_default_layout(&state);
+        let layouts = state.layout_store.list_layouts().unwrap();
+        let id = layouts[0].id.clone();
+
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/layout/{id}"))
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.layout_store.get_layout(&id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_delete_layout_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/layout/some-id")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── GET /api/admin/plugins/{id}/default_elements ──────────────────────────
+
+    #[tokio::test]
+    async fn admin_get_default_elements_returns_empty_for_unknown_instance() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/plugins/nonexistent/default_elements")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_get_default_elements_returns_200_for_known_instance() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/plugins/weather/default_elements")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.is_array(), "default_elements should return a JSON array");
+    }
+
+    #[tokio::test]
+    async fn admin_get_default_elements_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/plugins/weather/default_elements")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Generic source CRUD ───────────────────────────────────────────────────
+
+    fn source_payload() -> &'static str {
+        r#"{"name":"Test Source","url":"https://example.com/data","method":"GET","refresh_interval_secs":300}"#
+    }
+
+    #[tokio::test]
+    async fn admin_list_sources_returns_builtins() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = body.as_array().unwrap();
+        let ids: Vec<&str> = arr.iter().filter_map(|s| s["id"].as_str()).collect();
+        assert!(ids.contains(&"weather"), "builtins should include 'weather'");
+        assert!(ids.contains(&"river"), "builtins should include 'river'");
+    }
+
+    #[tokio::test]
+    async fn admin_list_sources_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_create_source_returns_201() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(source_payload()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["name"], "Test Source");
+        assert_eq!(body["url"], "https://example.com/data");
+    }
+
+    #[tokio::test]
+    async fn admin_create_source_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources")
+            .header("content-type", "application/json")
+            .body(Body::from(source_payload()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_returns_builtin() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources/weather")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["id"], "weather");
+        assert_eq!(body["source_kind"], "builtin");
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_404_for_unknown() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources/nonexistent")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_get_source_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/sources/weather")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_update_source_returns_200() {
+        let (state, _dir) = make_writable_test_state();
+        // Create a source to update.
+        let ds = state
+            .source_store
+            .create(&crate::source_store::DataSourceConfig {
+                name: "Original".to_string(),
+                url: "https://example.com/original".to_string(),
+                method: "GET".to_string(),
+                headers: serde_json::json!({}),
+                body_template: None,
+                response_root_path: None,
+                refresh_interval_secs: 300,
+            })
+            .unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let updated = serde_json::json!({
+            "name": "Updated",
+            "url": "https://example.com/updated",
+            "method": "GET",
+            "refresh_interval_secs": 600
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/admin/sources/{}", ds.id))
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(updated.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["name"], "Updated");
+        assert_eq!(body["url"], "https://example.com/updated");
+    }
+
+    #[tokio::test]
+    async fn admin_update_source_404_for_unknown() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/sources/nonexistent")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(source_payload()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_source_returns_204() {
+        let (state, _dir) = make_writable_test_state();
+        let ds = state
+            .source_store
+            .create(&crate::source_store::DataSourceConfig {
+                name: "ToDelete".to_string(),
+                url: "https://example.com/delete".to_string(),
+                method: "GET".to_string(),
+                headers: serde_json::json!({}),
+                body_template: None,
+                response_root_path: None,
+                refresh_interval_secs: 300,
+            })
+            .unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sources/{}", ds.id))
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.source_store.get(&ds.id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_delete_source_404_for_unknown() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/sources/nonexistent")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_source_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/sources/weather")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_fetch_source_404_for_unknown() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/nonexistent/fetch")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_fetch_source_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/weather/fetch")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Presets ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_list_presets_returns_all_presets() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/presets")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 3, "should return all 3 built-in presets");
+        let ids: Vec<&str> = arr.iter().filter_map(|p| p["id"].as_str()).collect();
+        assert!(ids.contains(&"usgs_river_gauge"));
+        assert!(ids.contains(&"noaa_weather"));
+        assert!(ids.contains(&"wsdot_ferries"));
+    }
+
+    #[tokio::test]
+    async fn admin_list_presets_requires_auth() {
+        let app = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/admin/presets")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_create_from_preset_creates_source() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({
+            "preset_id": "usgs_river_gauge",
+            "params": {"site_id": "12200500"},
+            "name": "Skagit River"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/from-preset")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["source"]["name"], "Skagit River");
+        assert!(
+            body["source"]["url"].as_str().unwrap().contains("12200500"),
+            "url should contain the site_id"
+        );
+        assert!(body["default_fields"].is_array(), "should include default fields");
+    }
+
+    #[tokio::test]
+    async fn admin_create_from_preset_404_for_unknown_preset() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({
+            "preset_id": "nonexistent_preset",
+            "params": {}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/from-preset")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_create_from_preset_422_for_missing_required_param() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let payload = serde_json::json!({
+            "preset_id": "usgs_river_gauge",
+            "params": {}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/from-preset")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn admin_create_from_preset_requires_auth() {
+        let app = build_router(make_test_state());
+        let payload = serde_json::json!({
+            "preset_id": "usgs_river_gauge",
+            "params": {"site_id": "12200500"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/sources/from-preset")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }
