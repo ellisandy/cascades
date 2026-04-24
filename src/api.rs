@@ -4237,4 +4237,47 @@ mod tests {
         assert!(ADMIN_HTML.contains("color:               isTextLike ? (item.color"),
                 "itemsToPayload missing color emission");
     }
+
+    /// Phase 6b smoke test — asserts the bundled admin template contains the
+    /// asset-library palette section, the asset-fetch/upload helpers, and the
+    /// Image-item drop + render hooks. Same pattern as the 5b smoke test:
+    /// catches "half the file got reverted" without a browser harness.
+    #[test]
+    fn admin_html_contains_phase6b_markers() {
+        // Asset library palette section + upload form
+        assert!(ADMIN_HTML.contains("ASSETS</div>"),
+                "missing ASSETS palette section header");
+        assert!(ADMIN_HTML.contains("id=\"asset-list\""),
+                "missing asset-list container");
+        assert!(ADMIN_HTML.contains("id=\"asset-file-input\""),
+                "missing asset upload file input");
+        assert!(ADMIN_HTML.contains("onAssetFilePicked"),
+                "missing onAssetFilePicked upload handler wiring");
+
+        // JS helpers + state
+        assert!(ADMIN_HTML.contains("function refreshAssets"),
+                "missing refreshAssets fetcher");
+        assert!(ADMIN_HTML.contains("function renderAssetList"),
+                "missing renderAssetList renderer");
+        assert!(ADMIN_HTML.contains("async function onAssetFilePicked"),
+                "missing onAssetFilePicked impl");
+        assert!(ADMIN_HTML.contains("let cachedAssets"),
+                "missing cachedAssets state");
+
+        // FormData-aware apiFetch — required for multipart uploads
+        assert!(ADMIN_HTML.contains("body instanceof FormData"),
+                "apiFetch missing FormData detection (multipart upload would break)");
+
+        // Drop handler creates an Image LayoutItem
+        assert!(ADMIN_HTML.contains("data.type === 'asset'"),
+                "onCanvasDrop missing asset-drop branch");
+        assert!(ADMIN_HTML.contains("type: 'image'"),
+                "asset-drop branch missing LayoutItem::Image creation");
+
+        // asset_id flows through both directions of the API payload mapping
+        assert!(ADMIN_HTML.contains("asset_id:         item.asset_id"),
+                "apiToItems missing asset_id hydration");
+        assert!(ADMIN_HTML.contains("item.type === 'image' ? (item.asset_id"),
+                "itemsToPayload missing asset_id emission for image type");
+    }
 }
