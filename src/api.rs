@@ -33,7 +33,7 @@ use std::sync::{Arc, RwLock};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    asset_store::{sniff_mime, AssetStore, MAX_ASSET_BYTES},
     compositor::{Compositor, DisplayConfiguration},
     instance_store::InstanceStore,
     layout_store::{LayoutConfig, LayoutItem, LayoutStore},
@@ -61,6 +62,8 @@ pub struct AppState {
     pub layout_store: Arc<LayoutStore>,
     /// SQLite-backed store for user-defined generic HTTP data sources.
     pub source_store: Arc<SourceStore>,
+    /// SQLite-backed store for user-uploaded image assets (Phase 6).
+    pub asset_store: Arc<AssetStore>,
     /// Manages background fetch tasks for generic HTTP data sources.
     pub scheduler: Arc<SourceScheduler>,
     /// In-memory PNG cache: display_id → latest rendered PNG bytes.
@@ -205,6 +208,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Curated-font bundle — served to both the sidecar (for @font-face)
         // and the admin UI picker from ./fonts/ relative to the server's CWD.
         .route("/fonts/{*path}", get(serve_font))
+        // Phase 6: user-uploaded image assets. Upload requires admin auth and
+        // a per-route body cap; serving is unauthenticated (assets are
+        // referenced from rendered HTML and the admin preview, both of which
+        // need to fetch them like any other static image).
+        .route(
+            "/api/admin/assets",
+            post(admin_upload_asset)
+                .layer(DefaultBodyLimit::max(MAX_ASSET_BYTES + 4096))
+                .get(admin_list_assets),
+        )
+        .route("/api/assets/{id}", get(serve_asset))
         .with_state(state)
 }
 
@@ -242,6 +256,133 @@ async fn serve_font(
             .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+// ─── Asset routes (Phase 6) ──────────────────────────────────────────────────
+
+/// `POST /api/admin/assets` — multipart upload of a single image asset.
+/// Expects a form field named `file` carrying PNG or JPEG bytes (≤1 MiB).
+/// Server-side MIME-sniffs to defeat extension spoofing; dedupes on SHA-256.
+/// Returns `{id, filename, mime, size}` on success.
+async fn admin_upload_asset(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Response<Body> {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    // Walk fields until we find one named "file". We could be stricter (reject
+    // extra fields) but the admin UI sends exactly one and tolerating noise is
+    // friendlier for hand-rolled curl uploads during development.
+    let (filename, bytes) = loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                return text_status(
+                    StatusCode::BAD_REQUEST,
+                    "missing 'file' part in multipart body",
+                );
+            }
+            Err(e) => {
+                // axum surfaces a 413 here when the body cap is exceeded; we
+                // forward the status so the admin UI can show a proper error.
+                let status = e.status();
+                return text_status(status, &e.to_string());
+            }
+        };
+        if field.name() == Some("file") {
+            let filename = field
+                .file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "upload".to_string());
+            let bytes = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => return text_status(e.status(), &e.to_string()),
+            };
+            break (filename, bytes);
+        }
+    };
+
+    // Defence-in-depth: MAX_ASSET_BYTES is also enforced by DefaultBodyLimit
+    // on the route, but a malformed multipart could in theory slip past.
+    if bytes.len() > MAX_ASSET_BYTES {
+        return text_status(StatusCode::PAYLOAD_TOO_LARGE, "asset exceeds 1 MiB cap");
+    }
+
+    let mime = match sniff_mime(&bytes) {
+        Some(m) => m,
+        None => {
+            return text_status(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "only PNG and JPEG uploads are accepted",
+            );
+        }
+    };
+
+    match app.asset_store.insert_or_get(&bytes, &filename, mime) {
+        Ok(id) => {
+            let body = serde_json::json!({
+                "id": id,
+                "filename": filename,
+                "mime": mime,
+                "size": bytes.len(),
+            });
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => text_status(StatusCode::BAD_REQUEST, &e.to_string()),
+    }
+}
+
+/// `GET /api/admin/assets` — list uploaded assets (id, filename, mime, size).
+/// Admin auth required; the byte content is fetched separately via
+/// `GET /api/assets/{id}`.
+async fn admin_list_assets(
+    headers: HeaderMap,
+    State(app): State<Arc<AppState>>,
+) -> Response<Body> {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .unwrap();
+    }
+    match app.asset_store.list() {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => text_status(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `GET /api/assets/{id}` — serve an uploaded asset's raw bytes with the
+/// stored MIME as `Content-Type`. Unauthenticated by design (rendered HTML
+/// and the admin preview both fetch via this route, similar to `/fonts`).
+async fn serve_asset(
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> Response<Body> {
+    match app.asset_store.get(&id) {
+        Ok(Some(asset)) => Response::builder()
+            .header(header::CONTENT_TYPE, asset.mime)
+            // Long cache: assets are content-addressed by id; if the bytes
+            // change, the id changes too, so we never need to invalidate.
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .body(Body::from(asset.bytes))
+            .unwrap(),
+        Ok(None) => text_status(StatusCode::NOT_FOUND, "asset not found"),
+        Err(e) => text_status(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+fn text_status(status: StatusCode, msg: &str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from(msg.to_string()))
+        .unwrap()
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -2137,6 +2278,7 @@ mod tests {
     /// Uses a temporary SQLite database seeded with the 5 well-known instances
     /// and an empty templates directory (status doesn't render any templates).
     fn make_test_state() -> Arc<AppState> {
+        use crate::asset_store::AssetStore;
         use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
         use crate::layout_store::LayoutStore;
         use crate::source_store::SourceStore;
@@ -2149,6 +2291,7 @@ mod tests {
         let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
         let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
         let source_store = Arc::new(SourceStore::open(&db_path).unwrap());
+        let asset_store = Arc::new(AssetStore::open(&db_path).unwrap());
         let config = Config {
             display: DisplayConfig { width: 800, height: 480 },
             location: LocationConfig {
@@ -2195,6 +2338,7 @@ mod tests {
             instance_store,
             layout_store,
             source_store,
+            asset_store,
             scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             plugin_registry: PluginRegistry::new(),
@@ -2333,6 +2477,7 @@ mod tests {
 
     /// Returns `(AppState, TempDir)` — caller must keep `TempDir` alive for writes.
     fn make_writable_test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        use crate::asset_store::AssetStore;
         use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
         use crate::layout_store::LayoutStore;
         use crate::source_store::SourceStore;
@@ -2345,6 +2490,7 @@ mod tests {
         let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
         let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
         let source_store = Arc::new(SourceStore::open(&db_path).unwrap());
+        let asset_store = Arc::new(AssetStore::open(&db_path).unwrap());
         let config = Config {
             display: DisplayConfig { width: 800, height: 480 },
             location: LocationConfig { latitude: 48.4, longitude: -122.3, name: "Test".to_string() },
@@ -2382,6 +2528,7 @@ mod tests {
             instance_store,
             layout_store,
             source_store,
+            asset_store,
             scheduler,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             plugin_registry: PluginRegistry::new(),

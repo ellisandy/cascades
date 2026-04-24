@@ -1,5 +1,6 @@
 use cascades::{
     api::{AppState, SourceScheduler, build_router},
+    asset_store::AssetStore,
     build_sources,
     config::{load_config, load_display_layouts, load_or_create_secrets},
     compositor::Compositor,
@@ -58,6 +59,11 @@ async fn main() {
     // Open source store for generic HTTP data sources.
     let source_store = Arc::new(
         SourceStore::open(store_path).expect("failed to open source store"),
+    );
+
+    // Open asset store for user-uploaded image assets (Phase 6).
+    let asset_store = Arc::new(
+        AssetStore::open(store_path).expect("failed to open asset store"),
     );
 
     // Plugin registry — load definitions from config/plugins.d/.
@@ -160,6 +166,7 @@ async fn main() {
         instance_store,
         layout_store,
         source_store,
+        asset_store,
         scheduler,
         image_cache: Arc::new(RwLock::new(HashMap::new())),
         plugin_registry,
