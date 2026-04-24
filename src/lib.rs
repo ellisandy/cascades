@@ -3,6 +3,7 @@ pub mod compositor;
 pub mod config;
 pub mod domain;
 pub mod evaluation;
+pub mod fonts;
 pub mod format;
 pub mod instance_store;
 pub mod jsonpath;

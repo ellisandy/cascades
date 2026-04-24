@@ -77,11 +77,26 @@ async fn main() {
     let sidecar_url = std::env::var("SIDECAR_URL")
         .unwrap_or_else(|_| "http://localhost:3001".to_string());
 
+    // Curated-font manifest — served to both the sidecar's @font-face builder
+    // and the admin UI font picker from ./fonts/ relative to the server's CWD.
+    let fonts_manifest = Arc::new(
+        cascades::fonts::FontsManifest::load_from(Path::new("fonts/fonts.json"))
+            .expect("failed to load fonts/fonts.json — is the repo root the CWD?"),
+    );
+
+    // URL the sidecar's headless Chromium uses to fetch font files. The
+    // sidecar runs on the same host, so localhost:<server-port> is the
+    // canonical loopback.
+    let server_port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
+    let font_base_url = format!("http://localhost:{server_port}");
+
     let compositor = Arc::new(Compositor::new(
         Arc::clone(&template_engine),
         Arc::clone(&instance_store),
         Arc::clone(&layout_store),
         sidecar_url.clone(),
+        Arc::clone(&fonts_manifest),
+        font_base_url,
     ));
 
     let refresh_rate_secs = config

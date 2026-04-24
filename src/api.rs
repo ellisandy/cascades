@@ -2168,11 +2168,17 @@ mod tests {
         seed_from_config(&instance_store, &config).unwrap();
 
         let template_engine = Arc::new(TemplateEngine::new(&templates_dir).unwrap());
+        let fonts_manifest = Arc::new(
+            crate::fonts::FontsManifest::load_from(std::path::Path::new("fonts/fonts.json"))
+                .expect("test fonts manifest"),
+        );
         let compositor = Arc::new(Compositor::new(
             Arc::clone(&template_engine),
             Arc::clone(&instance_store),
             Arc::clone(&layout_store),
             "http://localhost:3001".to_string(),
+            fonts_manifest,
+            "http://localhost:9090".to_string(),
         ));
 
         let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
@@ -2349,11 +2355,17 @@ mod tests {
         seed_from_config(&instance_store, &config).unwrap();
 
         let template_engine = Arc::new(TemplateEngine::new(&templates_dir).unwrap());
+        let fonts_manifest = Arc::new(
+            crate::fonts::FontsManifest::load_from(std::path::Path::new("fonts/fonts.json"))
+                .expect("test fonts manifest"),
+        );
         let compositor = Arc::new(Compositor::new(
             Arc::clone(&template_engine),
             Arc::clone(&instance_store),
             Arc::clone(&layout_store),
             "http://localhost:3001".to_string(),
+            fonts_manifest,
+            "http://localhost:9090".to_string(),
         ));
 
         let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));

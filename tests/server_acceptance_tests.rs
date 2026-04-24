@@ -1012,6 +1012,8 @@ fn make_api_app(
         Arc::clone(&instance_store),
         Arc::clone(&layout_store),
         "http://localhost:9999", // no sidecar — compositor produces empty-slot PNGs
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
     ));
 
     // "default" display has no slots → compositor returns 800×480 white PNG.
@@ -1105,6 +1107,8 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         Arc::clone(&instance_store),
         Arc::clone(&layout_store),
         "http://localhost:9999",
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
     ));
 
     layout_store

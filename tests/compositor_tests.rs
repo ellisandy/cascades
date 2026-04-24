@@ -131,7 +131,14 @@ async fn default_config_composite_returns_800x480_png() {
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
 
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
 
     let config = DisplayConfiguration {
         name: "default".to_string(),
@@ -166,7 +173,14 @@ async fn trip_planner_config_composite_returns_800x480_png() {
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
 
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
 
     let config = DisplayConfiguration {
         name: "trip-planner".to_string(),
@@ -266,7 +280,14 @@ async fn compositor_runs_slots_concurrently_and_joins() {
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
 
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
 
     let config = DisplayConfiguration {
         name: "trip-planner".to_string(),
@@ -331,7 +352,14 @@ async fn static_divider_composited_without_sidecar() {
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
     // Point at a non-existent port — dividers must NOT hit the sidecar.
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), "http://127.0.0.1:1");
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        "http://127.0.0.1:1",
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
 
     let config = DisplayConfiguration {
         name: "divider-only".to_string(),
@@ -364,7 +392,14 @@ async fn static_text_renders_via_sidecar() {
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
 
     let config = DisplayConfiguration {
         name: "text-only".to_string(),
@@ -396,7 +431,14 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
     let engine = Arc::new(
         TemplateEngine::new(Path::new("templates")).expect("load templates"),
     );
-    let compositor = Compositor::new(Arc::clone(&engine), Arc::clone(&store), Arc::clone(&layout_store), &sidecar_url);
+    let compositor = Compositor::new(
+        Arc::clone(&engine),
+        Arc::clone(&store),
+        Arc::clone(&layout_store),
+        &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
 
     let config = DisplayConfiguration {
         name: "mixed".to_string(),
@@ -476,6 +518,8 @@ async fn data_field_renders_extracted_value_via_sidecar() {
         Arc::clone(&store),
         Arc::clone(&layout_store),
         &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
     );
 
     let config = DisplayConfiguration {
@@ -523,6 +567,8 @@ async fn data_field_missing_mapping_renders_placeholder() {
         Arc::clone(&store),
         Arc::clone(&layout_store),
         &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
     );
 
     let config = DisplayConfiguration {
@@ -586,6 +632,8 @@ async fn data_field_with_label_renders_successfully() {
         Arc::clone(&store),
         Arc::clone(&layout_store),
         &sidecar_url,
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
     );
 
     let config = DisplayConfiguration {

@@ -34,6 +34,8 @@ fn make_test_router(base_dir: &Path) -> axum::Router {
         Arc::clone(&instance_store),
         Arc::clone(&layout_store),
         "http://localhost:9999",
+        Arc::new(cascades::fonts::FontsManifest::empty()),
+        "http://localhost:0".to_string(),
     ));
     layout_store
         .upsert_layout(&LayoutConfig {
@@ -172,6 +174,200 @@ async fn fonts_route_serves_woff2_with_correct_content_type() {
         body.len() > 1000,
         "body too small ({} bytes) — route likely served an empty/wrong file",
         body.len()
+    );
+}
+
+/// Red 6: the compositor must call the sidecar with HTML wrapped in a full
+/// document that embeds `@font-face`. Uses a capturing mock sidecar so we
+/// can inspect exactly what bytes would have been screenshotted.
+#[tokio::test]
+async fn compositor_wraps_sidecar_html_with_font_face() {
+    use axum::{
+        Json, Router,
+        extract::State,
+        response::IntoResponse,
+        routing::post,
+    };
+    use cascades::{
+        compositor::{Compositor, DisplayConfiguration},
+        fonts::FontsManifest,
+        instance_store::InstanceStore,
+        layout_store::{LayoutItem, LayoutStore},
+        template::TemplateEngine,
+    };
+    use image::{GrayImage, ImageEncoder};
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
+
+    #[derive(serde::Deserialize)]
+    struct CapturedBody {
+        html: String,
+        width: u32,
+        height: u32,
+    }
+
+    async fn capturing_render(
+        State(captured): State<Arc<Mutex<Vec<String>>>>,
+        Json(body): Json<CapturedBody>,
+    ) -> impl IntoResponse {
+        captured.lock().unwrap().push(body.html);
+        let pixels = vec![255u8; (body.width * body.height) as usize];
+        let img = GrayImage::from_raw(body.width, body.height, pixels).unwrap();
+        let mut png = Vec::new();
+        ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut png),
+            img.as_raw(),
+            body.width,
+            body.height,
+            image::ColorType::L8,
+        )
+        .unwrap();
+        (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "image/png")],
+            axum::body::Body::from(png),
+        )
+    }
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/render", post(capturing_render))
+        .with_state(Arc::clone(&captured));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let sidecar_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("test.db");
+    let tpl = tmp.path().join("templates");
+    std::fs::create_dir_all(&tpl).unwrap();
+    let layout_store = Arc::new(LayoutStore::open(&db).unwrap());
+    let instance_store = Arc::new(InstanceStore::open(&db).unwrap());
+    let engine = Arc::new(TemplateEngine::new(&tpl).unwrap());
+    let manifest =
+        Arc::new(FontsManifest::load_from(Path::new("fonts/fonts.json")).unwrap());
+
+    let compositor = Compositor::new(
+        engine,
+        Arc::clone(&instance_store),
+        Arc::clone(&layout_store),
+        sidecar_url,
+        Arc::clone(&manifest),
+        "http://localhost:9090".to_string(),
+    );
+
+    let config = DisplayConfiguration {
+        name: "t".to_string(),
+        items: vec![LayoutItem::StaticText {
+            id: "txt-1".to_string(),
+            z_index: 0,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+            text_content: "hi".to_string(),
+            font_size: 24,
+            orientation: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_family: Some("Inter".to_string()),
+            parent_id: None,
+        }],
+    };
+
+    let _png = compositor.compose(&config, "einkPreview").await.unwrap();
+
+    let bodies = captured.lock().unwrap();
+    assert!(!bodies.is_empty(), "sidecar must have been called");
+    let html = &bodies[0];
+    assert!(
+        html.contains("@font-face"),
+        "wrapped HTML must include @font-face; got:\n{html}"
+    );
+    assert!(
+        html.contains("font-family: \"Inter\""),
+        "wrapped HTML must declare Inter; got:\n{html}"
+    );
+}
+
+/// Red 4: the compositor must emit `@font-face` CSS covering every curated
+/// family before handing HTML to the sidecar, otherwise Chromium renders
+/// with system fonts and user font selections are silently ignored.
+///
+/// Tests the standalone manifest → CSS conversion (the compositor's
+/// integration is tested separately through a mock-sidecar capture).
+#[test]
+fn font_face_css_covers_all_five_families_and_uses_base_url() {
+    let manifest = cascades::fonts::FontsManifest::load_from(Path::new("fonts/fonts.json"))
+        .expect("manifest must load");
+
+    let base_url = "http://localhost:9090";
+    let css = manifest.to_font_face_css(base_url);
+
+    // Every family must appear as an @font-face declaration.
+    for family_name in [
+        "Inter",
+        "IBM Plex Sans",
+        "DM Serif Display",
+        "JetBrains Mono",
+        "Space Grotesk",
+    ] {
+        // Accept either single-quote or double-quote style.
+        let single = format!("font-family: '{family_name}'");
+        let double = format!("font-family: \"{family_name}\"");
+        assert!(
+            css.contains(&single) || css.contains(&double),
+            "@font-face must declare family {family_name:?}; got:\n{css}"
+        );
+    }
+
+    // URLs must be absolute and rooted at the supplied base_url so Chromium
+    // in the sidecar (potentially on a different host loopback) can fetch.
+    assert!(
+        css.contains(&format!("{base_url}/fonts/inter/400.woff2")),
+        "@font-face src must use absolute URL under base_url; got:\n{css}"
+    );
+
+    // Total @font-face count should match the manifest (9 files: 5 families,
+    // DM Serif Display has 1 weight, the others have 2).
+    let face_count = css.matches("@font-face").count();
+    assert_eq!(
+        face_count, 9,
+        "expected 9 @font-face blocks (one per manifest file); found {face_count}"
+    );
+}
+
+/// Red 5: wrapping produces a full HTML document that embeds the @font-face
+/// CSS ahead of the inner payload, so Puppeteer's `networkidle0` wait resolves
+/// only after the curated fonts are fetched.
+#[test]
+fn wrap_html_embeds_font_face_and_preserves_inner() {
+    let manifest = cascades::fonts::FontsManifest::load_from(Path::new("fonts/fonts.json"))
+        .expect("manifest must load");
+    let inner = "<div class=\"marker\">hello</div>";
+    let wrapped = manifest.wrap_html(inner, "http://localhost:9090");
+
+    assert!(wrapped.starts_with("<!DOCTYPE html>"), "must be a full document");
+    assert!(wrapped.contains("@font-face"), "must include @font-face CSS");
+    assert!(
+        wrapped.contains("font-family: \"Inter\""),
+        "@font-face must name Inter; got:\n{wrapped}"
+    );
+    assert!(
+        wrapped.contains(inner),
+        "inner HTML must appear verbatim after wrapping"
+    );
+    // The @font-face block must precede the inner content, so Chromium has
+    // the faces registered before it parses the styled elements.
+    let face_idx = wrapped.find("@font-face").unwrap();
+    let inner_idx = wrapped.find(inner).unwrap();
+    assert!(
+        face_idx < inner_idx,
+        "@font-face must appear before inner HTML"
     );
 }
 
