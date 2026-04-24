@@ -172,6 +172,62 @@
     }
     .palette-item:hover { border-color: #58a6ff; }
     .palette-item:active { cursor: grabbing; }
+
+    /* Phase 6b: asset library entries. Smaller than palette-items because
+       there can be many of them; thumbnail-driven so users recognize uploads
+       at a glance. */
+    .asset-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px;
+      margin-bottom: 4px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      cursor: grab;
+      user-select: none;
+    }
+    .asset-item:hover { border-color: #58a6ff; }
+    .asset-item:active { cursor: grabbing; }
+    .asset-thumb {
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+      object-fit: contain;
+      background: #fff;
+      border: 1px solid #30363d;
+      border-radius: 3px;
+      /* CSS-side drag block — backstop for the draggable="false" attribute. */
+      -webkit-user-drag: none;
+      user-select: none;
+      pointer-events: none;
+    }
+    .asset-name {
+      font-size: 11px;
+      color: #c9d1d9;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .asset-empty {
+      color: #484f58;
+      padding: 6px;
+      font-size: 11px;
+      font-style: italic;
+    }
+    .asset-upload-btn {
+      display: block;
+      text-align: center;
+      padding: 6px;
+      border: 1px dashed #30363d;
+      border-radius: 4px;
+      color: #8b949e;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .asset-upload-btn:hover { border-color: #58a6ff; color: #58a6ff; }
     .palette-item-name {
       font-weight: bold;
       color: #58a6ff;
@@ -673,6 +729,20 @@
         <div class="palette-item-name">Data Field</div>
       </div>
     </div>
+
+    <!-- Phase 6b: asset library. PNG / JPEG up to 1 MiB; drag onto canvas
+         to drop a LayoutItem::Image bound to that asset. -->
+    <div class="palette-section-header" style="margin-top:12px">ASSETS</div>
+    <div id="asset-list">
+      <div class="asset-empty">Loading...</div>
+    </div>
+    <div style="margin-top:8px">
+      <label class="asset-upload-btn" for="asset-file-input">+ Upload PNG/JPEG</label>
+      <input id="asset-file-input" type="file"
+             accept="image/png,image/jpeg"
+             style="display:none"
+             onchange="onAssetFilePicked(event)">
+    </div>
   </div>
 
   <!-- Outliner panel -->
@@ -897,6 +967,10 @@ let canvasScale = 1;
 let dragCtx = null;
 let resizeCtx = null;
 let cachedPlugins = [];
+// Phase 6b: cached asset summaries from GET /api/admin/assets. Re-fetched on
+// boot, after every successful upload, and whenever the property inspector
+// needs an "asset swap" dropdown.
+let cachedAssets = [];
 
 // ────────────────────────────────────────
 // Init
@@ -958,6 +1032,7 @@ window.addEventListener('DOMContentLoaded', () => {
   canvas.addEventListener('touchend', onCanvasTouchEnd, false);
 
   loadLayouts();
+  refreshAssets();  // Phase 6b: populate the asset library on boot.
 });
 
 // ────────────────────────────────────────
@@ -988,7 +1063,12 @@ function toCanvas(e) {
 // ────────────────────────────────────────
 function apiFetch(url, opts) {
   const o = opts || {};
-  const headers = Object.assign({ 'Content-Type': 'application/json' }, o.headers || {});
+  // For FormData bodies (Phase 6b uploads), the browser must set the
+  // Content-Type header itself so it includes the multipart boundary; setting
+  // a fixed JSON content-type would break the upload.
+  const isFormData = (typeof FormData !== 'undefined') && (o.body instanceof FormData);
+  const baseHeaders = isFormData ? {} : { 'Content-Type': 'application/json' };
+  const headers = Object.assign(baseHeaders, o.headers || {});
   return fetch(url, Object.assign({}, o, { headers, credentials: 'same-origin' }));
 }
 
@@ -1322,6 +1402,90 @@ async function loadPlugins() {
 function onLayoutChange(id) { loadLayout(id); }
 
 // ────────────────────────────────────────
+// Phase 6b: asset library
+// ────────────────────────────────────────
+// Pull the latest asset summaries from the server, cache them, and re-render
+// the palette ASSETS section. The library is in-memory only; uploaded bytes
+// live server-side and stream over /api/assets/{id} on demand.
+async function refreshAssets() {
+  try {
+    const res = await apiFetch('/api/admin/assets');
+    if (!res.ok) {
+      document.getElementById('asset-list').innerHTML =
+        '<div class="asset-empty" style="color:#f85149">Failed (' + res.status + ')</div>';
+      return;
+    }
+    cachedAssets = await res.json();
+    renderAssetList();
+    // If the property inspector is open on an image, re-render so its asset
+    // dropdown reflects the new list.
+    if (state.selectedId) renderProps();
+  } catch (e) {
+    document.getElementById('asset-list').innerHTML =
+      '<div class="asset-empty" style="color:#f85149">' + esc(e.message) + '</div>';
+  }
+}
+
+function renderAssetList() {
+  const el = document.getElementById('asset-list');
+  if (!el) return;
+  if (!cachedAssets.length) {
+    el.innerHTML = '<div class="asset-empty">No assets yet. Upload below.</div>';
+    return;
+  }
+  el.innerHTML = cachedAssets.map(function(a) {
+    const safeId = esc(a.id);
+    const safeName = esc(a.filename);
+    return '<div class="asset-item" draggable="true" ' +
+      // The drop handler reads {type:"asset", id:"asset-…"} from the
+      // dataTransfer payload and creates a LayoutItem::Image.
+      'ondragstart="onPaletteDragStart(event,{type:\'asset\',id:\'' + safeId + '\'})" ' +
+      'title="' + safeName + '">' +
+      // draggable="false" on the inner <img>: without it, browsers' native
+      // image-drag intercepts and drags a ghost of the image instead of
+      // firing the parent .asset-item ondragstart. This bug is silent —
+      // the user sees no drag-shadow on .asset-item and a phantom image
+      // ghost — so it's worth pinning down in CSS as well as HTML.
+      '<img class="asset-thumb" src="/api/assets/' + safeId + '" alt="" draggable="false">' +
+      '<div class="asset-name">' + safeName + '</div>' +
+      '</div>';
+  }).join('');
+}
+
+// File-input change handler — POSTs the picked file to /api/admin/assets.
+// On success, refreshes the cache so the upload appears in the palette.
+async function onAssetFilePicked(e) {
+  const input = e.target;
+  const file = input.files && input.files[0];
+  if (!file) return;
+  // Defensive: enforce the same 1 MiB cap the server enforces, with a
+  // friendlier error than waiting for axum's 413.
+  if (file.size > 1024 * 1024) {
+    showToast('Asset exceeds 1 MiB cap', 'error');
+    input.value = '';
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', file);
+  showToast('Uploading ' + file.name + '…', 'info');
+  try {
+    const res = await apiFetch('/api/admin/assets', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const msg = await res.text();
+      showToast('Upload failed: ' + msg, 'error');
+      return;
+    }
+    showToast('Uploaded ' + file.name, 'success');
+    await refreshAssets();
+  } catch (err) {
+    showToast('Upload error: ' + err.message, 'error');
+  } finally {
+    // Reset the input so picking the same file twice still fires `change`.
+    input.value = '';
+  }
+}
+
+// ────────────────────────────────────────
 // Item conversion
 // ────────────────────────────────────────
 function apiToItems(apiItems) {
@@ -1349,6 +1513,8 @@ function apiToItems(apiItems) {
       font_family:      item.font_family         || '',
       // null/empty → render at compositor default ("#000"); preserved as null on save.
       color:            item.color               || null,
+      // Phase 6: foreign key into AssetStore for image items.
+      asset_id:         item.asset_id            || null,
       parent_id:        item.parent_id           || null,
       background:       item.background          || null,
     };
@@ -1383,6 +1549,8 @@ function itemsToPayload(items) {
       font_family:         isTextLike ? (item.font_family || null) : null,
       // null preserves the "use compositor default" contract; #000 means user chose black.
       color:               isTextLike ? (item.color || null) : null,
+      // Phase 6: only image items emit asset_id; backend rejects images without it.
+      asset_id:            item.type === 'image' ? (item.asset_id || null) : null,
       parent_id:           item.parent_id || null,
       background:          isGroup ? (item.background || null) : null,
     };
@@ -1585,6 +1753,19 @@ async function onCanvasDrop(e) {
   } else if (data.type === 'data_field') {
     state.pendingDrop = c;
     showDataFieldModal();
+  } else if (data.type === 'asset') {
+    // Phase 6b: create a LayoutItem::Image bound to the dropped asset.
+    // Default 200×150 box; user resizes via the standard handles.
+    pushItem({
+      id: uid(), type: 'image', z_index: nextZ(),
+      x: c.x, y: c.y, w: 200, h: 150,
+      asset_id: data.id,
+      // Filler fields the universal payload-builder reads but doesn't
+      // emit for this type — kept here for editor-state consistency.
+      plugin_id: '', variant: 'full',
+      text: '', font_size: 24, orientation: 'horizontal',
+    });
+    selectItem(state.items[state.items.length - 1].id);
   }
 }
 
@@ -2009,6 +2190,9 @@ const COLORS = {
   static_datetime: { bg: 'rgba(136,100,232,0.22)', border: '#8864e8' },
   static_divider:  { bg: 'rgba(210,153,34,0.22)',  border: '#d29922' },
   data_field:      { bg: 'rgba(240,136,62,0.22)',   border: '#f0883e' },
+  // Phase 6b: image items get their own colour so the editor outline is
+  // distinguishable when the underlying image is dark/transparent.
+  image:           { bg: 'rgba(255,255,255,0.0)',  border: '#a371f7' },
   group:           { bg: 'rgba(139,148,158,0.08)', border: '#8b949e' },
 };
 
@@ -2066,6 +2250,30 @@ function makeEl(item) {
   label.textContent = itemLabel(item);
   el.appendChild(label);
 
+  // Phase 6b: render the bound asset as a real <img> inside the box so the
+  // editor preview matches what the compositor will paint. Stretch fit
+  // (object-fit:fill) mirrors the compositor's resize-to-box behaviour. The
+  // image goes UNDER the text label (label has higher z-index in CSS) so
+  // the geometry "Image" caption stays readable even on dark assets.
+  if (item.type === 'image' && item.asset_id) {
+    const img = document.createElement('img');
+    img.src = '/api/assets/' + encodeURIComponent(item.asset_id);
+    img.alt = '';
+    img.draggable = false;  // dragging the <img> would steal from the canvas-item drag.
+    img.style.cssText =
+      'position:absolute;left:0;top:0;width:100%;height:100%;' +
+      'object-fit:fill;pointer-events:none;';
+    el.appendChild(img);
+    // Pin the type label as a top-left badge so it sits over the image
+    // without growing the box. .item-label already inherits the parent's
+    // selected outline so the badge moves with the selection state.
+    label.style.cssText +=
+      ';position:absolute;top:0;left:0;' +
+      'background:rgba(13,17,23,0.7);color:#c9d1d9;' +
+      'padding:2px 4px;font-size:10px;border-radius:0 0 3px 0;' +
+      'pointer-events:none;';
+  }
+
   // Show resize handles only in single-select mode to avoid ambiguity.
   if (isSelected && state.selectedIds.length === 1) {
     ['nw','n','ne','e','se','s','sw','w'].forEach(function(h) {
@@ -2090,6 +2298,11 @@ function itemLabel(item) {
   if (item.type === 'group') {
     var bg = item.background ? ' [' + item.background + ']' : '';
     return '\u25A2 ' + (item.label || 'Group') + bg;
+  }
+  if (item.type === 'image') {
+    // Look up the cached filename for a friendlier badge than the raw id.
+    const a = cachedAssets.find(function(x) { return x.id === item.asset_id; });
+    return '\u{1F5BC} ' + (a ? a.filename : (item.asset_id || 'no asset'));
   }
   return item.type;
 }
@@ -2162,6 +2375,22 @@ function renderProps() {
       '<input type="text" value="' + esc(item.label || '') + '" oninput="updateProp(\'label\',this.value)">' +
       '<label>Background</label>' +
       '<select onchange="updateGroupBackground(this.value)">' + bgOpts + '</select>';
+  } else if (item.type === 'image') {
+    // Asset-swap dropdown: lists all uploaded assets so the user can rebind
+    // an Image item to a different asset without re-dragging from the palette.
+    const opts = cachedAssets.map(function(a) {
+      const sel = a.id === item.asset_id ? ' selected' : '';
+      return '<option value="' + esc(a.id) + '"' + sel + '>' + esc(a.filename) + '</option>';
+    }).join('');
+    const current = cachedAssets.find(function(a) { return a.id === item.asset_id; });
+    const meta = current
+      ? esc(current.mime + ' · ' + Math.round(current.size / 1024) + ' KB')
+      : '<span style="color:#f85149">unknown asset_id — pick one below</span>';
+    typeFields =
+      '<label>Asset</label>' +
+      '<select onchange="updateProp(\'asset_id\',this.value)">' + opts + '</select>' +
+      '<label>Info</label>' +
+      '<div style="font-size:11px;color:#8b949e">' + meta + '</div>';
   }
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
