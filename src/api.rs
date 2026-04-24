@@ -202,7 +202,46 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/fields/{id}", put(admin_update_field))
         .route("/api/admin/fields/{id}", delete(admin_delete_field))
         .route("/api/admin/sources/{id}/data", get(admin_get_source_data))
+        // Curated-font bundle — served to both the sidecar (for @font-face)
+        // and the admin UI picker from ./fonts/ relative to the server's CWD.
+        .route("/fonts/{*path}", get(serve_font))
         .with_state(state)
+}
+
+/// `GET /fonts/*path` — serve a bundled font file (or the fonts.json manifest)
+/// from the `fonts/` directory. Rejects path traversal. Content-type is
+/// inferred from extension.
+async fn serve_font(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if path.contains("..") || path.starts_with('/') {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    }
+
+    let content_type = if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".ttf") {
+        "font/ttf"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    };
+
+    let full = std::path::Path::new("fonts").join(&path);
+    match tokio::fs::read(&full).await {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, content_type)],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
