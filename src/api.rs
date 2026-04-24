@@ -202,7 +202,46 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/fields/{id}", put(admin_update_field))
         .route("/api/admin/fields/{id}", delete(admin_delete_field))
         .route("/api/admin/sources/{id}/data", get(admin_get_source_data))
+        // Curated-font bundle — served to both the sidecar (for @font-face)
+        // and the admin UI picker from ./fonts/ relative to the server's CWD.
+        .route("/fonts/{*path}", get(serve_font))
         .with_state(state)
+}
+
+/// `GET /fonts/*path` — serve a bundled font file (or the fonts.json manifest)
+/// from the `fonts/` directory. Rejects path traversal. Content-type is
+/// inferred from extension.
+async fn serve_font(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if path.contains("..") || path.starts_with('/') {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    }
+
+    let content_type = if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".ttf") {
+        "font/ttf"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    };
+
+    let full = std::path::Path::new("fonts").join(&path);
+    match tokio::fs::read(&full).await {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, content_type)],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -638,6 +677,10 @@ struct ItemPayload {
     underline: Option<bool>,
     #[serde(default)]
     font_family: Option<String>,
+    /// CSS hex color for style-bearing items (StaticText / StaticDateTime /
+    /// DataField). `None` → compositor default (`#000`).
+    #[serde(default)]
+    color: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -672,6 +715,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                color: self.color,
                 parent_id: self.parent_id,
             }),
             "static_datetime" => Ok(LayoutItem::StaticDateTime {
@@ -688,6 +732,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                color: self.color,
                 parent_id: self.parent_id,
             }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
@@ -718,6 +763,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                color: self.color,
                 parent_id: self.parent_id,
             }),
             "group" => Ok(LayoutItem::Group {
@@ -2129,11 +2175,17 @@ mod tests {
         seed_from_config(&instance_store, &config).unwrap();
 
         let template_engine = Arc::new(TemplateEngine::new(&templates_dir).unwrap());
+        let fonts_manifest = Arc::new(
+            crate::fonts::FontsManifest::load_from(std::path::Path::new("fonts/fonts.json"))
+                .expect("test fonts manifest"),
+        );
         let compositor = Arc::new(Compositor::new(
             Arc::clone(&template_engine),
             Arc::clone(&instance_store),
             Arc::clone(&layout_store),
             "http://localhost:3001".to_string(),
+            fonts_manifest,
+            "http://localhost:9090".to_string(),
         ));
 
         let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
@@ -2310,11 +2362,17 @@ mod tests {
         seed_from_config(&instance_store, &config).unwrap();
 
         let template_engine = Arc::new(TemplateEngine::new(&templates_dir).unwrap());
+        let fonts_manifest = Arc::new(
+            crate::fonts::FontsManifest::load_from(std::path::Path::new("fonts/fonts.json"))
+                .expect("test fonts manifest"),
+        );
         let compositor = Arc::new(Compositor::new(
             Arc::clone(&template_engine),
             Arc::clone(&instance_store),
             Arc::clone(&layout_store),
             "http://localhost:3001".to_string(),
+            fonts_manifest,
+            "http://localhost:9090".to_string(),
         ));
 
         let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
@@ -2775,6 +2833,7 @@ mod tests {
                 italic: None,
                 underline: None,
                 font_family: None,
+                color: None,
                 parent_id: None,
             }],
             updated_at: 0,

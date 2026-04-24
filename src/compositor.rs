@@ -27,11 +27,27 @@ use thiserror::Error;
 use tokio::task;
 
 use crate::config::DisplayConfigEntry;
+use crate::fonts::FontsManifest;
 use crate::format::apply_format;
 use crate::instance_store::InstanceStore;
 use crate::jsonpath::{jsonpath_extract, value_to_string};
 use crate::layout_store::{LayoutItem, LayoutStore};
 use crate::template::{NowContext, RenderContext, TemplateEngine};
+
+/// Bundles the curated-font manifest and the URL Chromium should use to fetch
+/// font files, so the compositor can wrap every sidecar payload with
+/// `<head><style>@font-face…</style></head>` in one place.
+#[derive(Clone)]
+pub(crate) struct FontsWrap {
+    pub manifest: Arc<FontsManifest>,
+    pub base_url: String,
+}
+
+impl FontsWrap {
+    fn wrap(&self, inner: &str) -> String {
+        self.manifest.wrap_html(inner, &self.base_url)
+    }
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -221,6 +237,8 @@ pub struct Compositor {
     layout_store: Arc<LayoutStore>,
     /// Base URL of the Bun render sidecar, e.g. `"http://localhost:3001"`.
     sidecar_url: String,
+    /// Curated fonts + URL base the sidecar should hit to fetch them.
+    fonts: FontsWrap,
 }
 
 impl Compositor {
@@ -228,17 +246,27 @@ impl Compositor {
     ///
     /// `sidecar_url` is the base URL of the Bun render sidecar
     /// (e.g. `"http://localhost:3001"`).
+    ///
+    /// `fonts_manifest` + `font_base_url` are used to wrap every HTML payload
+    /// sent to the sidecar with `@font-face` declarations, so user-selected
+    /// curated fonts actually render.
     pub fn new(
         template_engine: Arc<TemplateEngine>,
         instance_store: Arc<InstanceStore>,
         layout_store: Arc<LayoutStore>,
         sidecar_url: impl Into<String>,
+        fonts_manifest: Arc<FontsManifest>,
+        font_base_url: impl Into<String>,
     ) -> Self {
         Compositor {
             template_engine,
             instance_store,
             layout_store,
             sidecar_url: sidecar_url.into(),
+            fonts: FontsWrap {
+                manifest: fonts_manifest,
+                base_url: font_base_url.into(),
+            },
         }
     }
 
@@ -286,9 +314,10 @@ impl Compositor {
                         let store = Arc::clone(&self.instance_store);
                         let url = self.sidecar_url.clone();
                         let mode = render_mode.to_string();
+                        let fonts = self.fonts.clone();
                         let idx = handles.len();
                         handles.push(task::spawn(async move {
-                            render_slot(slot, engine, store, url, mode).await
+                            render_slot(slot, engine, store, url, mode, fonts).await
                         }));
                         Some(idx)
                     }
@@ -303,6 +332,7 @@ impl Compositor {
                     italic,
                     underline,
                     font_family,
+                    color,
                     ..
                 } => {
                     let text = text_content.clone();
@@ -317,10 +347,12 @@ impl Compositor {
                         italic: italic.unwrap_or(false),
                         underline: underline.unwrap_or(false),
                         font_family: font_family.clone(),
+                        color: color.clone(),
                     };
+                    let fonts = self.fonts.clone();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_text(&text, fs, w, h, &url, &iid, &mode, &fmt).await
+                        render_static_text(&text, fs, w, h, &url, &iid, &mode, &fmt, &fonts).await
                     }));
                     Some(idx)
                 }
@@ -334,6 +366,7 @@ impl Compositor {
                     italic,
                     underline,
                     font_family,
+                    color,
                     ..
                 } => {
                     let fmt_str = format.clone();
@@ -348,10 +381,15 @@ impl Compositor {
                         italic: italic.unwrap_or(false),
                         underline: underline.unwrap_or(false),
                         font_family: font_family.clone(),
+                        color: color.clone(),
                     };
+                    let fonts = self.fonts.clone();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
-                        render_static_datetime(fmt_str.as_deref(), fs, w, h, &url, &iid, &mode, &fmt).await
+                        render_static_datetime(
+                            fmt_str.as_deref(), fs, w, h, &url, &iid, &mode, &fmt, &fonts,
+                        )
+                        .await
                     }));
                     Some(idx)
                 }
@@ -367,6 +405,7 @@ impl Compositor {
                     italic,
                     underline,
                     font_family,
+                    color,
                     ..
                 } => {
                     let w = (*width).max(0) as u32;
@@ -383,9 +422,11 @@ impl Compositor {
                         italic: italic.unwrap_or(false),
                         underline: underline.unwrap_or(false),
                         font_family: font_family.clone(),
+                        color: color.clone(),
                     };
                     let layout_store = Arc::clone(&self.layout_store);
                     let instance_store = Arc::clone(&self.instance_store);
+                    let fonts = self.fonts.clone();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
                         render_data_field(
@@ -393,6 +434,7 @@ impl Compositor {
                             &url, &iid, &mode,
                             layout_store, instance_store,
                             &fmt,
+                            &fonts,
                         )
                         .await
                     }));
@@ -428,6 +470,7 @@ async fn render_slot(
     store: Arc<InstanceStore>,
     sidecar_url: String,
     mode: String,
+    fonts: FontsWrap,
 ) -> Result<Vec<u8>, CompositorError> {
     let id = slot.plugin_instance_id.clone();
     let store2 = Arc::clone(&store);
@@ -472,7 +515,16 @@ async fn render_slot(
 
     let html = engine.render(&template_name, &ctx)?;
     let (render_w, render_h) = slot.layout_variant.canonical_dimensions();
-    call_sidecar(&sidecar_url, html, render_w, render_h, &slot.plugin_instance_id, &mode).await
+    call_sidecar(
+        &sidecar_url,
+        html,
+        render_w,
+        render_h,
+        &slot.plugin_instance_id,
+        &mode,
+        &fonts,
+    )
+    .await
 }
 
 fn json_object_to_map(
@@ -493,6 +545,8 @@ pub(crate) struct TextFormat {
     pub italic: bool,
     pub underline: bool,
     pub font_family: Option<String>,
+    /// CSS hex color, e.g. "#ff0000". `None` → caller's default (typically #000).
+    pub color: Option<String>,
 }
 
 impl TextFormat {
@@ -516,6 +570,14 @@ impl TextFormat {
         }
         css
     }
+
+    /// The CSS `color:` value to apply, falling back to `#000`.
+    fn color_css(&self) -> &str {
+        self.color
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("#000")
+    }
 }
 
 // ─── Static text render ──────────────────────────────────────────────────────
@@ -534,19 +596,21 @@ async fn render_static_text(
     item_id: &str,
     mode: &str,
     format: &TextFormat,
+    fonts: &FontsWrap,
 ) -> Result<Vec<u8>, CompositorError> {
     let safe = html_escape(text);
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
          justify-content:center;{tf}font-size:{fs}px;\
-         color:#000;background:white;'>{text}</div>",
+         color:{color};background:white;'>{text}</div>",
         w = width,
         h = height,
         fs = font_size,
         tf = format.css(),
+        color = format.color_css(),
         text = safe,
     );
-    call_sidecar(sidecar_url, html, width, height, item_id, mode).await
+    call_sidecar(sidecar_url, html, width, height, item_id, mode, fonts).await
 }
 
 // ─── Static datetime render ─────────────────────────────────────────────────
@@ -565,6 +629,7 @@ async fn render_static_datetime(
     item_id: &str,
     mode: &str,
     text_format: &TextFormat,
+    fonts: &FontsWrap,
 ) -> Result<Vec<u8>, CompositorError> {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -579,14 +644,15 @@ async fn render_static_datetime(
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
          justify-content:center;{tf}font-size:{fs}px;\
-         color:#000;background:white;'>{text}</div>",
+         color:{color};background:white;'>{text}</div>",
         w = width,
         h = height,
         fs = font_size,
         tf = text_format.css(),
+        color = text_format.color_css(),
         text = safe,
     );
-    call_sidecar(sidecar_url, html, width, height, item_id, mode).await
+    call_sidecar(sidecar_url, html, width, height, item_id, mode, fonts).await
 }
 
 // ─── Data field render ──────────────────────────────────────────────────────
@@ -610,6 +676,7 @@ async fn render_data_field(
     layout_store: Arc<LayoutStore>,
     instance_store: Arc<InstanceStore>,
     text_format: &TextFormat,
+    fonts: &FontsWrap,
 ) -> Result<Vec<u8>, CompositorError> {
     let fmid = field_mapping_id.to_string();
     let ls = Arc::clone(&layout_store);
@@ -692,13 +759,14 @@ async fn render_data_field(
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;flex-direction:column;\
          align-items:center;justify-content:center;font-family:{family};\
-         color:#000;background:white;'>{content}</div>",
+         color:{color};background:white;'>{content}</div>",
         w = width,
         h = height,
         family = family,
+        color = text_format.color_css(),
         content = content,
     );
-    call_sidecar(sidecar_url, html, width, height, item_id, mode).await
+    call_sidecar(sidecar_url, html, width, height, item_id, mode, fonts).await
 }
 
 /// Escape `&`, `<`, `>`, and `"` for safe HTML embedding.
@@ -723,10 +791,15 @@ async fn call_sidecar(
     height: u32,
     slot_id: &str,
     mode: &str,
+    fonts: &FontsWrap,
 ) -> Result<Vec<u8>, CompositorError> {
     let url = format!("{}/render", base_url);
     let slot_id = slot_id.to_string();
     let mode = mode.to_string();
+
+    // Wrap in a full HTML document with @font-face declarations so Chromium
+    // can fetch and apply the curated fonts before screenshotting.
+    let html = fonts.wrap(&html);
 
     let body = serde_json::json!({
         "html": html,
@@ -1096,6 +1169,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    color: None,
                     parent_id: None,
                 },
                 LayoutItem::StaticDivider {
@@ -1254,6 +1328,7 @@ mod tests {
             italic: None,
             underline: None,
             font_family: None,
+            color: None,
             parent_id: None,
         };
 
@@ -1427,6 +1502,7 @@ mod tests {
             italic: true,
             underline: true,
             font_family: Some("Georgia, serif".to_string()),
+            color: None,
         };
         let css = fmt.css();
         assert!(css.contains("font-family:Georgia, serif;"));

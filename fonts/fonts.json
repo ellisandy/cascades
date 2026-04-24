@@ -1,0 +1,54 @@
+{
+  "$comment": "Curated-font manifest for Cascades. Single source of truth consumed by the Rust /fonts/* route, the sidecar's @font-face builder, and the admin UI font picker. All files are SIL OFL — see ./LICENSE.",
+  "families": [
+    {
+      "name": "Inter",
+      "slug": "inter",
+      "css_stack": "\"Inter\", system-ui, sans-serif",
+      "category": "sans-serif",
+      "files": [
+        { "path": "inter/400.woff2", "weight": 400, "style": "normal" },
+        { "path": "inter/700.woff2", "weight": 700, "style": "normal" }
+      ]
+    },
+    {
+      "name": "IBM Plex Sans",
+      "slug": "ibm-plex-sans",
+      "css_stack": "\"IBM Plex Sans\", system-ui, sans-serif",
+      "category": "sans-serif",
+      "files": [
+        { "path": "ibm-plex-sans/400.woff2", "weight": 400, "style": "normal" },
+        { "path": "ibm-plex-sans/700.woff2", "weight": 700, "style": "normal" }
+      ]
+    },
+    {
+      "name": "DM Serif Display",
+      "slug": "dm-serif-display",
+      "css_stack": "\"DM Serif Display\", Georgia, serif",
+      "category": "serif",
+      "files": [
+        { "path": "dm-serif-display/400.woff2", "weight": 400, "style": "normal" }
+      ]
+    },
+    {
+      "name": "JetBrains Mono",
+      "slug": "jetbrains-mono",
+      "css_stack": "\"JetBrains Mono\", ui-monospace, monospace",
+      "category": "monospace",
+      "files": [
+        { "path": "jetbrains-mono/400.woff2", "weight": 400, "style": "normal" },
+        { "path": "jetbrains-mono/700.woff2", "weight": 700, "style": "normal" }
+      ]
+    },
+    {
+      "name": "Space Grotesk",
+      "slug": "space-grotesk",
+      "css_stack": "\"Space Grotesk\", system-ui, sans-serif",
+      "category": "sans-serif",
+      "files": [
+        { "path": "space-grotesk/400.woff2", "weight": 400, "style": "normal" },
+        { "path": "space-grotesk/700.woff2", "weight": 700, "style": "normal" }
+      ]
+    }
+  ]
+}

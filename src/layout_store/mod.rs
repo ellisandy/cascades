@@ -96,6 +96,9 @@ pub enum LayoutItem {
         underline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        /// CSS hex color, e.g. "#ff0000". `None` → compositor default (`#000`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
     },
@@ -119,6 +122,9 @@ pub enum LayoutItem {
         underline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        /// CSS hex color, e.g. "#ff0000". `None` → compositor default (`#000`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
     },
@@ -158,6 +164,9 @@ pub enum LayoutItem {
         underline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        /// CSS hex color, e.g. "#ff0000". `None` → compositor default (`#000`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
     },
@@ -303,6 +312,8 @@ impl LayoutStore {
             ("font_family", "TEXT"),
             ("parent_id", "TEXT"),
             ("background", "TEXT"),
+            // Phase 5: per-item foreground color (CSS hex, e.g. "#ff0000").
+            ("color", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -367,7 +378,7 @@ impl LayoutStore {
                     plugin_instance_id, layout_variant, text_content, font_size, orientation,
                     field_mapping_id, format_string, label,
                     bold, italic, underline, font_family,
-                    parent_id, background
+                    parent_id, background, color
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -396,6 +407,7 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(18)?,
                 row.get::<_, Option<String>>(19)?,
                 row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -405,7 +417,7 @@ impl LayoutStore {
              plugin_instance_id, layout_variant, text_content, font_size, orientation,
              field_mapping_id, format_string, label,
              bold, italic, underline, font_family,
-             parent_id, background) in rows
+             parent_id, background, color) in rows
         {
             let bold = bold.map(|v| v != 0);
             let italic = italic.map(|v| v != 0);
@@ -437,6 +449,7 @@ impl LayoutStore {
                     italic,
                     underline,
                     font_family,
+                    color: color.clone(),
                     parent_id,
                 },
                 "static_datetime" => LayoutItem::StaticDateTime {
@@ -453,6 +466,7 @@ impl LayoutStore {
                     italic,
                     underline,
                     font_family,
+                    color: color.clone(),
                     parent_id,
                 },
                 "static_divider" => LayoutItem::StaticDivider {
@@ -482,6 +496,7 @@ impl LayoutStore {
                     italic,
                     underline,
                     font_family,
+                    color,
                     parent_id,
                 },
                 "group" => LayoutItem::Group {
@@ -541,15 +556,15 @@ impl LayoutStore {
                 }
                 LayoutItem::StaticText {
                     id, z_index, x, y, width, height, text_content, font_size, orientation,
-                    bold, italic, underline, font_family, parent_id,
+                    bold, italic, underline, font_family, color, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           text_content, font_size, orientation,
-                          bold, italic, underline, font_family, parent_id)
+                          bold, italic, underline, font_family, color, parent_id)
                          VALUES (?1, ?2, 'static_text', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                 ?11, ?12, ?13, ?14, ?15)",
+                                 ?11, ?12, ?13, ?14, ?15, ?16)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             text_content, font_size, orientation,
@@ -557,21 +572,22 @@ impl LayoutStore {
                             italic.map(|b| b as i32),
                             underline.map(|b| b as i32),
                             font_family,
+                            color,
                             parent_id,
                         ],
                     )?;
                 }
                 LayoutItem::StaticDateTime {
                     id, z_index, x, y, width, height, font_size, format, orientation,
-                    bold, italic, underline, font_family, parent_id,
+                    bold, italic, underline, font_family, color, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           text_content, font_size, orientation,
-                          bold, italic, underline, font_family, parent_id)
+                          bold, italic, underline, font_family, color, parent_id)
                          VALUES (?1, ?2, 'static_datetime', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                 ?11, ?12, ?13, ?14, ?15)",
+                                 ?11, ?12, ?13, ?14, ?15, ?16)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             format, font_size, orientation,
@@ -579,6 +595,7 @@ impl LayoutStore {
                             italic.map(|b| b as i32),
                             underline.map(|b| b as i32),
                             font_family,
+                            color,
                             parent_id,
                         ],
                     )?;
@@ -598,15 +615,15 @@ impl LayoutStore {
                 LayoutItem::DataField {
                     id, z_index, x, y, width, height,
                     field_mapping_id, font_size, format_string, label, orientation,
-                    bold, italic, underline, font_family, parent_id,
+                    bold, italic, underline, font_family, color, parent_id,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           field_mapping_id, font_size, format_string, label, orientation,
-                          bold, italic, underline, font_family, parent_id)
+                          bold, italic, underline, font_family, color, parent_id)
                          VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                                 ?13, ?14, ?15, ?16, ?17)",
+                                 ?13, ?14, ?15, ?16, ?17, ?18)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             field_mapping_id, font_size, format_string, label, orientation,
@@ -614,6 +631,7 @@ impl LayoutStore {
                             italic.map(|b| b as i32),
                             underline.map(|b| b as i32),
                             font_family,
+                            color,
                             parent_id,
                         ],
                     )?;
@@ -1143,6 +1161,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    color: None,
                     parent_id: None,
                 },
                 LayoutItem::StaticDivider {
@@ -1221,6 +1240,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    color: None,
                     parent_id: None,
                 },
                 LayoutItem::DataField {
@@ -1239,6 +1259,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    color: None,
                     parent_id: None,
                 },
             ],
@@ -1293,6 +1314,7 @@ mod tests {
             italic: None,
             underline: None,
             font_family: None,
+            color: None,
             parent_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
@@ -1321,6 +1343,7 @@ mod tests {
                     italic: Some(true),
                     underline: Some(false),
                     font_family: Some("Georgia, serif".to_string()),
+                    color: None,
                     parent_id: None,
                 },
                 LayoutItem::DataField {
@@ -1336,6 +1359,7 @@ mod tests {
                     italic: None,
                     underline: Some(true),
                     font_family: Some("monospace".to_string()),
+                    color: None,
                     parent_id: None,
                 },
             ],
@@ -1430,7 +1454,7 @@ mod tests {
                     text_content: "Temp".to_string(),
                     font_size: 16,
                     orientation: None,
-                    bold: None, italic: None, underline: None, font_family: None,
+                    bold: None, italic: None, underline: None, font_family: None, color: None,
                     parent_id: Some("g0".to_string()),
                 },
             ],
