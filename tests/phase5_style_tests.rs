@@ -47,6 +47,8 @@ fn make_test_router(base_dir: &Path) -> axum::Router {
         .unwrap();
     let source_store =
         Arc::new(cascades::source_store::SourceStore::open(&db_path).unwrap());
+    let asset_store =
+        Arc::new(cascades::asset_store::AssetStore::open(&db_path).unwrap());
     let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
 
     let state = Arc::new(AppState {
@@ -54,6 +56,7 @@ fn make_test_router(base_dir: &Path) -> axum::Router {
         instance_store,
         layout_store,
         source_store,
+        asset_store,
         scheduler,
         image_cache: Arc::new(RwLock::new(HashMap::<String, Vec<u8>>::new())),
         plugin_registry: cascades::plugin_registry::PluginRegistry::new(),

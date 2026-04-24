@@ -1,4 +1,5 @@
 pub mod api;
+pub mod asset_store;
 pub mod compositor;
 pub mod config;
 pub mod domain;

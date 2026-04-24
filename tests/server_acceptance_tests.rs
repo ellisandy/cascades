@@ -1030,6 +1030,9 @@ fn make_api_app(
     let source_store = Arc::new(
         cascades::source_store::SourceStore::open(&db_path).expect("open source store"),
     );
+    let asset_store = Arc::new(
+        cascades::asset_store::AssetStore::open(&db_path).expect("open asset store"),
+    );
     let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
 
     let state = Arc::new(AppState {
@@ -1037,6 +1040,7 @@ fn make_api_app(
         instance_store,
         layout_store,
         source_store,
+        asset_store,
         scheduler,
         image_cache,
         plugin_registry: cascades::plugin_registry::PluginRegistry::new(),
@@ -1139,6 +1143,9 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
     let source_store = Arc::new(
         cascades::source_store::SourceStore::open(&db_path).unwrap(),
     );
+    let asset_store = Arc::new(
+        cascades::asset_store::AssetStore::open(&db_path).unwrap(),
+    );
     let scheduler = Arc::new(cascades::api::SourceScheduler::new(Arc::clone(&source_store)));
 
     let state = Arc::new(cascades::api::AppState {
@@ -1146,6 +1153,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         instance_store,
         layout_store,
         source_store,
+        asset_store,
         scheduler,
         image_cache: Arc::clone(&image_cache),
         plugin_registry: cascades::plugin_registry::PluginRegistry::new(),

@@ -1,5 +1,6 @@
 use cascades::{
     api::{AppState, SourceScheduler, build_router},
+    asset_store::AssetStore,
     build_sources,
     config::{load_config, load_display_layouts, load_or_create_secrets},
     compositor::Compositor,
@@ -60,6 +61,11 @@ async fn main() {
         SourceStore::open(store_path).expect("failed to open source store"),
     );
 
+    // Open asset store for user-uploaded image assets (Phase 6).
+    let asset_store = Arc::new(
+        AssetStore::open(store_path).expect("failed to open asset store"),
+    );
+
     // Plugin registry — load definitions from config/plugins.d/.
     let plugin_registry = plugin_registry::load_registry(Path::new("config"))
         .unwrap_or_else(|e| {
@@ -90,14 +96,17 @@ async fn main() {
     let server_port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
     let font_base_url = format!("http://localhost:{server_port}");
 
-    let compositor = Arc::new(Compositor::new(
-        Arc::clone(&template_engine),
-        Arc::clone(&instance_store),
-        Arc::clone(&layout_store),
-        sidecar_url.clone(),
-        Arc::clone(&fonts_manifest),
-        font_base_url,
-    ));
+    let compositor = Arc::new(
+        Compositor::new(
+            Arc::clone(&template_engine),
+            Arc::clone(&instance_store),
+            Arc::clone(&layout_store),
+            sidecar_url.clone(),
+            Arc::clone(&fonts_manifest),
+            font_base_url,
+        )
+        .with_asset_store(Arc::clone(&asset_store)),
+    );
 
     let refresh_rate_secs = config
         .server
@@ -160,6 +169,7 @@ async fn main() {
         instance_store,
         layout_store,
         source_store,
+        asset_store,
         scheduler,
         image_cache: Arc::new(RwLock::new(HashMap::new())),
         plugin_registry,
