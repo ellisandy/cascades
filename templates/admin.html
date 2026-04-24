@@ -363,7 +363,27 @@
       color: #58a6ff;
     }
     .outliner-row.group-row { color: #8b949e; font-weight: bold; }
+    .outliner-row.out-of-scope { opacity: 0.3; cursor: default; }
+    .outliner-row.focused-group {
+      background: #1f6feb1a;
+      border-left-color: #58a6ff;
+    }
     .outliner-empty { color: #484f58; padding: 8px; font-style: italic; }
+
+    /* Phase 5b: scope breadcrumb above the canvas. Hidden until a group is
+       focused; shows what's being edited and how to exit. */
+    #scope-breadcrumb {
+      display: none;
+      padding: 6px 12px;
+      background: #1f6feb1a;
+      border: 1px solid #58a6ff;
+      border-radius: 4px;
+      color: #58a6ff;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    #scope-breadcrumb.visible { display: block; }
+    #scope-breadcrumb .hint { color: #8b949e; margin-left: 8px; }
 
     /* ── Preview overlay ── */
     #preview-area {
@@ -666,12 +686,18 @@
 
     <!-- Canvas area -->
     <div id="canvas-area">
+      <!-- Phase 5b: shows the focused group when in "enter group" mode. -->
+      <div id="scope-breadcrumb">
+        <span id="scope-breadcrumb-text"></span>
+        <span class="hint">— double-click background or press Esc to exit</span>
+      </div>
       <div id="canvas-outer">
         <div id="canvas"
              ondragover="onCanvasDragOver(event)"
              ondragleave="onCanvasDragLeave(event)"
              ondrop="onCanvasDrop(event)"
-             onmousedown="onCanvasMouseDown(event)">
+             onmousedown="onCanvasMouseDown(event)"
+             ondblclick="onCanvasDblClick(event)">
         </div>
       </div>
     </div>
@@ -861,6 +887,10 @@ const state = {
   historyIndex: -1,
   snapToGrid: false,
   gridSize: 40,
+  // Phase 5b: "enter group" editing scope. When non-null, items outside the
+  // focused group's subtree are dimmed and non-interactive. Double-click a
+  // group on the canvas (or in the outliner) to enter; Escape exits.
+  focusedGroupId: null,
 };
 
 let canvasScale = 1;
@@ -906,12 +936,18 @@ window.addEventListener('DOMContentLoaded', () => {
       e.preventDefault();
       deleteSelected();
     }
-    // Escape = Deselect
-    else if (e.key === 'Escape' && state.selectedIds.length) {
+    // Escape = Deselect first; second press exits the focused-group scope.
+    // (Industry-standard "deselect before mode-exit" — avoids surprising users
+    // who hit Escape just to clear a marquee while inside a group.)
+    else if (e.key === 'Escape' && (state.selectedIds.length || state.focusedGroupId)) {
       e.preventDefault();
-      clearSelection();
-      renderCanvas();
-      renderProps();
+      if (state.selectedIds.length) {
+        clearSelection();
+        renderCanvas();
+        renderProps();
+      } else if (state.focusedGroupId) {
+        exitGroup();
+      }
     }
   });
 
@@ -1006,6 +1042,7 @@ function undo() {
   }
   state.historyIndex--;
   state.items = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
+  validateFocus();
   renderCanvas();
   renderProps();
   showToast('Undone', 'success');
@@ -1018,6 +1055,7 @@ function redo() {
   }
   state.historyIndex++;
   state.items = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
+  validateFocus();
   renderCanvas();
   renderProps();
   showToast('Redone', 'success');
@@ -1247,6 +1285,7 @@ async function loadLayout(id) {
     state.currentLayoutName = layout.name;
     state.items = apiToItems(layout.items || []);
     clearSelection();
+    state.focusedGroupId = null;  // Reset editing scope on layout change.
     // Reset history for new layout
     state.history = [JSON.parse(JSON.stringify(state.items))];
     state.historyIndex = 0;
@@ -1308,6 +1347,8 @@ function apiToItems(apiItems) {
       italic:           !!item.italic,
       underline:        !!item.underline,
       font_family:      item.font_family         || '',
+      // null/empty → render at compositor default ("#000"); preserved as null on save.
+      color:            item.color               || null,
       parent_id:        item.parent_id           || null,
       background:       item.background          || null,
     };
@@ -1340,6 +1381,8 @@ function itemsToPayload(items) {
       italic:              isTextLike ? !!item.italic    : null,
       underline:           isTextLike ? !!item.underline : null,
       font_family:         isTextLike ? (item.font_family || null) : null,
+      // null preserves the "use compositor default" contract; #000 means user chose black.
+      color:               isTextLike ? (item.color || null) : null,
       parent_id:           item.parent_id || null,
       background:          isGroup ? (item.background || null) : null,
     };
@@ -1517,6 +1560,10 @@ async function onCanvasDrop(e) {
   if (!data) return;
   const c = toCanvas(e);
   if (data.type === 'plugin') {
+    // A plugin drop always creates its own top-level Group; auto-exit any
+    // active editing scope so the new group lands at top level (Phase 5b
+    // disallows nested groups).
+    if (state.focusedGroupId) exitGroup();
     const variant = data.variant || 'full';
     const spawned = await spawnPluginAt(data.id, variant, c.x, c.y);
     if (!spawned) {
@@ -1564,6 +1611,27 @@ function onStaticClick(type) {
 // ────────────────────────────────────────
 // Canvas mouse events
 // ────────────────────────────────────────
+// Double-click a Group element on the canvas → enter that group's editing
+// scope. Double-click on empty canvas while focused → exit. Double-click on a
+// non-group item is a no-op (avoids surprising mode changes from text edits).
+function onCanvasDblClick(e) {
+  const itemEl = e.target.closest && e.target.closest('.canvas-item');
+  if (itemEl) {
+    const it = findItem(itemEl.dataset.id);
+    if (it && it.type === 'group') {
+      e.preventDefault();
+      enterGroup(it.id);
+    }
+    return;
+  }
+  // Empty-canvas double-click while focused: exit. (Discoverability companion
+  // to Escape — users naturally try clicking outside to leave a mode.)
+  if (state.focusedGroupId) {
+    e.preventDefault();
+    exitGroup();
+  }
+}
+
 function onCanvasMouseDown(e) {
   if (e.target.classList.contains('resize-handle')) {
     const itemEl = e.target.closest('.canvas-item');
@@ -1918,6 +1986,21 @@ function renderCanvas() {
   sorted.forEach(function(item) { canvas.appendChild(makeEl(item)); });
   updateCollisionIndicators();
   renderOutliner();
+  renderScopeBreadcrumb();
+}
+
+function renderScopeBreadcrumb() {
+  const bar = document.getElementById('scope-breadcrumb');
+  const txt = document.getElementById('scope-breadcrumb-text');
+  if (!bar || !txt) return;
+  if (state.focusedGroupId) {
+    const g = findItem(state.focusedGroupId);
+    const name = (g && g.label) ? g.label : (g ? 'Group' : 'Unknown group');
+    txt.textContent = 'Editing inside: ' + name;
+    bar.classList.add('visible');
+  } else {
+    bar.classList.remove('visible');
+  }
 }
 
 const COLORS = {
@@ -1932,22 +2015,35 @@ const COLORS = {
 function makeEl(item) {
   const el = document.createElement('div');
   const isSelected = state.selectedIds.indexOf(item.id) >= 0;
-  el.className = 'canvas-item' + (isSelected ? ' selected' : '');
+  const inScope = isInFocusedScope(item);
+  const isFocusedGroup = item.id === state.focusedGroupId;
+  el.className = 'canvas-item' + (isSelected ? ' selected' : '') +
+    (!inScope ? ' out-of-scope' : '') +
+    (isFocusedGroup ? ' focused-group' : '');
   if (item.type === 'group') el.classList.add('group-item');
   el.dataset.id = item.id;
   const col = COLORS[item.type] || { bg: '#21262d', border: '#30363d' };
-  const borderStyle = item.type === 'group' ? '2px dashed ' + col.border : '1px solid ' + col.border;
+  let borderStyle = item.type === 'group' ? '2px dashed ' + col.border : '1px solid ' + col.border;
+  // The focused group gets a brighter solid border so it visually anchors the
+  // editing scope. Children inherit normal styling.
+  if (isFocusedGroup) borderStyle = '2px solid #58a6ff';
   // Group bg preview in the editor: show the card tint when that mode is set
   // so authors can see what will be rendered.
   let bg = col.bg;
   if (item.type === 'group' && item.background === 'card') {
     bg = 'rgba(255,255,255,0.9)';
   }
+  // Dim items outside the current editing scope and disable pointer events so
+  // they're click-inert. The focused group itself stays interactive (you need
+  // to be able to drag it, resize it, exit by dblclicking its background).
+  const dimStyle = (!inScope && !isFocusedGroup)
+    ? 'opacity:0.25;pointer-events:none;' : '';
   el.style.cssText =
     'left:' + item.x + 'px;top:' + item.y + 'px;' +
     'width:' + item.w + 'px;height:' + item.h + 'px;' +
     'z-index:' + item.z_index + ';' +
-    'background:' + bg + ';border:' + borderStyle + ';';
+    'background:' + bg + ';border:' + borderStyle + ';' +
+    dimStyle;
 
   const label = document.createElement('span');
   label.className = 'item-label';
@@ -1963,6 +2059,9 @@ function makeEl(item) {
     if (item.italic)    label.style.fontStyle = 'italic';
     if (item.underline) label.style.textDecoration = 'underline';
     if (item.font_family) label.style.fontFamily = item.font_family;
+    // Mirror compositor's color_css(): null/empty → default (#000 in compositor;
+    // editor inherits from .item-label CSS, which is also dark).
+    if (item.color)     label.style.color = item.color;
   }
   label.textContent = itemLabel(item);
   el.appendChild(label);
@@ -2116,6 +2215,15 @@ function textFormatFields(item) {
       'padding:4px 10px;font-size:12px;cursor:pointer;min-width:32px;" ' +
       'onclick="toggleProp(\'' + key + '\')">' + label + '</button>';
   };
+  // Color: null/empty preserves the "compositor default" contract (compositor
+  // renders #000 but a future theming layer can override it). The picker can't
+  // produce null on its own, so a "default" button explicitly clears the field.
+  const currentColor = item.color || '';
+  const colorPickerVal = currentColor || '#000000';
+  const isDefault = !currentColor;
+  const defaultBtnStyle = isDefault
+    ? 'background:#58a6ff;color:#0d1117;font-weight:bold;'
+    : 'background:#21262d;color:#c9d1d9;';
   return '<label>Format</label>' +
     '<div style="display:flex;gap:4px;">' +
       btn('bold',      '<b>B</b>', 'Bold') +
@@ -2123,7 +2231,18 @@ function textFormatFields(item) {
       btn('underline', '<u>U</u>', 'Underline') +
     '</div>' +
     '<label>Font</label>' +
-    '<select onchange="updateProp(\'font_family\',this.value)">' + fontOpts + '</select>';
+    '<select onchange="updateProp(\'font_family\',this.value)">' + fontOpts + '</select>' +
+    '<label>Color</label>' +
+    '<div style="display:flex;gap:6px;align-items:center;">' +
+      '<input type="color" value="' + esc(colorPickerVal) + '" ' +
+        'oninput="updateColor(this.value)" ' +
+        'style="width:36px;height:28px;padding:0;border:1px solid #30363d;' +
+        'border-radius:4px;background:#21262d;cursor:pointer;">' +
+      '<button type="button" title="Use compositor default (#000)" ' +
+        'onclick="clearColor()" ' +
+        'style="' + defaultBtnStyle + 'border:1px solid #30363d;border-radius:4px;' +
+        'padding:4px 10px;font-size:12px;cursor:pointer;">default</button>' +
+    '</div>';
 }
 
 function updateProp(key, value) {
@@ -2137,6 +2256,25 @@ function toggleProp(key) {
   const item = findItem(state.selectedId);
   if (!item) return;
   item[key] = !item[key];
+  renderCanvas();
+  renderProps();
+}
+
+// Color picker writes the user's chosen hex; an explicit "default" button
+// nulls the field so compositor falls back to #000 (and so a future theming
+// layer can override). Re-render props to flip the "default" button state.
+function updateColor(value) {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  item.color = value;
+  renderCanvas();
+  renderProps();
+}
+
+function clearColor() {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  item.color = null;
   renderCanvas();
   renderProps();
 }
@@ -2170,6 +2308,7 @@ function deleteSelected() {
   saveHistory();
   state.items = state.items.filter(function(i) { return !toDelete.has(i.id); });
   clearSelection();
+  validateFocus();  // Focused group may have just been deleted.
   updateCollisionIndicators();
   renderCanvas();
   renderProps();
@@ -2241,7 +2380,10 @@ function onMarqueeMove(e) {
   // Live update selection: items whose bounding box intersects the marquee.
   const x1 = Math.min(marqueeCtx.sx, c.x), x2 = Math.max(marqueeCtx.sx, c.x);
   const y1 = Math.min(marqueeCtx.sy, c.y), y2 = Math.max(marqueeCtx.sy, c.y);
+  // Marquee respects editing scope: out-of-scope items are dimmed and inert,
+  // so they shouldn't get rubber-band-selected either.
   const hits = state.items.filter(function(it) {
+    if (!isInFocusedScope(it)) return false;
     return it.x < x2 && it.x + it.w > x1 && it.y < y2 && it.y + it.h > y1;
   }).map(function(it) { return it.id; });
   if (marqueeCtx.additive) {
@@ -2712,7 +2854,67 @@ function collectDescendants(parentId, outSet) {
   });
 }
 
+// ────────────────────────────────────────
+// Phase 5b: editing scope ("enter group")
+// ────────────────────────────────────────
+// A scope-aware predicate: when no group is focused, every item is in scope.
+// When focused, the focused group itself + its descendants are in scope; all
+// other items dim and become click-inert.
+function isInFocusedScope(item) {
+  if (!state.focusedGroupId) return true;
+  if (item.id === state.focusedGroupId) return true;
+  // Walk up parent chain looking for the focused group.
+  var pid = item.parent_id;
+  var guard = 0;  // cycle guard — parent_id is user-editable
+  while (pid && guard++ < 64) {
+    if (pid === state.focusedGroupId) return true;
+    var parent = findItem(pid);
+    pid = parent ? parent.parent_id : null;
+  }
+  return false;
+}
+
+function enterGroup(groupId) {
+  const g = findItem(groupId);
+  if (!g || g.type !== 'group') return;
+  // Don't allow nesting focus into a group whose ancestor is already focused —
+  // Phase 5b deliberately keeps focus single-level. Just replace the focus.
+  state.focusedGroupId = groupId;
+  // Selection of items outside the new scope is meaningless; drop them.
+  state.selectedIds = state.selectedIds.filter(function(id) {
+    const it = findItem(id);
+    return it && isInFocusedScope(it);
+  });
+  state.selectedId = state.selectedIds.length
+    ? state.selectedIds[state.selectedIds.length - 1] : null;
+  updateArrangeBar();
+  renderCanvas();
+  renderProps();
+}
+
+function exitGroup() {
+  if (!state.focusedGroupId) return;
+  state.focusedGroupId = null;
+  renderCanvas();
+  renderProps();
+}
+
+// Drop the focus if the focused group no longer exists or stopped being a
+// group. Called after operations that mutate the items array (undo/redo,
+// deletion, ungroup) so the editor never lingers in a stale focus.
+function validateFocus() {
+  if (!state.focusedGroupId) return;
+  const g = findItem(state.focusedGroupId);
+  if (!g || g.type !== 'group') state.focusedGroupId = null;
+}
+
 function groupSelected() {
+  // Phase 5b: nested groups aren't supported — refuse if focused inside one.
+  // Users who want to regroup inside a focused scope can exit first.
+  if (state.focusedGroupId) {
+    showToast('Exit the current group (Esc) before creating a new one', 'error');
+    return;
+  }
   const items = selectedItems();
   if (items.length < 2) {
     showToast('Select at least two items to group', 'error');
@@ -2758,6 +2960,7 @@ function ungroupSelected() {
   });
   state.items = state.items.filter(function(i) { return !gset.has(i.id); });
   clearSelection();
+  validateFocus();  // Focused group may have been the one we just ungrouped.
   renderCanvas();
   renderProps();
   renderOutliner();
@@ -2847,12 +3050,17 @@ function renderOutliner() {
     const list = byParent[pid] || [];
     return list.map(function(it) {
       const isSel = state.selectedIds.indexOf(it.id) >= 0;
+      const inScope = isInFocusedScope(it);
+      const isFocusedGroup = it.id === state.focusedGroupId;
       const cls = 'outliner-row' + (isSel ? ' selected' : '') +
-        (it.type === 'group' ? ' group-row' : '');
+        (it.type === 'group' ? ' group-row' : '') +
+        (!inScope ? ' out-of-scope' : '') +
+        (isFocusedGroup ? ' focused-group' : '');
       const pad = depth * 10 + 8;
       const row =
         '<div class="' + cls + '" data-id="' + esc(it.id) + '" ' +
         'onclick="onOutlinerClick(event, \'' + esc(it.id) + '\')" ' +
+        'ondblclick="onOutlinerDblClick(event, \'' + esc(it.id) + '\')" ' +
         'style="padding-left:' + pad + 'px">' +
         esc(itemLabel(it)) + '</div>';
       return row + (it.type === 'group' ? buildLevel(it.id, depth + 1) : '');
@@ -2862,8 +3070,22 @@ function renderOutliner() {
 }
 
 function onOutlinerClick(e, id) {
+  // Outside the focused scope, clicks are inert — matches canvas behavior so
+  // the user has one consistent mental model of "dimmed = not editable now."
+  const it = findItem(id);
+  if (!it || !isInFocusedScope(it)) return;
   const additive = e.shiftKey || e.metaKey || e.ctrlKey;
   selectItem(id, additive);
+}
+
+function onOutlinerDblClick(e, id) {
+  const it = findItem(id);
+  if (!it) return;
+  if (it.type === 'group') {
+    e.preventDefault();
+    e.stopPropagation();
+    enterGroup(id);
+  }
 }
 
 // ────────────────────────────────────────
@@ -2881,6 +3103,14 @@ function nextZ() {
 
 function pushItem(item) {
   saveHistory();
+  // Phase 5b: when an editing scope is active, new non-group items land
+  // inside the focused group so the user's "I'm editing inside A" mental model
+  // holds. Items that already declare a parent (e.g. plugin-spawn children
+  // pointing at their own new Group) are left alone. Groups themselves are
+  // never auto-reparented — Phase 5b doesn't support nested groups.
+  if (state.focusedGroupId && !item.parent_id && item.type !== 'group') {
+    item.parent_id = state.focusedGroupId;
+  }
   state.items.push(item);
   renderCanvas();
 }

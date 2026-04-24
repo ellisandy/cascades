@@ -4040,4 +4040,39 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+
+    /// Phase 5b smoke test — asserts that key markers from the editing-scope
+    /// + color-picker JS are present in the bundled admin template. Catches
+    /// the "someone reverted half the file" failure mode without needing a
+    /// browser harness. Match strings should be specific enough that a typo
+    /// or partial revert would break them.
+    #[test]
+    fn admin_html_contains_phase5b_markers() {
+        // Editing-scope markers
+        assert!(ADMIN_HTML.contains("function enterGroup"),
+                "missing enterGroup helper");
+        assert!(ADMIN_HTML.contains("function exitGroup"),
+                "missing exitGroup helper");
+        assert!(ADMIN_HTML.contains("function isInFocusedScope"),
+                "missing isInFocusedScope predicate");
+        assert!(ADMIN_HTML.contains("focusedGroupId"),
+                "missing focusedGroupId state field");
+        assert!(ADMIN_HTML.contains("ondblclick=\"onCanvasDblClick"),
+                "canvas missing dblclick handler wiring");
+        assert!(ADMIN_HTML.contains("id=\"scope-breadcrumb\""),
+                "missing scope breadcrumb element");
+
+        // Color-picker markers
+        assert!(ADMIN_HTML.contains("function updateColor"),
+                "missing updateColor handler");
+        assert!(ADMIN_HTML.contains("function clearColor"),
+                "missing clearColor handler");
+        assert!(ADMIN_HTML.contains("type=\"color\""),
+                "missing <input type=\"color\"> in property inspector");
+        // Color must flow through both directions of the API mapping.
+        assert!(ADMIN_HTML.contains("color:            item.color"),
+                "apiToItems missing color hydration");
+        assert!(ADMIN_HTML.contains("color:               isTextLike ? (item.color"),
+                "itemsToPayload missing color emission");
+    }
 }
