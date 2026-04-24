@@ -256,7 +256,7 @@ fn insert_commas(digits: &str) -> String {
     let chars: Vec<char> = digits.chars().collect();
     let mut result = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(*ch);

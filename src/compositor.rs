@@ -62,7 +62,7 @@ pub enum LayoutVariant {
 
 impl LayoutVariant {
     /// Parse from the snake_case string used in `display.toml`.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "full" => Some(Self::Full),
             "half_horizontal" => Some(Self::HalfHorizontal),
@@ -132,7 +132,7 @@ impl DisplayConfiguration {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let variant = LayoutVariant::from_str(&s.variant).ok_or_else(|| {
+                let variant = LayoutVariant::from_name(&s.variant).ok_or_else(|| {
                     CompositorError::InvalidVariant { variant: s.variant.clone() }
                 })?;
                 let (default_w, default_h) = variant.canonical_dimensions();
@@ -165,16 +165,16 @@ impl DisplayConfiguration {
             .items
             .iter()
             .filter_map(|item| {
-                if let LayoutItem::PluginSlot { layout_variant, plugin_instance_id, .. } = item {
-                    if LayoutVariant::from_str(layout_variant).is_none() {
-                        log::warn!(
-                            "layout '{}': unknown variant '{}' for slot '{}', skipping",
-                            layout.id,
-                            layout_variant,
-                            plugin_instance_id
-                        );
-                        return None;
-                    }
+                if let LayoutItem::PluginSlot { layout_variant, plugin_instance_id, .. } = item
+                    && LayoutVariant::from_name(layout_variant).is_none()
+                {
+                    log::warn!(
+                        "layout '{}': unknown variant '{}' for slot '{}', skipping",
+                        layout.id,
+                        layout_variant,
+                        plugin_instance_id
+                    );
+                    return None;
                 }
                 Some(item.clone())
             })
@@ -267,7 +267,7 @@ impl Compositor {
                     plugin_instance_id,
                     layout_variant,
                     ..
-                } => match LayoutVariant::from_str(layout_variant) {
+                } => match LayoutVariant::from_name(layout_variant) {
                     None => {
                         // Filtered by from_layout_config; warn and skip if somehow reached.
                         log::warn!(
@@ -986,9 +986,9 @@ mod tests {
             ("quadrant", LayoutVariant::Quadrant),
         ];
         for (s, expected) in cases {
-            assert_eq!(LayoutVariant::from_str(s), Some(expected));
+            assert_eq!(LayoutVariant::from_name(s), Some(expected));
         }
-        assert_eq!(LayoutVariant::from_str("bogus"), None);
+        assert_eq!(LayoutVariant::from_name("bogus"), None);
     }
 
     #[test]

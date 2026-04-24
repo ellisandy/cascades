@@ -59,21 +59,16 @@ pub enum RegistryError {
 // ─── Data structures ─────────────────────────────────────────────────────────
 
 /// How a plugin receives its data.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DataStrategy {
     /// The scheduler polls the source at `refresh_interval_secs`.
+    #[default]
     Polling,
     /// An external system pushes data via `POST /webhook/:id`.
     Webhook,
     /// Data is static; no fetch is performed.
     Static,
-}
-
-impl Default for DataStrategy {
-    fn default() -> Self {
-        DataStrategy::Polling
-    }
 }
 
 /// A single trip evaluation criterion registered by a plugin.

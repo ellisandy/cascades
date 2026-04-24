@@ -93,13 +93,13 @@ impl InstanceStore {
     /// Creates all parent directories if they don't exist, then opens the
     /// database and runs the schema migration (idempotent `CREATE TABLE IF NOT EXISTS`).
     pub fn open(db_path: &Path) -> Result<Self, StoreError> {
-        if let Some(parent) = db_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| StoreError::Io {
-                    path: parent.to_string_lossy().into_owned(),
-                    source: e,
-                })?;
-            }
+        if let Some(parent) = db_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| StoreError::Io {
+                path: parent.to_string_lossy().into_owned(),
+                source: e,
+            })?;
         }
         let conn = Connection::open(db_path)?;
         Self::migrate(&conn)?;
