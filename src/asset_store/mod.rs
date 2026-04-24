@@ -131,11 +131,16 @@ impl AssetStore {
             )));
         }
         let sha256 = hex_sha256(bytes);
+        // Content-addressed id. Avoids the same-millisecond collision a
+        // timestamp-based id would have under concurrent distinct uploads,
+        // and makes `Cache-Control: immutable` on the serve route truly
+        // correct: identical bytes always resolve to the same id.
+        let id = format!("asset-{}", &sha256[..16]);
 
         let conn = self.conn.lock().unwrap();
-        // Dedup: if the hash already exists, return that id. Same bytes = same
-        // asset, regardless of filename — saves disk and avoids confusing the
-        // user with two ids for one image.
+        // Dedup: if the same bytes were already stored, return that row's
+        // id (which equals what we'd compute anyway, so this is really an
+        // existence check). The first-upload's filename wins.
         if let Some(existing_id) = conn
             .query_row(
                 "SELECT id FROM assets WHERE sha256 = ?1",
@@ -147,13 +152,6 @@ impl AssetStore {
             return Ok(existing_id);
         }
 
-        let id = format!(
-            "asset-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        );
         let now = unix_now();
         conn.execute(
             "INSERT INTO assets (id, filename, mime, bytes, sha256, created_at)
