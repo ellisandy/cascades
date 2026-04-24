@@ -248,6 +248,48 @@ async fn serve_route_returns_404_for_unknown_id() {
     assert_eq!(resp.status(), 404);
 }
 
+/// `LayoutItem::Image` must roundtrip through the SQLite layout store —
+/// proves the new `asset_id` column was added correctly and that the read
+/// path picks up the variant. Mirrors Phase 5a's `layout_item_color_…` test.
+#[test]
+fn layout_item_image_roundtrips_through_store() {
+    use cascades::layout_store::{LayoutConfig, LayoutItem, LayoutStore};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = LayoutStore::open(&dir.path().join("test.db")).unwrap();
+    let original = LayoutItem::Image {
+        id: "img-42".to_string(),
+        z_index: 3,
+        x: 50,
+        y: 60,
+        width: 120,
+        height: 80,
+        asset_id: "asset-abc123".to_string(),
+        parent_id: Some("group-1".to_string()),
+    };
+    store
+        .upsert_layout(&LayoutConfig {
+            id: "L1".to_string(),
+            name: "L1".to_string(),
+            items: vec![original.clone()],
+            updated_at: 0,
+        })
+        .unwrap();
+
+    let loaded = store.get_layout("L1").unwrap().unwrap();
+    assert_eq!(loaded.items.len(), 1);
+    match &loaded.items[0] {
+        LayoutItem::Image { id, asset_id, x, y, width, height, parent_id, z_index } => {
+            assert_eq!(id, "img-42");
+            assert_eq!(asset_id, "asset-abc123");
+            assert_eq!((*x, *y, *width, *height), (50, 60, 120, 80));
+            assert_eq!(*z_index, 3);
+            assert_eq!(parent_id.as_deref(), Some("group-1"));
+        }
+        other => panic!("expected Image, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn list_route_returns_uploaded_assets() {
     let dir = tempfile::TempDir::new().unwrap();

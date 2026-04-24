@@ -822,6 +822,9 @@ struct ItemPayload {
     /// DataField). `None` → compositor default (`#000`).
     #[serde(default)]
     color: Option<String>,
+    /// Foreign key into AssetStore for `LayoutItem::Image` (Phase 6).
+    #[serde(default)]
+    asset_id: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -917,6 +920,18 @@ impl ItemPayload {
                 plugin_instance_id: self.plugin_instance_id,
                 label: self.label,
                 background: self.background,
+                parent_id: self.parent_id,
+            }),
+            "image" => Ok(LayoutItem::Image {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                asset_id: self.asset_id.ok_or_else(|| {
+                    "image item requires asset_id".to_string()
+                })?,
                 parent_id: self.parent_id,
             }),
             other => Err(format!("unknown item_type '{other}'")),

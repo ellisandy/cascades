@@ -170,6 +170,22 @@ pub enum LayoutItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
     },
+    /// A user-uploaded image asset placed at a fixed rectangle. The asset's
+    /// raw bytes live in the [AssetStore](crate::asset_store::AssetStore);
+    /// `asset_id` is the foreign key. Compositor stretches the decoded image
+    /// to (`width`, `height`); aspect-preserving fit is a deferred follow-up.
+    Image {
+        id: String,
+        z_index: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        /// References [Asset::id](crate::asset_store::Asset::id).
+        asset_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+    },
     /// A container item whose children's `parent_id` points at its `id`.
     ///
     /// Groups have geometry (a visual frame) and an optional background, but
@@ -205,6 +221,7 @@ impl LayoutItem {
             Self::StaticDateTime { id, .. } => id,
             Self::StaticDivider { id, .. } => id,
             Self::DataField { id, .. } => id,
+            Self::Image { id, .. } => id,
             Self::Group { id, .. } => id,
         }
     }
@@ -216,6 +233,7 @@ impl LayoutItem {
             Self::StaticDateTime { z_index, .. } => *z_index,
             Self::StaticDivider { z_index, .. } => *z_index,
             Self::DataField { z_index, .. } => *z_index,
+            Self::Image { z_index, .. } => *z_index,
             Self::Group { z_index, .. } => *z_index,
         }
     }
@@ -228,6 +246,7 @@ impl LayoutItem {
             Self::StaticDateTime { parent_id, .. } => parent_id.as_deref(),
             Self::StaticDivider { parent_id, .. } => parent_id.as_deref(),
             Self::DataField { parent_id, .. } => parent_id.as_deref(),
+            Self::Image { parent_id, .. } => parent_id.as_deref(),
             Self::Group { parent_id, .. } => parent_id.as_deref(),
         }
     }
@@ -314,6 +333,8 @@ impl LayoutStore {
             ("background", "TEXT"),
             // Phase 5: per-item foreground color (CSS hex, e.g. "#ff0000").
             ("color", "TEXT"),
+            // Phase 6: foreign key into assets.id for LayoutItem::Image.
+            ("asset_id", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -378,7 +399,7 @@ impl LayoutStore {
                     plugin_instance_id, layout_variant, text_content, font_size, orientation,
                     field_mapping_id, format_string, label,
                     bold, italic, underline, font_family,
-                    parent_id, background, color
+                    parent_id, background, color, asset_id
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -408,6 +429,7 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(19)?,
                 row.get::<_, Option<String>>(20)?,
                 row.get::<_, Option<String>>(21)?,
+                row.get::<_, Option<String>>(22)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -417,7 +439,7 @@ impl LayoutStore {
              plugin_instance_id, layout_variant, text_content, font_size, orientation,
              field_mapping_id, format_string, label,
              bold, italic, underline, font_family,
-             parent_id, background, color) in rows
+             parent_id, background, color, asset_id) in rows
         {
             let bold = bold.map(|v| v != 0);
             let italic = italic.map(|v| v != 0);
@@ -497,6 +519,19 @@ impl LayoutStore {
                     underline,
                     font_family,
                     color,
+                    parent_id,
+                },
+                "image" => LayoutItem::Image {
+                    id: item_id,
+                    z_index,
+                    x,
+                    y,
+                    width,
+                    height,
+                    // Should always be present for image rows; default to ""
+                    // for forward-compat / damaged rows so the read path
+                    // doesn't panic.
+                    asset_id: asset_id.unwrap_or_default(),
                     parent_id,
                 },
                 "group" => LayoutItem::Group {
@@ -633,6 +668,20 @@ impl LayoutStore {
                             font_family,
                             color,
                             parent_id,
+                        ],
+                    )?;
+                }
+                LayoutItem::Image {
+                    id, z_index, x, y, width, height, asset_id, parent_id,
+                } => {
+                    tx.execute(
+                        "INSERT INTO layout_items
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          asset_id, parent_id)
+                         VALUES (?1, ?2, 'image', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            id, layout.id, z_index, x, y, width, height,
+                            asset_id, parent_id,
                         ],
                     )?;
                 }

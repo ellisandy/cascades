@@ -26,6 +26,7 @@ use image::{GrayImage, ImageEncoder};
 use thiserror::Error;
 use tokio::task;
 
+use crate::asset_store::AssetStore;
 use crate::config::DisplayConfigEntry;
 use crate::fonts::FontsManifest;
 use crate::format::apply_format;
@@ -239,6 +240,11 @@ pub struct Compositor {
     sidecar_url: String,
     /// Curated fonts + URL base the sidecar should hit to fetch them.
     fonts: FontsWrap,
+    /// Phase 6: source for `LayoutItem::Image` bytes. Optional so legacy
+    /// callers (and a handful of unit tests that don't exercise images) can
+    /// still construct a compositor without an asset store; image items
+    /// render as no-ops with a warning when this is `None`.
+    asset_store: Option<Arc<AssetStore>>,
 }
 
 impl Compositor {
@@ -267,7 +273,16 @@ impl Compositor {
                 manifest: fonts_manifest,
                 base_url: font_base_url.into(),
             },
+            asset_store: None,
         }
+    }
+
+    /// Builder-style attachment for the asset store. Production wiring
+    /// (`main.rs`) calls this so `LayoutItem::Image` items can resolve their
+    /// `asset_id` to bytes; tests that don't render images can skip it.
+    pub fn with_asset_store(mut self, asset_store: Arc<AssetStore>) -> Self {
+        self.asset_store = Some(asset_store);
+        self
     }
 
     /// Render all items in `config` and composite them into a final 800×480 PNG.
@@ -291,6 +306,10 @@ impl Compositor {
 
         for item in &config.items {
             let maybe_task = match item {
+                // Phase 6: image rendering is synchronous (decode + alpha blit
+                // on the compositor thread), so it never spawns a sidecar
+                // task. The actual paint happens in the post-join loop below.
+                LayoutItem::Image { .. } => None,
                 LayoutItem::PluginSlot {
                     plugin_instance_id,
                     layout_variant,
@@ -458,7 +477,41 @@ impl Compositor {
             png_results.push(handle.await??);
         }
 
-        composite_to_png(&config.items, &task_for_item, &png_results)
+        // Phase 6: pre-fetch bytes for every Image item so the synchronous
+        // compositor doesn't have to touch SQLite. Errors (missing asset,
+        // invalid bytes) are logged but never fail the whole render — a
+        // missing asset becomes a blank rectangle, which is far less
+        // surprising than a 500 from /image.png.
+        let mut image_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+        if let Some(store) = &self.asset_store {
+            for item in &config.items {
+                if let LayoutItem::Image { asset_id, .. } = item {
+                    if image_bytes.contains_key(asset_id) {
+                        continue;
+                    }
+                    let store = Arc::clone(store);
+                    let aid = asset_id.clone();
+                    let result = task::spawn_blocking(move || store.get(&aid)).await?;
+                    match result {
+                        Ok(Some(asset)) => {
+                            image_bytes.insert(asset_id.clone(), asset.bytes);
+                        }
+                        Ok(None) => {
+                            log::warn!(
+                                "compose: asset '{asset_id}' referenced by Image not found",
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "compose: failed to load asset '{asset_id}': {e}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        composite_to_png(&config.items, &task_for_item, &png_results, &image_bytes)
     }
 }
 
@@ -847,6 +900,7 @@ fn composite_to_png(
     items: &[LayoutItem],
     task_for_item: &[Option<usize>],
     png_results: &[Vec<u8>],
+    image_bytes: &HashMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, CompositorError> {
     // Allocate white frame.
     let pixels = vec![255u8; (FRAME_WIDTH * FRAME_HEIGHT) as usize];
@@ -932,6 +986,29 @@ fn composite_to_png(
                     );
                 }
             }
+            LayoutItem::Image { x, y, width, height, asset_id, .. } => {
+                if let Some(bytes) = image_bytes.get(asset_id) {
+                    // Failure (corrupted bytes, unsupported subformat) downgrades
+                    // to a logged warning + skipped paint — a broken asset
+                    // shouldn't take down the whole composite render.
+                    if let Err(e) = blit_asset_image(
+                        &mut frame,
+                        bytes,
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                        asset_id,
+                    ) {
+                        log::warn!(
+                            "compose: skipping image '{asset_id}': {e}",
+                        );
+                    }
+                }
+                // Else: bytes were absent (missing asset or no asset_store
+                // wired); already logged in compose(). Render as no-op so the
+                // user sees an empty box where the image was.
+            }
         }
     }
 
@@ -951,6 +1028,67 @@ fn composite_to_png(
 
 /// Decode `png_bytes` and copy up to `(width × height)` pixels onto `frame`
 /// at offset `(x, y)`.
+/// Decode PNG/JPEG bytes, resize to (`width`, `height`), and alpha-composite
+/// onto the grayscale frame. Used by `LayoutItem::Image`. Distinct from
+/// `blit_png` because:
+/// - Sidecar PNGs are already at the slot size (no resize).
+/// - Sidecar PNGs are L8 (text on white), so no alpha blending is needed.
+/// - Asset images are user-supplied at arbitrary dimensions and may carry
+///   transparency we want to honour.
+///
+/// **Stretch fit.** The image scales to exactly the box size — aspect ratio
+/// is the user's responsibility (set the box aspect to match). Documented as
+/// such; if users complain we'd add a `fit_mode` field rather than guess.
+fn blit_asset_image(
+    frame: &mut GrayImage,
+    bytes: &[u8],
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    asset_id: &str,
+) -> Result<(), CompositorError> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+    let src = image::load_from_memory(bytes).map_err(|_| CompositorError::InvalidPng {
+        slot: format!("image:{asset_id}"),
+    })?;
+    // LumaA preserves transparency for compositing; a fully opaque JPEG
+    // ends up with alpha=255 everywhere, which is exactly what we want.
+    let resized = image::imageops::resize(
+        &src.to_luma_alpha8(),
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+
+    for py in 0..height {
+        for px in 0..width {
+            let dst_x = x + px;
+            let dst_y = y + py;
+            if dst_x >= FRAME_WIDTH || dst_y >= FRAME_HEIGHT {
+                continue;
+            }
+            let p = resized.get_pixel(px, py);
+            let src_l = p.0[0] as u16;
+            let alpha = p.0[1] as u16;
+            if alpha == 0 {
+                continue; // fully transparent — leave dst untouched
+            }
+            if alpha == 255 {
+                frame.put_pixel(dst_x, dst_y, image::Luma([src_l as u8]));
+            } else {
+                let dst_l = frame.get_pixel(dst_x, dst_y).0[0] as u16;
+                // Standard alpha over: out = src*a + dst*(1-a), in [0,255].
+                let out = (src_l * alpha + dst_l * (255 - alpha)) / 255;
+                frame.put_pixel(dst_x, dst_y, image::Luma([out as u8]));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn blit_png(
     frame: &mut GrayImage,
     png_bytes: &[u8],
@@ -1235,7 +1373,7 @@ mod tests {
     #[test]
     fn composite_to_png_white_frame() {
         // No items → pure white 800×480 frame.
-        let png = composite_to_png(&[], &[], &[]).unwrap();
+        let png = composite_to_png(&[], &[], &[], &std::collections::HashMap::new()).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(img.width(), FRAME_WIDTH);
@@ -1270,7 +1408,7 @@ mod tests {
         let task_for_item = vec![Some(0usize)];
         let png_results = vec![slot_png];
 
-        let png = composite_to_png(&[item], &task_for_item, &png_results).unwrap();
+        let png = composite_to_png(&[item], &task_for_item, &png_results, &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         assert_eq!(frame.get_pixel(100, 50).0[0], 0);
@@ -1291,7 +1429,7 @@ mod tests {
         };
 
         let task_for_item = vec![None];
-        let png = composite_to_png(&[item], &task_for_item, &[]).unwrap();
+        let png = composite_to_png(&[item], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Row 200 and 201 should be all black.
@@ -1335,7 +1473,7 @@ mod tests {
         let task_for_item = vec![Some(0usize)];
         let png_results = vec![text_png];
 
-        let png = composite_to_png(&[item], &task_for_item, &png_results).unwrap();
+        let png = composite_to_png(&[item], &task_for_item, &png_results, &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Inside the text area should be grey.
@@ -1391,7 +1529,7 @@ mod tests {
         let task_for_item = vec![Some(0usize), Some(1usize)];
         let png_results = vec![white_png, black_png];
 
-        let png = composite_to_png(&items, &task_for_item, &png_results).unwrap();
+        let png = composite_to_png(&items, &task_for_item, &png_results, &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Black (z=1) overwrote white (z=0).
@@ -1412,7 +1550,7 @@ mod tests {
             parent_id: None,
         };
         let task_for_item = vec![None];
-        let png = composite_to_png(&[item], &task_for_item, &[]).unwrap();
+        let png = composite_to_png(&[item], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Border pixels are black.
@@ -1447,7 +1585,7 @@ mod tests {
             parent_id: None,
         };
         let task_for_item = vec![None];
-        let png = composite_to_png(&[item], &task_for_item, &[]).unwrap();
+        let png = composite_to_png(&[item], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Frame is still pure white.
@@ -1478,7 +1616,7 @@ mod tests {
             parent_id: Some("g".to_string()),
         };
         let task_for_item = vec![None, None];
-        let png = composite_to_png(&[group, child], &task_for_item, &[]).unwrap();
+        let png = composite_to_png(&[group, child], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Inside the child rectangle — should be black (child painted on top).
@@ -1487,6 +1625,75 @@ mod tests {
         assert_eq!(frame.get_pixel(140, 140).0[0], 255, "group interior should be white");
         // Group border should still be visible.
         assert_eq!(frame.get_pixel(100, 100).0[0], 0, "group border top-left");
+    }
+
+    /// A 4×4 black PNG bytes generated via the `image` crate, kept inline so
+    /// tests don't ship a binary fixture. Compositor uses `to_luma_alpha8()`
+    /// internally so any encoding the `image` crate accepts is fine here.
+    fn black_4x4_png() -> Vec<u8> {
+        // 4×4 fully-black opaque image. RGBA so we can assert alpha pathway.
+        let img = image::RgbaImage::from_fn(4, 4, |_, _| image::Rgba([0, 0, 0, 255]));
+        let mut out: Vec<u8> = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut out);
+        ImageEncoder::write_image(
+            encoder,
+            img.as_raw(),
+            4,
+            4,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        out
+    }
+
+    /// `LayoutItem::Image` should resize the asset bytes into the item's
+    /// rectangle and stamp pixel values onto the frame. This is the single
+    /// most important sanity check on the Phase 6 render path.
+    #[test]
+    fn composite_to_png_image_renders_at_item_rect() {
+        let png = black_4x4_png();
+        let item = LayoutItem::Image {
+            id: "img1".to_string(),
+            z_index: 0,
+            x: 50, y: 60, width: 30, height: 20,
+            asset_id: "asset-x".to_string(),
+            parent_id: None,
+        };
+        let mut bytes = std::collections::HashMap::new();
+        bytes.insert("asset-x".to_string(), png);
+        let task_for_item = vec![None];
+        let composed = composite_to_png(&[item], &task_for_item, &[], &bytes).unwrap();
+        let frame = image::load_from_memory(&composed).unwrap().to_luma8();
+
+        // Inside the image rectangle: black (the asset is fully black).
+        assert_eq!(frame.get_pixel(60, 70).0[0], 0, "image interior should be black");
+        // Outside the rectangle: untouched white background.
+        assert_eq!(frame.get_pixel(10, 10).0[0], 255, "outside the image stays white");
+        assert_eq!(frame.get_pixel(85, 85).0[0], 255, "outside the image stays white");
+    }
+
+    /// A missing asset (id present in the item but not in the bytes map) must
+    /// not crash the render — it just leaves a blank rectangle.
+    #[test]
+    fn composite_to_png_image_with_missing_asset_is_no_op() {
+        let item = LayoutItem::Image {
+            id: "img1".to_string(),
+            z_index: 0,
+            x: 100, y: 100, width: 50, height: 50,
+            asset_id: "ghost".to_string(),
+            parent_id: None,
+        };
+        let task_for_item = vec![None];
+        let composed = composite_to_png(
+            &[item],
+            &task_for_item,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let frame = image::load_from_memory(&composed).unwrap().to_luma8();
+        // Whole frame is the white background — no panic, no paint.
+        assert_eq!(frame.get_pixel(125, 125).0[0], 255);
     }
 
     #[test]

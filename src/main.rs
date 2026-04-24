@@ -96,14 +96,17 @@ async fn main() {
     let server_port = config.server.as_ref().map(|s| s.port).unwrap_or(8080);
     let font_base_url = format!("http://localhost:{server_port}");
 
-    let compositor = Arc::new(Compositor::new(
-        Arc::clone(&template_engine),
-        Arc::clone(&instance_store),
-        Arc::clone(&layout_store),
-        sidecar_url.clone(),
-        Arc::clone(&fonts_manifest),
-        font_base_url,
-    ));
+    let compositor = Arc::new(
+        Compositor::new(
+            Arc::clone(&template_engine),
+            Arc::clone(&instance_store),
+            Arc::clone(&layout_store),
+            sidecar_url.clone(),
+            Arc::clone(&fonts_manifest),
+            font_base_url,
+        )
+        .with_asset_store(Arc::clone(&asset_store)),
+    );
 
     let refresh_rate_secs = config
         .server
