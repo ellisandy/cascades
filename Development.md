@@ -10,17 +10,19 @@ see [Architecture.md](Architecture.md).
 
 ## Running Locally
 
-Cascades needs both the Rust server and the Bun sidecar running.
+Cascades needs both the Rust server and the Bun sidecar running. The server
+listens on the port set in `config.toml` (`[server] port`, currently `9090`);
+the sidecar listens on `3001` by default.
 
 ```bash
 # One-time: install sidecar deps
 cd src/sidecar && bun install
 
-# Terminal 1 — sidecar
+# Terminal 1 — sidecar (port 3001)
 cd src/sidecar
 bun server.ts
 
-# Terminal 2 — server
+# Terminal 2 — server (port from config.toml)
 cargo run
 ```
 

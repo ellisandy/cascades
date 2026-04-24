@@ -17,3 +17,6 @@ config/secrets.toml
 .dolt/
 *.db
 .beads-credential-key
+
+# Node / Bun
+node_modules/
