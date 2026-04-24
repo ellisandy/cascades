@@ -1,0 +1,36 @@
+name: Sidecar
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/sidecar/**"
+  pull_request:
+    paths:
+      - "src/sidecar/**"
+
+jobs:
+  test:
+    name: Render Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Chromium dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 \
+            libgtk-3-0 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 \
+            libxrandr2 libxss1 libxtst6 xdg-utils
+
+      - name: Install dependencies
+        working-directory: src/sidecar
+        run: bun install
+
+      - name: Run sidecar tests
+        working-directory: src/sidecar
+        run: bun test
