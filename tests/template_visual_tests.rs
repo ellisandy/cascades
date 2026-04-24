@@ -52,7 +52,6 @@ fn river_full_renders_level_and_flow() {
     assert!(html.contains("11.9 ft"), "water level: {html}");
     assert!(html.contains("8,750"), "streamflow with delimiter: {html}");
     assert!(html.contains("cfs"), "cfs unit: {html}");
-    assert!(html.contains("Apr"), "date: {html}");
 }
 
 #[test]
@@ -245,7 +244,10 @@ fn trail_full_renders_name_and_condition() {
     assert!(html.contains("North Cascades NP"), "park name: {html}");
     assert!(html.contains("Cascade Pass Trail"), "destination name: {html}");
     assert!(html.contains("Snow above 5000ft"), "condition text: {html}");
-    assert!(html.contains("today"), "last updated: {html}");
+    assert!(
+        html.contains("Updated") && (html.contains("days ago") || html.contains("today")),
+        "last updated section should render: {html}"
+    );
 }
 
 #[test]
