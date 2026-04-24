@@ -336,22 +336,22 @@ pub struct SecretsConfig {
 /// Load secrets from `path`.  If the file is absent or corrupt, a new random
 /// API key is generated, logged, and written to `path`.  Never fails.
 pub fn load_or_create_secrets(path: &Path) -> SecretsConfig {
-    if path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Ok(s) = toml::from_str::<SecretsConfig>(&contents) {
-                return s;
-            }
-            log::warn!("config/secrets.toml is corrupt — regenerating API key");
+    if path.exists()
+        && let Ok(contents) = std::fs::read_to_string(path)
+    {
+        if let Ok(s) = toml::from_str::<SecretsConfig>(&contents) {
+            return s;
         }
+        log::warn!("config/secrets.toml is corrupt — regenerating API key");
     }
     let api_key = generate_api_key();
     log::info!("Cascades API key: {}", api_key);
     eprintln!("Cascades API key: {}", api_key);
     let secrets = SecretsConfig { api_key };
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).ok();
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).ok();
     }
     if let Ok(toml_str) = toml::to_string_pretty(&secrets) {
         std::fs::write(path, toml_str).ok();
@@ -367,10 +367,10 @@ fn generate_api_key() -> String {
 
 fn fill_random(buf: &mut [u8]) {
     use std::io::Read;
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(buf).is_ok() {
-            return;
-        }
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom")
+        && f.read_exact(buf).is_ok()
+    {
+        return;
     }
     // Fallback: mix monotonic time + PID.
     let t = std::time::SystemTime::now()

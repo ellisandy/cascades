@@ -23,6 +23,7 @@ pub struct GenericHttpSource {
 }
 
 impl GenericHttpSource {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         name: String,
@@ -120,12 +121,12 @@ impl Source for GenericHttpSource {
             .map_err(|e| SourceError::Parse(format!("invalid JSON: {e}")))?;
 
         // Apply response_root_path if set
-        if let Some(path) = &self.response_root_path {
-            if !path.is_empty() {
-                let extracted = jsonpath_extract(&value, path)
-                    .map_err(|e| SourceError::Parse(format!("JSONPath extraction failed: {e}")))?;
-                return Ok(extracted.clone());
-            }
+        if let Some(path) = &self.response_root_path
+            && !path.is_empty()
+        {
+            let extracted = jsonpath_extract(&value, path)
+                .map_err(|e| SourceError::Parse(format!("JSONPath extraction failed: {e}")))?;
+            return Ok(extracted.clone());
         }
 
         Ok(value)

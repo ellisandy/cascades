@@ -60,10 +60,10 @@ fn evaluate_expr(expr: &str, raw_value: &str) -> String {
 /// Apply a single filter to a string value.
 fn apply_filter(filter: &str, value: &str) -> String {
     if let Some(rest) = filter.strip_prefix("round(") {
-        if let Some(n_str) = rest.strip_suffix(')') {
-            if let Ok(n) = n_str.trim().parse::<u32>() {
-                return apply_round(value, n);
-            }
+        if let Some(n_str) = rest.strip_suffix(')')
+            && let Ok(n) = n_str.trim().parse::<u32>()
+        {
+            return apply_round(value, n);
         }
         return value.to_string();
     }
@@ -100,8 +100,8 @@ fn apply_number_with_delimiter(value: &str) -> String {
     };
 
     // Handle negative numbers
-    let (sign, digits) = if integer_part.starts_with('-') {
-        ("-", &integer_part[1..])
+    let (sign, digits) = if let Some(stripped) = integer_part.strip_prefix('-') {
+        ("-", stripped)
     } else {
         ("", integer_part)
     };

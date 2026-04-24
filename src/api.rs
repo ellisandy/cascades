@@ -2009,11 +2009,11 @@ fn percent_decode(input: &str) -> String {
                 let hi = bytes.next().unwrap_or(b'0');
                 let lo = bytes.next().unwrap_or(b'0');
                 let hex = [hi, lo];
-                if let Ok(s) = std::str::from_utf8(&hex) {
-                    if let Ok(val) = u8::from_str_radix(s, 16) {
-                        out.push(val);
-                        continue;
-                    }
+                if let Ok(s) = std::str::from_utf8(&hex)
+                    && let Ok(val) = u8::from_str_radix(s, 16)
+                {
+                    out.push(val);
+                    continue;
                 }
                 out.push(b'%');
                 out.push(hi);
