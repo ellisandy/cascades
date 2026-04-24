@@ -332,6 +332,7 @@ impl Compositor {
                     italic,
                     underline,
                     font_family,
+                    color,
                     ..
                 } => {
                     let text = text_content.clone();
@@ -346,6 +347,7 @@ impl Compositor {
                         italic: italic.unwrap_or(false),
                         underline: underline.unwrap_or(false),
                         font_family: font_family.clone(),
+                        color: color.clone(),
                     };
                     let fonts = self.fonts.clone();
                     let idx = handles.len();
@@ -364,6 +366,7 @@ impl Compositor {
                     italic,
                     underline,
                     font_family,
+                    color,
                     ..
                 } => {
                     let fmt_str = format.clone();
@@ -378,6 +381,7 @@ impl Compositor {
                         italic: italic.unwrap_or(false),
                         underline: underline.unwrap_or(false),
                         font_family: font_family.clone(),
+                        color: color.clone(),
                     };
                     let fonts = self.fonts.clone();
                     let idx = handles.len();
@@ -401,6 +405,7 @@ impl Compositor {
                     italic,
                     underline,
                     font_family,
+                    color,
                     ..
                 } => {
                     let w = (*width).max(0) as u32;
@@ -417,6 +422,7 @@ impl Compositor {
                         italic: italic.unwrap_or(false),
                         underline: underline.unwrap_or(false),
                         font_family: font_family.clone(),
+                        color: color.clone(),
                     };
                     let layout_store = Arc::clone(&self.layout_store);
                     let instance_store = Arc::clone(&self.instance_store);
@@ -539,6 +545,8 @@ pub(crate) struct TextFormat {
     pub italic: bool,
     pub underline: bool,
     pub font_family: Option<String>,
+    /// CSS hex color, e.g. "#ff0000". `None` → caller's default (typically #000).
+    pub color: Option<String>,
 }
 
 impl TextFormat {
@@ -561,6 +569,14 @@ impl TextFormat {
             css.push_str("text-decoration:underline;");
         }
         css
+    }
+
+    /// The CSS `color:` value to apply, falling back to `#000`.
+    fn color_css(&self) -> &str {
+        self.color
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("#000")
     }
 }
 
@@ -586,11 +602,12 @@ async fn render_static_text(
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
          justify-content:center;{tf}font-size:{fs}px;\
-         color:#000;background:white;'>{text}</div>",
+         color:{color};background:white;'>{text}</div>",
         w = width,
         h = height,
         fs = font_size,
         tf = format.css(),
+        color = format.color_css(),
         text = safe,
     );
     call_sidecar(sidecar_url, html, width, height, item_id, mode, fonts).await
@@ -627,11 +644,12 @@ async fn render_static_datetime(
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;align-items:center;\
          justify-content:center;{tf}font-size:{fs}px;\
-         color:#000;background:white;'>{text}</div>",
+         color:{color};background:white;'>{text}</div>",
         w = width,
         h = height,
         fs = font_size,
         tf = text_format.css(),
+        color = text_format.color_css(),
         text = safe,
     );
     call_sidecar(sidecar_url, html, width, height, item_id, mode, fonts).await
@@ -741,10 +759,11 @@ async fn render_data_field(
     let html = format!(
         "<div style='width:{w}px;height:{h}px;display:flex;flex-direction:column;\
          align-items:center;justify-content:center;font-family:{family};\
-         color:#000;background:white;'>{content}</div>",
+         color:{color};background:white;'>{content}</div>",
         w = width,
         h = height,
         family = family,
+        color = text_format.color_css(),
         content = content,
     );
     call_sidecar(sidecar_url, html, width, height, item_id, mode, fonts).await
@@ -1150,6 +1169,7 @@ mod tests {
                     italic: None,
                     underline: None,
                     font_family: None,
+                    color: None,
                     parent_id: None,
                 },
                 LayoutItem::StaticDivider {
@@ -1308,6 +1328,7 @@ mod tests {
             italic: None,
             underline: None,
             font_family: None,
+            color: None,
             parent_id: None,
         };
 
@@ -1481,6 +1502,7 @@ mod tests {
             italic: true,
             underline: true,
             font_family: Some("Georgia, serif".to_string()),
+            color: None,
         };
         let css = fmt.css();
         assert!(css.contains("font-family:Georgia, serif;"));

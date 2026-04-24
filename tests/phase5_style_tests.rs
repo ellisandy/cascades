@@ -275,6 +275,7 @@ async fn compositor_wraps_sidecar_html_with_font_face() {
             italic: None,
             underline: None,
             font_family: Some("Inter".to_string()),
+            color: None,
             parent_id: None,
         }],
     };
@@ -339,6 +340,192 @@ fn font_face_css_covers_all_five_families_and_uses_base_url() {
         face_count, 9,
         "expected 9 @font-face blocks (one per manifest file); found {face_count}"
     );
+}
+
+/// Red 8: the compositor must propagate an item's `color` field into the
+/// emitted CSS. Without this, the field round-trips through SQLite but
+/// never makes it to Chromium.
+#[tokio::test]
+async fn compositor_emits_item_color_in_sidecar_html() {
+    use axum::{
+        Json, Router,
+        extract::State,
+        response::IntoResponse,
+        routing::post,
+    };
+    use cascades::{
+        compositor::{Compositor, DisplayConfiguration},
+        fonts::FontsManifest,
+        instance_store::InstanceStore,
+        layout_store::{LayoutItem, LayoutStore},
+        template::TemplateEngine,
+    };
+    use image::{GrayImage, ImageEncoder};
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        html: String,
+        width: u32,
+        height: u32,
+    }
+
+    async fn cap(
+        State(c): State<Arc<Mutex<Vec<String>>>>,
+        Json(b): Json<Body>,
+    ) -> impl IntoResponse {
+        c.lock().unwrap().push(b.html);
+        let pixels = vec![255u8; (b.width * b.height) as usize];
+        let img = GrayImage::from_raw(b.width, b.height, pixels).unwrap();
+        let mut png = Vec::new();
+        ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut png),
+            img.as_raw(),
+            b.width,
+            b.height,
+            image::ColorType::L8,
+        )
+        .unwrap();
+        (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "image/png")],
+            axum::body::Body::from(png),
+        )
+    }
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/render", post(cap))
+        .with_state(Arc::clone(&captured));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    let sidecar_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("t.db");
+    let tpl = tmp.path().join("templates");
+    std::fs::create_dir_all(&tpl).unwrap();
+    let ls = Arc::new(LayoutStore::open(&db).unwrap());
+    let is = Arc::new(InstanceStore::open(&db).unwrap());
+    let engine = Arc::new(TemplateEngine::new(&tpl).unwrap());
+    let compositor = Compositor::new(
+        engine,
+        is,
+        ls,
+        sidecar_url,
+        Arc::new(FontsManifest::empty()),
+        "http://localhost:0".to_string(),
+    );
+
+    let config = DisplayConfiguration {
+        name: "color-test".to_string(),
+        items: vec![LayoutItem::StaticText {
+            id: "red".to_string(),
+            z_index: 0,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+            text_content: "red".to_string(),
+            font_size: 24,
+            orientation: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_family: None,
+            color: Some("#ff0000".to_string()),
+            parent_id: None,
+        }],
+    };
+
+    let _png = compositor.compose(&config, "einkPreview").await.unwrap();
+    let bodies = captured.lock().unwrap();
+    assert!(!bodies.is_empty());
+    assert!(
+        bodies[0].contains("color:#ff0000") || bodies[0].contains("color: #ff0000"),
+        "HTML must contain the item's color; got:\n{}",
+        bodies[0]
+    );
+}
+
+/// Red 7: style-bearing items (StaticText, StaticDateTime, DataField) must
+/// carry an optional `color` field that round-trips through the layout_store
+/// — this is the data backing for the admin-UI color picker.
+#[test]
+fn layout_item_color_roundtrips_through_store() {
+    use cascades::layout_store::{LayoutConfig, LayoutItem, LayoutStore};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = LayoutStore::open(&tmp.path().join("test.db")).unwrap();
+
+    let items = vec![
+        LayoutItem::StaticText {
+            id: "t1".to_string(),
+            z_index: 0,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+            text_content: "hi".to_string(),
+            font_size: 24,
+            orientation: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_family: None,
+            color: Some("#ff0000".to_string()),
+            parent_id: None,
+        },
+        LayoutItem::DataField {
+            id: "d1".to_string(),
+            z_index: 1,
+            x: 10,
+            y: 50,
+            width: 200,
+            height: 60,
+            field_mapping_id: "fm-x".to_string(),
+            font_size: 32,
+            format_string: "{{ value }}".to_string(),
+            label: None,
+            orientation: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_family: None,
+            color: Some("#0033aa".to_string()),
+            parent_id: None,
+        },
+    ];
+
+    store
+        .upsert_layout(&LayoutConfig {
+            id: "cx".to_string(),
+            name: "cx".to_string(),
+            items: items.clone(),
+            updated_at: 0,
+        })
+        .unwrap();
+
+    let loaded = store.get_layout("cx").unwrap().unwrap();
+    assert_eq!(loaded.items.len(), 2);
+
+    // Assert color survived the round-trip on both items.
+    match &loaded.items[0] {
+        LayoutItem::StaticText { color, .. } => {
+            assert_eq!(color.as_deref(), Some("#ff0000"));
+        }
+        other => panic!("expected StaticText, got id={}", other.id()),
+    }
+    match &loaded.items[1] {
+        LayoutItem::DataField { color, .. } => {
+            assert_eq!(color.as_deref(), Some("#0033aa"));
+        }
+        other => panic!("expected DataField, got id={}", other.id()),
+    }
 }
 
 /// Red 5: wrapping produces a full HTML document that embeds the @font-face

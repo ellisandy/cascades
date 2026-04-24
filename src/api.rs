@@ -677,6 +677,10 @@ struct ItemPayload {
     underline: Option<bool>,
     #[serde(default)]
     font_family: Option<String>,
+    /// CSS hex color for style-bearing items (StaticText / StaticDateTime /
+    /// DataField). `None` → compositor default (`#000`).
+    #[serde(default)]
+    color: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -711,6 +715,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                color: self.color,
                 parent_id: self.parent_id,
             }),
             "static_datetime" => Ok(LayoutItem::StaticDateTime {
@@ -727,6 +732,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                color: self.color,
                 parent_id: self.parent_id,
             }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
@@ -757,6 +763,7 @@ impl ItemPayload {
                 italic: self.italic,
                 underline: self.underline,
                 font_family: self.font_family,
+                color: self.color,
                 parent_id: self.parent_id,
             }),
             "group" => Ok(LayoutItem::Group {
@@ -2826,6 +2833,7 @@ mod tests {
                 italic: None,
                 underline: None,
                 font_family: None,
+                color: None,
                 parent_id: None,
             }],
             updated_at: 0,
