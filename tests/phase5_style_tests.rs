@@ -280,6 +280,7 @@ async fn compositor_wraps_sidecar_html_with_font_face() {
             font_family: Some("Inter".to_string()),
             color: None,
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -442,6 +443,7 @@ async fn compositor_emits_item_color_in_sidecar_html() {
             font_family: None,
             color: Some("#ff0000".to_string()),
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -482,6 +484,7 @@ fn layout_item_color_roundtrips_through_store() {
             font_family: None,
             color: Some("#ff0000".to_string()),
             parent_id: None,
+            visible_when: None,
         },
         LayoutItem::DataField {
             id: "d1".to_string(),
@@ -501,6 +504,7 @@ fn layout_item_color_roundtrips_through_store() {
             font_family: None,
             color: Some("#0033aa".to_string()),
             parent_id: None,
+            visible_when: None,
         },
     ];
 

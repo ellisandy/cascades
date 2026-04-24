@@ -266,6 +266,7 @@ fn layout_item_image_roundtrips_through_store() {
         height: 80,
         asset_id: "asset-abc123".to_string(),
         parent_id: Some("group-1".to_string()),
+        visible_when: None,
     };
     store
         .upsert_layout(&LayoutConfig {
@@ -279,7 +280,7 @@ fn layout_item_image_roundtrips_through_store() {
     let loaded = store.get_layout("L1").unwrap().unwrap();
     assert_eq!(loaded.items.len(), 1);
     match &loaded.items[0] {
-        LayoutItem::Image { id, asset_id, x, y, width, height, parent_id, z_index } => {
+        LayoutItem::Image { id, asset_id, x, y, width, height, parent_id, z_index, .. } => {
             assert_eq!(id, "img-42");
             assert_eq!(asset_id, "asset-abc123");
             assert_eq!((*x, *y, *width, *height), (50, 60, 120, 80));
