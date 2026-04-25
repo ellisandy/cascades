@@ -15,6 +15,8 @@
 //! - `PUT  /api/admin/layout/{id}`                      — replace full layout, returns updated layout
 //! - `POST /api/admin/preview/{id}`                     — render layout to PNG
 //! - `POST /api/admin/template/preview`                 — render an inline Jinja template to PNG (editor preview)
+//! - `GET  /api/admin/plugins/{id}/source/{variant}`    — fetch a plugin template's raw Jinja source
+//! - `PUT  /api/admin/plugins/{id}/source/{variant}`    — replace plugin template source (safe-write + reload)
 //! - `GET  /api/admin/plugins`                          — list plugin instances `[{id, name, supported_variants}]`
 //! - `GET  /api/admin/active-layout`                     — get active layout ID
 //! - `PUT  /api/admin/active-layout`                     — set which layout drives `/image.png`
@@ -81,6 +83,11 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Base URL of the Bun render sidecar; surfaced in `GET /api/status`.
     pub sidecar_url: String,
+    /// Template engine — shared with the compositor (which holds its own
+    /// `Arc` clone for renders) so admin endpoints can fetch / replace
+    /// template sources without going through `Compositor`. PR B (plugin
+    /// editor) `GET`/`PUT /api/admin/plugins/{id}/source/{variant}` use it.
+    pub template_engine: Arc<TemplateEngine>,
 }
 
 /// Manages background fetch tasks for generic HTTP data sources.
@@ -198,6 +205,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/admin/plugins/{id}/default_elements",
             get(admin_get_default_elements),
+        )
+        .route(
+            "/api/admin/plugins/{id}/source/{variant}",
+            get(admin_get_plugin_source).put(admin_put_plugin_source)
+                // Mirror the body cap of the preview endpoint so the two
+                // endpoints stay symmetric — anything that previewed cleanly
+                // can be persisted without the cap kicking in.
+                .layer(DefaultBodyLimit::max(MAX_PLUGIN_SOURCE_BYTES + 4096)),
         )
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
         .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
@@ -1924,6 +1939,307 @@ fn template_preview_error(
         .into_response()
 }
 
+// ─── Plugin source GET/PUT (PR B: editor read/write) ─────────────────────────
+
+/// Whitelist for `id` and `variant` path components. Keeps path-traversal
+/// (`..`, `/`, `\`, leading dots, NULs) and platform-quirky characters out of
+/// the safe-write destination. Matches what the existing template loader
+/// will tolerate as a filename stem.
+fn is_valid_template_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Response body for `GET /api/admin/plugins/{id}/source/{variant}`.
+#[derive(Debug, Serialize)]
+struct PluginSourceResponse {
+    id: String,
+    variant: String,
+    /// Canonical template name (`{id}_{variant}`). Returned alongside the
+    /// path components so the client doesn't have to reassemble it.
+    template_name: String,
+    template_source: String,
+    /// All variants of this plugin currently loaded by the engine, sorted.
+    /// Lets the editor render the variant tabs without a second request.
+    available_variants: Vec<String>,
+}
+
+/// Request body for `PUT /api/admin/plugins/{id}/source/{variant}`.
+///
+/// `deny_unknown_fields` means a future client that mistakenly nests the
+/// path components inside the body (e.g. `{template_source: "...",
+/// variant: "full"}`) gets a 400 instead of having the extra fields
+/// silently dropped — schema drift is caught at the boundary.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginSourcePut {
+    template_source: String,
+}
+
+/// Response body returned from a successful PUT.
+#[derive(Debug, Serialize)]
+struct PluginSourcePutResponse {
+    id: String,
+    variant: String,
+    template_name: String,
+    bytes_written: usize,
+    /// Path actually written, relative to the templates directory. Useful
+    /// for ops debugging without leaking the full filesystem path.
+    relative_path: String,
+}
+
+/// `GET /api/admin/plugins/{id}/source/{variant}` — fetch a plugin template's
+/// raw Jinja source so the admin editor can populate the buffer.
+///
+/// Returns 404 if no template named `{id}_{variant}` is loaded; otherwise
+/// returns the source plus the list of all loaded variants for this plugin
+/// id, so the editor can render variant tabs without a second request.
+async fn admin_get_plugin_source(
+    headers: HeaderMap,
+    Path((id, variant)): Path<(String, String)>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !is_valid_template_segment(&id) || !is_valid_template_segment(&variant) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "id and variant must match [A-Za-z0-9_-]{1,64}" })),
+        )
+            .into_response();
+    }
+
+    let template_name = format!("{id}_{variant}");
+    let Some(template_source) = app.template_engine.get_source(&template_name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("template '{template_name}' not loaded"),
+            })),
+        )
+            .into_response();
+    };
+
+    // Prefix-strip "{id}_" off each variant name so the UI gets clean labels
+    // like "full" / "half_horizontal" rather than "weather_full".
+    let prefix = format!("{id}_");
+    let available_variants: Vec<String> = app
+        .template_engine
+        .template_names_with_prefix(&id)
+        .into_iter()
+        .filter_map(|n| n.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+
+    Json(PluginSourceResponse {
+        id,
+        variant,
+        template_name,
+        template_source,
+        available_variants,
+    })
+        .into_response()
+}
+
+/// Maximum size of `template_source` accepted by the PUT endpoint.
+/// Same cap as the preview endpoint — keeps the two paths symmetric so a
+/// source that previewed cleanly is guaranteed to be acceptable to PUT.
+const MAX_PLUGIN_SOURCE_BYTES: usize = MAX_TEMPLATE_SOURCE_BYTES;
+
+/// `PUT /api/admin/plugins/{id}/source/{variant}` — replace a plugin
+/// template's source on disk and reload it into the live engine.
+///
+/// Flow:
+/// 1. Validate `id`/`variant` (whitelist regex, see [`is_valid_template_segment`]).
+/// 2. Validate the new source parses with the production minijinja env —
+///    by handing it to [`TemplateEngine::reload`] *before* touching disk,
+///    so a syntax error never leaves a half-written file behind. minijinja's
+///    `add_template_owned` is transactional: a parse error rejects the new
+///    source without evicting the old, so a failed PUT leaves the engine
+///    state intact.
+/// 3. Safe-write to disk: write to a sibling `*.tmp{nonce}` file in the
+///    same directory, fsync, then atomic-`rename(2)` over the canonical
+///    path. The atomic step guarantees that any concurrent reader (the
+///    filesystem watcher, an external `git diff`) sees either the old or
+///    new content, never a partial.
+/// 4. Return the bytes-written count + relative path.
+///
+/// On any error after step 2, the in-memory engine has already accepted the
+/// new source. That's the right ordering: if disk-write fails (full disk,
+/// permissions), the operator's edit is preserved in memory for the lifetime
+/// of the process — and the watcher will pick the on-disk old version back
+/// up only on the next reboot.
+async fn admin_put_plugin_source(
+    headers: HeaderMap,
+    Path((id, variant)): Path<(String, String)>,
+    State(app): State<Arc<AppState>>,
+    body: Bytes,
+) -> Response<Body> {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !is_valid_template_segment(&id) || !is_valid_template_segment(&variant) {
+        return template_preview_error(
+            StatusCode::BAD_REQUEST,
+            "id and variant must match [A-Za-z0-9_-]{1,64}".into(),
+            None,
+            "validation",
+        );
+    }
+    // Parse manually so a malformed body matches the PR-A
+    // `TemplatePreviewError` shape (the admin editor consumes both).
+    let payload: PluginSourcePut = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            return template_preview_error(
+                StatusCode::BAD_REQUEST,
+                format!("invalid request body: {e}"),
+                None,
+                "validation",
+            );
+        }
+    };
+    if payload.template_source.is_empty() {
+        return template_preview_error(
+            StatusCode::BAD_REQUEST,
+            "template_source must not be empty".into(),
+            None,
+            "validation",
+        );
+    }
+    if payload.template_source.len() > MAX_PLUGIN_SOURCE_BYTES {
+        return template_preview_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("template_source exceeds {MAX_PLUGIN_SOURCE_BYTES} bytes"),
+            None,
+            "validation",
+        );
+    }
+
+    let template_name = format!("{id}_{variant}");
+    let path = app.template_engine.template_path_for(&template_name);
+
+    // Step 1: validate via reload(). Fails fast on syntax error, leaves
+    // the previous template intact via minijinja's transactional behaviour.
+    if let Err(e) = app
+        .template_engine
+        .reload(&template_name, payload.template_source.clone())
+    {
+        let (msg, line, stage) = describe_template_error(&e);
+        return template_preview_error(StatusCode::UNPROCESSABLE_ENTITY, msg, line, stage);
+    }
+
+    // Step 2: safe-write to disk. Done in a blocking task because both the
+    // tmp-write and rename are sync filesystem syscalls; tokio's async fs
+    // would just dispatch to the same blocking pool anyway.
+    let bytes_written = payload.template_source.len();
+    let source = payload.template_source;
+    let path_clone = path.clone();
+    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        safe_write(&path_clone, source.as_bytes())
+    })
+    .await;
+
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            log::warn!(
+                "admin_put_plugin_source: disk write failed for '{}': {}",
+                path.display(),
+                e
+            );
+            return template_preview_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("filesystem write failed: {e}"),
+                None,
+                "validation",
+            );
+        }
+        Err(e) => {
+            log::error!(
+                "admin_put_plugin_source: blocking task panicked for '{}': {}",
+                path.display(),
+                e
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    let relative_path = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    Json(PluginSourcePutResponse {
+        id,
+        variant,
+        template_name,
+        bytes_written,
+        relative_path,
+    })
+        .into_response()
+}
+
+/// Atomically replace `path` with `bytes`.
+///
+/// Writes to a sibling `<path>.tmp.<nonce>` file in the same directory,
+/// fsyncs, and `rename(2)`s into place. POSIX guarantees rename is atomic
+/// for paths on the same filesystem — concurrent readers see either the old
+/// or new content, never a partial.
+///
+/// On any error, the tmp file is best-effort removed so a failed write
+/// doesn't leave debris in `templates/`.
+fn safe_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+
+    // Cheap nonce — `process_id_pid + nanos`. Doesn't need cryptographic
+    // strength; just needs to avoid collision between concurrent writers.
+    let nonce = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0),
+    );
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no filename")
+        })?;
+    let tmp_path = parent.join(format!(".{filename}.tmp.{nonce}"));
+
+    let cleanup = |tmp: &std::path::Path| {
+        let _ = std::fs::remove_file(tmp);
+    };
+
+    let write_then_rename = || -> std::io::Result<()> {
+        {
+            let mut f = std::fs::File::create(&tmp_path)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    };
+
+    match write_then_rename() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            cleanup(&tmp_path);
+            Err(e)
+        }
+    }
+}
+
 /// `GET /api/admin/plugins` — list plugin instances with supported variants.
 async fn admin_list_plugins(
     headers: HeaderMap,
@@ -3213,6 +3529,7 @@ mod tests {
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
+            template_engine: Arc::clone(&template_engine),
         })
     }
 
@@ -3403,6 +3720,7 @@ mod tests {
             refresh_rate_secs: 60,
             started_at: std::time::Instant::now(),
             sidecar_url: "http://localhost:3001".to_string(),
+            template_engine: Arc::clone(&template_engine),
         });
         (state, dir)
     }
@@ -4223,6 +4541,315 @@ mod tests {
             stage == "render" || stage == "parse",
             "expected render/parse stage, got {stage}: {body}"
         );
+    }
+
+    // ── GET/PUT /api/admin/plugins/{id}/source/{variant} ────────────────────
+
+    /// Build a writable test state and pre-load a couple of templates, so the
+    /// GET endpoint has something real to return and the PUT endpoint has a
+    /// templates dir to safe-write into. Returns the state plus the TempDir
+    /// so the caller can keep the templates dir alive.
+    fn make_state_with_templates() -> (Arc<AppState>, tempfile::TempDir) {
+        use crate::asset_store::AssetStore;
+        use crate::config::{Config, DisplayConfig, LocationConfig, SourceIntervals, StorageConfig};
+        use crate::layout_store::LayoutStore;
+        use crate::source_store::SourceStore;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let templates_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(
+            templates_dir.join("weather_full.html.jinja"),
+            "<p>full {{ data.temp }}</p>",
+        )
+        .unwrap();
+        std::fs::write(
+            templates_dir.join("weather_quadrant.html.jinja"),
+            "<p>quad {{ data.temp }}</p>",
+        )
+        .unwrap();
+
+        let instance_store = Arc::new(InstanceStore::open(&db_path).unwrap());
+        let layout_store = Arc::new(LayoutStore::open(&db_path).unwrap());
+        let source_store = Arc::new(SourceStore::open(&db_path).unwrap());
+        let asset_store = Arc::new(AssetStore::open(&db_path).unwrap());
+        let config = Config {
+            display: DisplayConfig { width: 800, height: 480 },
+            location: LocationConfig {
+                latitude: 48.4,
+                longitude: -122.3,
+                name: "Test".to_string(),
+            },
+            sources: SourceIntervals {
+                weather_interval_secs: 300,
+                river_interval_secs: 300,
+                ferry_interval_secs: 60,
+                trail_interval_secs: 900,
+                road_interval_secs: 1800,
+                river: None,
+                trail: None,
+                road: None,
+                ferry: None,
+            },
+            server: None,
+            auth: None,
+            device: None,
+            storage: StorageConfig::default(),
+        };
+        seed_from_config(&instance_store, &config).unwrap();
+
+        let template_engine = Arc::new(TemplateEngine::new(&templates_dir).unwrap());
+        let fonts_manifest = Arc::new(
+            crate::fonts::FontsManifest::load_from(std::path::Path::new("fonts/fonts.json"))
+                .expect("test fonts manifest"),
+        );
+        let compositor = Arc::new(Compositor::new(
+            Arc::clone(&template_engine),
+            Arc::clone(&instance_store),
+            Arc::clone(&layout_store),
+            "http://localhost:3001".to_string(),
+            fonts_manifest,
+            "http://localhost:9090".to_string(),
+        ));
+
+        let scheduler = Arc::new(SourceScheduler::new(Arc::clone(&source_store)));
+
+        let state = Arc::new(AppState {
+            compositor,
+            instance_store,
+            layout_store,
+            source_store,
+            asset_store,
+            scheduler,
+            image_cache: Arc::new(RwLock::new(HashMap::new())),
+            plugin_registry: PluginRegistry::new(),
+            api_key: "test-key".to_string(),
+            refresh_rate_secs: 60,
+            started_at: std::time::Instant::now(),
+            sidecar_url: "http://localhost:3001".to_string(),
+            template_engine,
+        });
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn plugin_source_get_requires_auth() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/plugins/weather/source/full")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn plugin_source_get_returns_loaded_source_and_variants() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/plugins/weather/source/full")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["id"], "weather");
+        assert_eq!(body["variant"], "full");
+        assert_eq!(body["template_name"], "weather_full");
+        assert!(
+            body["template_source"].as_str().unwrap().contains("data.temp"),
+            "expected on-disk source: {body}"
+        );
+        let variants: Vec<&str> = body["available_variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(variants.contains(&"full"), "missing full: {variants:?}");
+        assert!(variants.contains(&"quadrant"), "missing quadrant: {variants:?}");
+    }
+
+    #[tokio::test]
+    async fn plugin_source_get_returns_404_for_unknown_template() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/api/admin/plugins/weather/source/nonexistent")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn plugin_source_get_rejects_path_traversal_in_segments() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        // Axum's matchit won't even let `..` through as a single segment, but
+        // our segment validator should reject anything outside [A-Za-z0-9_-]
+        // so even if it did, we wouldn't try to read it.
+        let req = Request::builder()
+            .uri("/api/admin/plugins/we%2Eather/source/full")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        // Either matchit rejects (404/400) or our validator rejects (400);
+        // both are acceptable, but never 200.
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+            ),
+            "expected 400/404, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_source_put_requires_auth() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({ "template_source": "<p>x</p>" });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/plugins/weather/source/full")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn plugin_source_put_writes_disk_and_reloads_engine() {
+        let (state, dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let body = serde_json::json!({
+            "template_source": "<p>UPDATED {{ data.temp }}°</p>"
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/plugins/weather/source/full")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Disk reflects the new source.
+        let on_disk =
+            std::fs::read_to_string(dir.path().join("templates/weather_full.html.jinja")).unwrap();
+        assert!(on_disk.contains("UPDATED"), "disk source not updated: {on_disk}");
+
+        // No tmp debris left behind.
+        let templates_dir = dir.path().join("templates");
+        let leftover_tmp: Vec<_> = std::fs::read_dir(&templates_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.contains(".tmp."))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "found tmp file left behind: {:?}",
+            leftover_tmp.iter().map(|e| e.file_name()).collect::<Vec<_>>(),
+        );
+
+        // Engine sees the updated source.
+        assert_eq!(
+            state.template_engine.get_source("weather_full"),
+            Some("<p>UPDATED {{ data.temp }}°</p>".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_source_put_rejects_invalid_jinja_without_touching_disk() {
+        let (state, dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let original = std::fs::read_to_string(
+            dir.path().join("templates/weather_full.html.jinja"),
+        )
+        .unwrap();
+
+        let body = serde_json::json!({
+            "template_source": "{% if true %"  // unclosed
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/plugins/weather/source/full")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Disk untouched.
+        let after = std::fs::read_to_string(
+            dir.path().join("templates/weather_full.html.jinja"),
+        )
+        .unwrap();
+        assert_eq!(after, original, "disk source must not change on parse failure");
+
+        // Engine still has the old source.
+        assert_eq!(
+            state.template_engine.get_source("weather_full").as_deref(),
+            Some(original.as_str()),
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["line"].as_u64().is_some(), "expected line: {json}");
+    }
+
+    #[tokio::test]
+    async fn plugin_source_put_rejects_invalid_id_segment() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        // `weather/full` is two segments, so matchit splits it into id="weather"
+        // and the next segment becomes the path's "source" literal — we instead
+        // hit the validator with "wea ther" via percent-encoding.
+        let body = serde_json::json!({ "template_source": "<p>x</p>" });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/plugins/wea%20ther/source/full")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn plugin_source_put_rejects_oversized_source() {
+        let (state, _dir) = make_state_with_templates();
+        let app = build_router(Arc::clone(&state));
+        let big = "x".repeat(MAX_PLUGIN_SOURCE_BYTES + 1);
+        let body = serde_json::json!({ "template_source": big });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/admin/plugins/weather/source/full")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

@@ -18,8 +18,9 @@
 use minijinja::value::Rest;
 use minijinja::{Environment, Error, Value};
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use thiserror::Error;
 
 // ─── Error type ──────────────────────────────────────────────────────────────
@@ -115,13 +116,31 @@ pub struct RenderContext {
 /// Jinja template engine backed by minijinja.
 ///
 /// Call [`TemplateEngine::new`] once at startup, then [`TemplateEngine::render`]
-/// for every display cycle.  Templates are parsed once at construction time;
+/// for every display cycle.  Templates are parsed at construction time and
 /// renders are cheap (context serialisation + tree walk only).
+///
+/// # Hot-reload
+///
+/// PR B (plugin editor): the engine's interior is `RwLock`-protected so
+/// production renders (read locks) and admin edits / filesystem watcher
+/// callbacks (write locks) can coexist without rebuilding the whole engine.
+/// `add_template_owned` cleanly overwrites an existing key — verified by
+/// spike — so [`TemplateEngine::reload`] is a single in-place update that
+/// every subsequent `render` call observes.
 pub struct TemplateEngine {
     /// Pre-built environment with all templates loaded and filters registered.
-    env: Environment<'static>,
-    /// Set of loaded template names, for O(1) membership checks.
-    names: HashSet<String>,
+    /// Wrapped in `RwLock` so [`Self::reload`] can swap a single template
+    /// in place while concurrent renders take read locks.
+    env: RwLock<Environment<'static>>,
+    /// Map of `template_name → template_source`. Doubles as the loaded-name
+    /// set (membership + count) and as the source-of-truth for the admin
+    /// `GET /api/admin/plugins/{id}/source/{variant}` endpoint, which would
+    /// otherwise have to re-read from disk on every fetch.
+    sources: RwLock<HashMap<String, String>>,
+    /// Root directory passed to [`Self::new`]. Stored so [`Self::reload_file`]
+    /// and the filesystem watcher can resolve template names back to paths
+    /// even if the process's CWD changes after startup.
+    templates_dir: PathBuf,
 }
 
 impl TemplateEngine {
@@ -162,30 +181,37 @@ impl TemplateEngine {
         }
 
         let mut env = build_env();
-        let mut names = HashSet::new();
+        let mut sources = HashMap::new();
         for (name, src) in raw {
-            env.add_template_owned(name.clone(), src)
+            env.add_template_owned(name.clone(), src.clone())
                 .map_err(|e| TemplateError::RenderError {
                     name: name.clone(),
                     source: e,
                 })?;
-            names.insert(name);
+            sources.insert(name, src);
         }
 
-        Ok(TemplateEngine { env, names })
+        Ok(TemplateEngine {
+            env: RwLock::new(env),
+            sources: RwLock::new(sources),
+            templates_dir: templates_dir.to_path_buf(),
+        })
     }
 
     /// Render `template_name` (the stem, without `.html.jinja`) with `ctx`.
     ///
     /// Returns the rendered HTML string.
     pub fn render(&self, template_name: &str, ctx: &RenderContext) -> Result<String, TemplateError> {
-        if !self.names.contains(template_name) {
+        // Cheap presence check up front so a missing template doesn't pay the
+        // full env-lock + minijinja error-construction cost.
+        if !self.sources.read().expect("sources lock poisoned").contains_key(template_name) {
             return Err(TemplateError::TemplateNotFound {
                 name: template_name.to_owned(),
             });
         }
 
-        let tmpl = self.env.get_template(template_name).map_err(|e| TemplateError::RenderError {
+        let env = self.env.read().expect("env lock poisoned");
+        let tmpl = env.get_template(template_name).map_err(|e| TemplateError::RenderError {
             name: template_name.to_owned(),
             source: e,
         })?;
@@ -202,12 +228,122 @@ impl TemplateEngine {
 
     /// Number of templates loaded.
     pub fn template_count(&self) -> usize {
-        self.names.len()
+        self.sources.read().expect("sources lock poisoned").len()
     }
 
     /// Returns `true` if the named template was loaded.
     pub fn has_template(&self, name: &str) -> bool {
-        self.names.contains(name)
+        self.sources.read().expect("sources lock poisoned").contains_key(name)
+    }
+
+    /// Return the raw Jinja source for `name`, or `None` if no template by
+    /// that name is loaded. Used by the admin
+    /// `GET /api/admin/plugins/{id}/source/{variant}` endpoint.
+    pub fn get_source(&self, name: &str) -> Option<String> {
+        self.sources
+            .read()
+            .expect("sources lock poisoned")
+            .get(name)
+            .cloned()
+    }
+
+    /// List loaded template names whose stem starts with `prefix` followed by
+    /// `_`. E.g. `prefix = "weather"` → `["weather_full",
+    /// "weather_half_horizontal", ...]`. Used to enumerate available variants
+    /// for the admin editor's variant tabs. Names are returned sorted to
+    /// give the UI a stable order.
+    pub fn template_names_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let needle = format!("{prefix}_");
+        let sources = self.sources.read().expect("sources lock poisoned");
+        let mut out: Vec<String> = sources
+            .keys()
+            .filter(|k| k.starts_with(&needle))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Replace (or add) the template source for `name`.
+    ///
+    /// On success, every subsequent [`Self::render`] call observes the new
+    /// source. On failure (Jinja parse error), the previously-loaded source
+    /// is preserved untouched — minijinja's `add_template_owned` is
+    /// transactional in this respect: a parse error rejects the new source
+    /// before evicting the old one.
+    ///
+    /// Called from both
+    /// - the admin `PUT /api/admin/plugins/{id}/source/{variant}` handler
+    ///   (after the new source has been written to disk), and
+    /// - the filesystem watcher in [`watch_templates`].
+    pub fn reload(&self, name: &str, source: String) -> Result<(), TemplateError> {
+        let mut env = self.env.write().expect("env lock poisoned");
+        env.add_template_owned(name.to_owned(), source.clone())
+            .map_err(|e| TemplateError::RenderError {
+                name: name.to_owned(),
+                source: e,
+            })?;
+        // Only insert into the source map after add_template_owned accepted
+        // it, so a rejected source doesn't poison `get_source`.
+        self.sources
+            .write()
+            .expect("sources lock poisoned")
+            .insert(name.to_owned(), source);
+        Ok(())
+    }
+
+    /// Reload a template by reading `path` from disk and dispatching to
+    /// [`Self::reload`]. The template name is derived from the filename
+    /// (`weather_full.html.jinja` → `weather_full`).
+    ///
+    /// Returns `Ok(None)` if `path` doesn't have a recognised template
+    /// extension — the watcher gets `Modify` events for `.tmp` files too,
+    /// and silently skipping is friendlier than logging warnings.
+    pub fn reload_file(&self, path: &Path) -> Result<Option<String>, TemplateError> {
+        if path.extension().and_then(|s| s.to_str()) != Some("jinja") {
+            return Ok(None);
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            return Ok(None);
+        };
+        let name = stem.trim_end_matches(".html").to_owned();
+        let source = std::fs::read_to_string(path).map_err(|e| TemplateError::ReadError {
+            name: name.clone(),
+            source: e,
+        })?;
+        self.reload(&name, source)?;
+        Ok(Some(name))
+    }
+
+    /// Drop the template named `name` from the engine. Subsequent calls to
+    /// [`Self::render`] for this name return [`TemplateError::TemplateNotFound`].
+    /// No-op if the template is not loaded.
+    ///
+    /// Currently used only in tests; exposed publicly so PR B's filesystem
+    /// watcher can mirror file-deletion events when that's wired later.
+    pub fn remove(&self, name: &str) {
+        self.env
+            .write()
+            .expect("env lock poisoned")
+            .remove_template(name);
+        self.sources
+            .write()
+            .expect("sources lock poisoned")
+            .remove(name);
+    }
+
+    /// Resolve a template name to its on-disk path under [`Self::templates_dir`].
+    /// Always uses the canonical `<name>.html.jinja` shape — matches what
+    /// [`Self::new`] loads. Used by the admin PUT handler to pick the safe-write
+    /// destination.
+    pub fn template_path_for(&self, name: &str) -> PathBuf {
+        self.templates_dir.join(format!("{name}.html.jinja"))
+    }
+
+    /// The directory passed to [`Self::new`]. Used by `watch_templates` to
+    /// set up the inotify/kqueue watch on the same path.
+    pub fn templates_dir(&self) -> &Path {
+        &self.templates_dir
     }
 
     /// Render a Jinja template provided as a raw source string against `ctx`.
@@ -264,6 +400,86 @@ fn build_env() -> Environment<'static> {
     env.add_filter("days_ago", filter_days_ago);
     env.add_filter("time_of_day", filter_time_of_day);
     env
+}
+
+// ─── Hot-reload (filesystem watcher) ─────────────────────────────────────────
+
+/// Start a filesystem watcher on the engine's `templates_dir`.
+///
+/// On any `Create` or `Modify` event for a `.html.jinja` file, the affected
+/// file is reloaded into `engine` via [`TemplateEngine::reload_file`]. The
+/// watcher runs on a background thread and lives as long as the returned
+/// handle is held — drop the handle to stop watching. Callers in
+/// `main.rs` should bind it to a `_` name with a long-enough lifetime
+/// (e.g. the program scope).
+///
+/// Mirrors `plugin_registry::watch_plugins_d` in shape so the operator
+/// experience for editing templates matches editing plugin TOMLs.
+///
+/// Returns `Err` if the watcher cannot be set up (e.g. inotify limit hit
+/// on Linux). The caller decides whether to fail-fast at startup or log
+/// + carry on without hot-reload.
+pub fn watch_templates(
+    engine: std::sync::Arc<TemplateEngine>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+    let dir = engine.templates_dir().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
+
+    let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
+    watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+
+    std::thread::spawn(move || {
+        for result in rx {
+            match result {
+                Ok(event) => {
+                    let is_create_or_modify = matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_)
+                    );
+                    if !is_create_or_modify {
+                        continue;
+                    }
+                    for path in &event.paths {
+                        // Skip non-template paths fast.
+                        //
+                        // The admin PUT path (see `safe_write` in api.rs)
+                        // creates `.{name}.html.jinja.tmp.{pid}_{nanos}`
+                        // alongside the canonical file before renaming.
+                        // The tmp path's last component ends in `.{nanos}`,
+                        // so its `extension()` returns the numeric suffix
+                        // — never `"jinja"` — and we filter it out here
+                        // without an extra reload. This is the *reason*
+                        // PR B's safe-write doesn't double-fire the
+                        // watcher; the disk-cleanup in safe_write is a
+                        // belt-and-suspenders step on top of it.
+                        //
+                        // Editors also do dotfile swaps
+                        // (`.weather_full.html.jinja.swp`), which the
+                        // same filter discards.
+                        if path.extension().and_then(|e| e.to_str()) != Some("jinja") {
+                            continue;
+                        }
+                        match engine.reload_file(path) {
+                            Ok(Some(name)) => {
+                                log::info!("templates: reloaded '{name}'")
+                            }
+                            Ok(None) => {}
+                            Err(e) => log::warn!(
+                                "templates: failed to reload '{}': {}",
+                                path.display(),
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::warn!("templates: watcher error: {e}"),
+            }
+        }
+    });
+
+    Ok(watcher)
 }
 
 // ─── Custom filters ───────────────────────────────────────────────────────────
@@ -896,6 +1112,162 @@ mod tests {
         assert!(engine.has_template("loaded"));
         assert!(!engine.has_template("<inline>"));
         assert_eq!(engine.template_count(), 1);
+    }
+
+    // ── Hot-reload: in-place template replacement ────────────────────────────
+
+    #[test]
+    fn reload_replaces_existing_template_in_place() {
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "t.html.jinja", r#"<p>v1</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+        assert_eq!(engine.render("t", &make_ctx(JsonValue::Null)).unwrap().trim(), "<p>v1</p>");
+
+        engine.reload("t", "<p>v2</p>".to_string()).unwrap();
+        assert_eq!(engine.render("t", &make_ctx(JsonValue::Null)).unwrap().trim(), "<p>v2</p>");
+        // The replacement doesn't add a phantom second entry.
+        assert_eq!(engine.template_count(), 1);
+    }
+
+    #[test]
+    fn reload_adds_new_template_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+        assert_eq!(engine.template_count(), 0);
+
+        engine.reload("fresh", "<p>{{ data.x }}</p>".to_string()).unwrap();
+        assert!(engine.has_template("fresh"));
+        assert_eq!(
+            engine.render("fresh", &make_ctx(serde_json::json!({ "x": 9 }))).unwrap().trim(),
+            "<p>9</p>",
+        );
+    }
+
+    #[test]
+    fn reload_with_invalid_source_preserves_previous() {
+        // minijinja's add_template_owned is transactional on parse failure:
+        // a syntactically-broken source must not evict the previously-loaded
+        // template. PR B's PUT handler relies on this behaviour to keep the
+        // engine consistent if a user PUTs a broken template.
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "t.html.jinja", r#"<p>good</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+
+        let err = engine.reload("t", "{% if true %".to_string()).unwrap_err();
+        assert!(matches!(err, TemplateError::RenderError { .. }));
+
+        // Old source is still rendered + retrievable.
+        assert_eq!(
+            engine.render("t", &make_ctx(JsonValue::Null)).unwrap().trim(),
+            "<p>good</p>",
+        );
+        assert_eq!(engine.get_source("t"), Some("<p>good</p>".to_string()));
+    }
+
+    #[test]
+    fn reload_file_picks_up_filesystem_changes() {
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "t.html.jinja", r#"<p>v1</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+
+        let path = dir.path().join("t.html.jinja");
+        std::fs::write(&path, "<p>v2</p>").unwrap();
+        let name = engine.reload_file(&path).unwrap();
+        assert_eq!(name.as_deref(), Some("t"));
+        assert_eq!(engine.get_source("t").as_deref(), Some("<p>v2</p>"));
+    }
+
+    #[test]
+    fn reload_file_skips_non_jinja_paths() {
+        // The watcher fires on .swp, .tmp, etc. — reload_file must silently
+        // ignore those instead of erroring or crashing.
+        let dir = TempDir::new().unwrap();
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+
+        let scratch = dir.path().join("ignore.tmp");
+        std::fs::write(&scratch, "irrelevant").unwrap();
+        let result = engine.reload_file(&scratch).unwrap();
+        assert_eq!(result, None);
+        assert_eq!(engine.template_count(), 0);
+    }
+
+    #[test]
+    fn remove_drops_template_from_engine() {
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "t.html.jinja", r#"<p>x</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+        engine.remove("t");
+        assert!(!engine.has_template("t"));
+        assert!(matches!(
+            engine.render("t", &make_ctx(JsonValue::Null)),
+            Err(TemplateError::TemplateNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn get_source_returns_loaded_source() {
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "t.html.jinja", r#"<p>{{ data.x }}</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+        assert_eq!(engine.get_source("t").as_deref(), Some("<p>{{ data.x }}</p>"));
+        assert_eq!(engine.get_source("missing"), None);
+    }
+
+    #[test]
+    fn template_names_with_prefix_filters_and_sorts() {
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "weather_full.html.jinja", r#"<p>f</p>"#);
+        write_template(&dir, "weather_quadrant.html.jinja", r#"<p>q</p>"#);
+        write_template(&dir, "river_full.html.jinja", r#"<p>r</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+
+        let weather = engine.template_names_with_prefix("weather");
+        assert_eq!(weather, vec!["weather_full", "weather_quadrant"]);
+        assert_eq!(engine.template_names_with_prefix("river"), vec!["river_full"]);
+        assert!(engine.template_names_with_prefix("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn template_path_for_resolves_canonical_path() {
+        let dir = TempDir::new().unwrap();
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+        assert_eq!(
+            engine.template_path_for("weather_full"),
+            dir.path().join("weather_full.html.jinja"),
+        );
+    }
+
+    #[test]
+    fn watch_templates_picks_up_writes_eventually() {
+        // The watcher runs on a background thread; this asserts the
+        // end-to-end fsevent → reload_file → engine.get_source path works.
+        // A short timeout (~2s) is enough on macOS / Linux notify.
+        use std::sync::Arc;
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "t.html.jinja", r#"<p>v1</p>"#);
+        let engine = Arc::new(TemplateEngine::new(dir.path()).unwrap());
+        let _watcher = super::watch_templates(Arc::clone(&engine)).unwrap();
+
+        // Give the watcher a moment to register before we hit it.
+        sleep(Duration::from_millis(50));
+        std::fs::write(dir.path().join("t.html.jinja"), "<p>v2</p>").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if engine.get_source("t").as_deref() == Some("<p>v2</p>") {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "watcher did not propagate new source within 2s; got {:?}",
+                    engine.get_source("t"),
+                );
+            }
+            sleep(Duration::from_millis(50));
+        }
     }
 
     // ── Unit tests for helpers ────────────────────────────────────────────────
