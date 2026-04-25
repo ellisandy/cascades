@@ -52,6 +52,21 @@ export async function closeBrowser(): Promise<void> {
 
 // ─── Puppeteer screenshot ─────────────────────────────────────────────────────
 
+// Hard caps for the per-render Puppeteer ops. Renamed to `*_MS` for grep-ability.
+//
+// 60s on setContent is generous on purpose: on a Pi Zero 2 W under load
+// (multiple parallel renders + the per-render font fetches looping back
+// through cascades's /fonts/* handler), even a `domcontentloaded` wait
+// can take a handful of seconds. 60s gives us headroom over the worst
+// real-world case we've measured (~17s for 5 parallel renders mid-Pi-load).
+//
+// 5s on document.fonts.ready is a tight gate intentionally — fonts that
+// can't be reached or parsed in 5s have a real problem. Better to fall
+// through and screenshot with the system fallback than to block the
+// whole render on a pathological font.
+const SET_CONTENT_TIMEOUT_MS = 60_000;
+const FONTS_READY_TIMEOUT_MS = 5_000;
+
 async function screenshotHtml(
   html: string,
   width: number,
@@ -61,7 +76,38 @@ async function screenshotHtml(
   const page = await b.newPage();
   try {
     await page.setViewport({ width, height, deviceScaleFactor: 1 });
-    await page.setContent(html, { waitUntil: "networkidle0" });
+    // Issue #23: `networkidle0` (the previous default) waits for ZERO
+    // open connections for 500ms. Our wrapped HTML's @font-face URLs
+    // point back at the same cascades server's /fonts/* handler, so
+    // under load (the editor's debounced previews + the device polling)
+    // the per-render font fetches stack up and never reach idle —
+    // setContent times out at 30s and the whole render fails.
+    //
+    // Switch to `domcontentloaded` (returns when the HTML parser is
+    // done) plus an explicit `document.fonts.ready` wait so we still
+    // gate on fonts being painted-ready before screenshot, but we
+    // don't gate on "all network is quiet" — which is the bit that
+    // races against parallel render load. The fonts-ready wait has
+    // its own short timeout so a single broken font URL can't lock
+    // the render thread.
+    await page.setContent(html, {
+      waitUntil: "domcontentloaded",
+      timeout: SET_CONTENT_TIMEOUT_MS,
+    });
+    try {
+      await page.evaluate(
+        async (timeoutMs: number) =>
+          await Promise.race([
+            document.fonts.ready,
+            new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+          ]),
+        FONTS_READY_TIMEOUT_MS,
+      );
+    } catch {
+      // Best-effort. If fonts.ready throws (Promise rejection or
+      // page-context error), fall through and screenshot with whatever
+      // is painted — strictly better than failing the entire render.
+    }
     const buf = await page.screenshot({ type: "png" });
     return Buffer.from(buf);
   } finally {
