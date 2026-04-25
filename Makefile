@@ -1,0 +1,116 @@
+# Cascades — top-level orchestration.
+#
+# This Makefile is a thin wrapper around `cargo`, `bun`, and the Pi
+# installer scripts. Day-to-day development still uses cargo / bun
+# directly; the Makefile exists so that "deploying to a Pi" is a
+# discoverable, single-command flow.
+#
+# Common targets:
+#   make build              - cargo build --release (the binary the installer needs)
+#   make install            - sudo ./scripts/install.sh   (Pi only)
+#   make uninstall          - sudo ./scripts/uninstall.sh
+#   make uninstall PURGE=1  - also wipes /opt/cascades + the cascades user
+#   make status             - systemctl status for all three services
+#   make logs               - tail -f for all three services
+#   make test               - cargo test
+#   make help               - show this list
+
+.DEFAULT_GOAL := help
+
+# Marker so `make install PURGE=1` works without quoting headaches.
+PURGE ?= 0
+
+# ─── Build ────────────────────────────────────────────────────────────────
+
+.PHONY: build
+build: ## Build the release binary (the one the installer copies to the Pi)
+	@command -v cargo >/dev/null 2>&1 || { \
+		echo "cargo not found. Install rustup from https://rustup.rs first."; \
+		exit 1; \
+	}
+	cargo build --release
+	@printf "\n✓ Binary: target/release/cascades\n"
+
+.PHONY: build-arm64
+build-arm64: ## Cross-compile for aarch64 (Pi 4/5) — requires `cross`
+	@command -v cross >/dev/null 2>&1 || { \
+		echo "cross not found. Install with: cargo install cross --git https://github.com/cross-rs/cross"; \
+		exit 1; \
+	}
+	cross build --release --target aarch64-unknown-linux-gnu
+	@printf "\n✓ ARM64 binary: target/aarch64-unknown-linux-gnu/release/cascades\n"
+	@printf "  (when running install.sh, copy this binary to target/release/cascades on the Pi first)\n"
+
+# ─── Install / uninstall ─────────────────────────────────────────────────
+
+.PHONY: install
+install: build ## Build + run the Pi installer (idempotent)
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		./scripts/install.sh; \
+	else \
+		sudo ./scripts/install.sh; \
+	fi
+
+.PHONY: install-server-only
+install-server-only: build ## Install everything except the e-ink display loop
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		./scripts/install.sh --skip-display; \
+	else \
+		sudo ./scripts/install.sh --skip-display; \
+	fi
+
+.PHONY: uninstall
+uninstall: ## Stop services + remove binaries (preserves data unless PURGE=1)
+	@if [ "$(PURGE)" = "1" ]; then \
+		ARGS="--purge"; \
+	else \
+		ARGS=""; \
+	fi; \
+	if [ "$$(id -u)" -eq 0 ]; then \
+		./scripts/uninstall.sh $$ARGS; \
+	else \
+		sudo ./scripts/uninstall.sh $$ARGS; \
+	fi
+
+# ─── Operations ──────────────────────────────────────────────────────────
+
+.PHONY: status
+status: ## systemctl status for all Cascades services
+	@for u in cascades-sidecar cascades cascades-display; do \
+		printf "\n\033[1;36m▶ %s\033[0m\n" "$$u"; \
+		systemctl --no-pager status $$u 2>/dev/null || echo "(not installed)"; \
+	done
+
+.PHONY: logs
+logs: ## Tail -f all three service logs (Ctrl+C to exit)
+	journalctl -f -u cascades -u cascades-sidecar -u cascades-display
+
+.PHONY: restart
+restart: ## Restart all three services in dependency order
+	sudo systemctl restart cascades-sidecar
+	sudo systemctl restart cascades
+	sudo systemctl restart cascades-display 2>/dev/null || true
+
+# ─── Dev ─────────────────────────────────────────────────────────────────
+
+.PHONY: test
+test: ## cargo test (lib + integration)
+	cargo test --lib --tests
+
+.PHONY: clippy
+clippy: ## cargo clippy
+	cargo clippy --lib --tests
+
+.PHONY: dev
+dev: ## Run the dev server in fixture mode (no live API calls)
+	./scripts/dev-server.sh
+
+# ─── Help ────────────────────────────────────────────────────────────────
+
+.PHONY: help
+help: ## Show this help
+	@printf "\n\033[1mCascades — make targets\033[0m\n\n"
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / { \
+		printf "  \033[1;32m%-22s\033[0m %s\n", $$1, $$2 \
+	}' $(MAKEFILE_LIST)
+	@printf "\n"

@@ -1,0 +1,46 @@
+[Unit]
+# Bun + Puppeteer Chromium render sidecar. The Rust server posts HTML and
+# gets back PNG bytes from this process — must be up before the server.
+Description=Cascades render sidecar (Bun + Puppeteer)
+Documentation=https://github.com/ellisandy/cascades
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cascades
+Group=cascades
+WorkingDirectory=/opt/cascades/sidecar
+
+# RENDER_PORT is read by sidecar/server.ts. Loopback-only — the Rust server
+# is the only legitimate caller, and the firewall layer (if any) shouldn't
+# expose 3001 publicly.
+Environment=RENDER_PORT=3001
+# Where the install.sh script puts Bun. Could also be /usr/local/bin/bun if
+# bun was installed system-wide.
+Environment=PATH=/home/cascades/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/cascades/.bun/bin/bun server.ts
+
+# Chromium spawns a few subprocesses per render; let it.
+TasksMax=512
+
+# Crash-only restart with backoff so a hung Chromium doesn't loop hot.
+Restart=on-failure
+RestartSec=5
+
+# Hardening. ProtectSystem=strict + PrivateTmp gives Chromium its own
+# isolated /tmp (it needs scratch space for its profile dir) and makes
+# the rest of /usr, /etc, /boot, /var read-only. ProtectHome=read-only
+# (not =true) because Bun lives under /home/cascades/.bun and Puppeteer's
+# Chromium cache is at /home/cascades/.cache/puppeteer — both need to
+# stay readable, neither needs to be writable at runtime.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
