@@ -1048,6 +1048,7 @@ fn make_api_app(
         refresh_rate_secs: 42,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),
+        template_engine: Arc::clone(&template_engine),
     });
 
     let router = build_router(Arc::clone(&state));
@@ -1162,6 +1163,7 @@ async fn webhook_invalidates_image_cache_for_affected_display() {
         refresh_rate_secs: 60,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),
+        template_engine: Arc::clone(&template_engine),
     });
 
     let app = cascades::api::build_router(Arc::clone(&state));

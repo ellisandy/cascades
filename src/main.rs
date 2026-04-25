@@ -177,7 +177,22 @@ async fn main() {
         refresh_rate_secs,
         started_at: std::time::Instant::now(),
         sidecar_url,
+        template_engine: Arc::clone(&template_engine),
     });
+
+    // Hot-reload watcher for templates/. Fires on `Modify`/`Create` for
+    // `*.html.jinja` files and calls back into `template_engine.reload_file`.
+    // Held by main's scope (the watcher stops on drop) so it lives for
+    // the lifetime of the process.
+    let _template_watcher = match cascades::template::watch_templates(Arc::clone(&template_engine)) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            log::warn!(
+                "templates: failed to start filesystem watcher (hot-reload disabled): {e}"
+            );
+            None
+        }
+    };
 
     let app = build_router(app_state);
 

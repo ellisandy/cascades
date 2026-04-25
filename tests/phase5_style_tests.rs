@@ -64,6 +64,7 @@ fn make_test_router(base_dir: &Path) -> axum::Router {
         refresh_rate_secs: 42,
         started_at: std::time::Instant::now(),
         sidecar_url: "http://localhost:3001".to_string(),
+        template_engine: Arc::clone(&template_engine),
     });
     build_router(state)
 }
