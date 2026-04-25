@@ -32,14 +32,25 @@ build: ## Build the release binary (the one the installer copies to the Pi)
 	@printf "\n✓ Binary: target/release/cascades\n"
 
 .PHONY: build-arm64
-build-arm64: ## Cross-compile for aarch64 (Pi 4/5) — requires `cross`
+build-arm64: ## Cross-compile for aarch64-linux (Pi) — needs `cross` + Docker
 	@command -v cross >/dev/null 2>&1 || { \
-		echo "cross not found. Install with: cargo install cross --git https://github.com/cross-rs/cross"; \
+		echo "cross not found."; \
+		echo "  Apple Silicon: cargo install cross --git https://github.com/cross-rs/cross --locked"; \
+		echo "                 (the crates.io 0.2.5 release is broken on aarch64 hosts —"; \
+		echo "                  see https://github.com/cross-rs/cross/issues/1628)"; \
+		echo "  x86_64 Linux:  cargo install cross --locked"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "Docker daemon not running. Start Docker Desktop / colima / podman first."; \
 		exit 1; \
 	}
 	cross build --release --target aarch64-unknown-linux-gnu
 	@printf "\n✓ ARM64 binary: target/aarch64-unknown-linux-gnu/release/cascades\n"
-	@printf "  (when running install.sh, copy this binary to target/release/cascades on the Pi first)\n"
+	@printf "  Ship to the Pi:\n"
+	@printf "    scp target/aarch64-unknown-linux-gnu/release/cascades \\\\\n"
+	@printf "        jackellis@<pi-host>:/srv/cascades/target/release/cascades\n"
+	@printf "  Then on the Pi: sudo ./scripts/install.sh\n"
 
 # ─── Install / uninstall ─────────────────────────────────────────────────
 

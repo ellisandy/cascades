@@ -35,3 +35,52 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked -- -D warnings
+
+  cross-build-arm64:
+    # Cross-compile gate: catches regressions that break the Pi target
+    # (the deploy path for `make install`) without us having to wait for a
+    # ~50-minute build on a Pi Zero 2 W to fail. Independent of the test
+    # job — a regression in either should fail loudly without blocking
+    # the other.
+    name: Cross-build (aarch64-linux-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        # taiki-e/install-action grabs a prebuilt cross binary in seconds
+        # vs ~3 min for `cargo install`. CI runs on x86_64 Linux where
+        # the upstream crates.io 0.2.5 release works fine. Apple Silicon
+        # operators should follow the Makefile's recommendation
+        # (`cargo install cross --git`) instead — the crates.io build is
+        # broken on aarch64 hosts (cross-rs/cross#1628).
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache cargo registry + cross target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/aarch64-unknown-linux-gnu
+          key: ${{ runner.os }}-cross-aarch64-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cross-aarch64-
+
+      - name: Cross build (release)
+        run: cross build --release --target aarch64-unknown-linux-gnu --locked
+
+      - name: Verify binary is aarch64-linux ELF
+        # `file` reports "ARM aarch64" for the right output. Anything else
+        # means cross silently fell back to native cargo (which it warns
+        # about but doesn't fail on) and we'd have shipped an x86_64
+        # binary to a Pi.
+        run: |
+          BIN=target/aarch64-unknown-linux-gnu/release/cascades
+          file "$BIN"
+          file "$BIN" | grep -q "ARM aarch64"
+          echo "✓ aarch64 binary verified ($(stat -c%s "$BIN") bytes)"
