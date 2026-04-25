@@ -543,7 +543,7 @@ fn wrap_html_embeds_font_face_and_preserves_inner() {
     let manifest = cascades::fonts::FontsManifest::load_from(Path::new("fonts/fonts.json"))
         .expect("manifest must load");
     let inner = "<div class=\"marker\">hello</div>";
-    let wrapped = manifest.wrap_html(inner, "http://localhost:9090");
+    let wrapped = manifest.wrap_html(inner, "http://localhost:9090", &[]);
 
     assert!(wrapped.starts_with("<!DOCTYPE html>"), "must be a full document");
     assert!(wrapped.contains("@font-face"), "must include @font-face CSS");

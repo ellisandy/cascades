@@ -745,9 +745,9 @@
       <div class="asset-empty">Loading...</div>
     </div>
     <div style="margin-top:8px">
-      <label class="asset-upload-btn" for="asset-file-input">+ Upload PNG/JPEG</label>
+      <label class="asset-upload-btn" for="asset-file-input">+ Upload image / font</label>
       <input id="asset-file-input" type="file"
-             accept="image/png,image/jpeg"
+             accept="image/png,image/jpeg,font/woff2,font/woff,font/ttf,.woff2,.woff,.ttf"
              style="display:none"
              onchange="onAssetFilePicked(event)">
     </div>
@@ -1455,6 +1455,20 @@ function renderAssetList() {
   el.innerHTML = cachedAssets.map(function(a) {
     const safeId = esc(a.id);
     const safeName = esc(a.filename);
+    // Phase 10: dispatch by kind. Image assets stay draggable as before
+    // (drop creates a LayoutItem::Image). Fonts render as a simple
+    // typographic chip — they're not draggable onto the canvas; the user
+    // selects them via the font picker in any text item's inspector.
+    if (a.kind === 'font') {
+      return '<div class="asset-item" title="' + safeName +
+        ' — use this font via any text item’s Font picker">' +
+        '<div class="asset-thumb" style="display:flex;align-items:center;' +
+          'justify-content:center;font-size:11px;color:#8b949e;' +
+          'background:#0d1117;border:1px dashed #30363d;border-radius:4px;' +
+          'padding:8px 4px;text-align:center">font</div>' +
+        '<div class="asset-name">' + safeName + '</div>' +
+        '</div>';
+    }
     return '<div class="asset-item" draggable="true" ' +
       // The drop handler reads {type:"asset", id:"asset-…"} from the
       // dataTransfer payload and creates a LayoutItem::Image.
@@ -2910,7 +2924,9 @@ function toggleKnobControl(field, value) {
 // subkeys you don't bind.")
 function textStyleKnobControl(field, value) {
   const v = (value && typeof value === 'object') ? value : {};
-  const familyOpts = FONT_FAMILIES.map(function(f) {
+  // Phase 10: pull the merged curated + uploaded list so theming knobs can
+  // pick uploaded families too.
+  const familyOpts = fontFamilyOptions().map(function(f) {
     return '<option value="' + esc(f.value) + '"' +
       ((v.family || '') === f.value ? ' selected' : '') + '>' + esc(f.label) + '</option>';
   }).join('');
@@ -3046,8 +3062,34 @@ const FONT_FAMILIES = [
   { value: 'Verdana, sans-serif',          label: 'Verdana' },
 ];
 
+// Phase 10: merge curated FONT_FAMILIES with user-uploaded fonts so the
+// picker shows everything together. Uploaded entries derive their value
+// (the CSS font-family name the sidecar's @font-face declares) and label
+// from the asset's filename — same naming the compositor uses on the
+// server side. Returns a fresh array each call so a re-render after an
+// upload picks up the new entry without a page reload.
+function fontFamilyOptions() {
+  const uploaded = (cachedAssets || [])
+    .filter(function(a) { return a.kind === 'font'; })
+    .map(function(a) {
+      const stem = a.filename.replace(/\.(woff2|woff|ttf)$/i, '');
+      return { value: stem, label: stem + ' (uploaded)' };
+    });
+  // Deduplicate by value so a curated and an uploaded family with the same
+  // name don't both render — the curated entry wins (predictable defaults).
+  const seen = new Set(FONT_FAMILIES.map(function(f) { return f.value; }));
+  const dedupedUploaded = uploaded.filter(function(f) {
+    if (seen.has(f.value)) return false;
+    seen.add(f.value);
+    return true;
+  });
+  return FONT_FAMILIES.concat(dedupedUploaded);
+}
+
 function textFormatFields(item) {
-  const fontOpts = FONT_FAMILIES.map(function(f) {
+  // Phase 10: merge curated + uploaded fonts so user-uploaded families show
+  // up alongside the curated five.
+  const fontOpts = fontFamilyOptions().map(function(f) {
     return '<option value="' + esc(f.value) + '"' +
       ((item.font_family || '') === f.value ? ' selected' : '') + '>' + esc(f.label) + '</option>';
   }).join('');

@@ -38,15 +38,21 @@ use crate::template::{NowContext, RenderContext, TemplateEngine};
 /// Bundles the curated-font manifest and the URL Chromium should use to fetch
 /// font files, so the compositor can wrap every sidecar payload with
 /// `<head><style>@font-face…</style></head>` in one place.
+///
+/// Phase 10: `uploaded_fonts` carries user-uploaded font assets so the
+/// wrap step can emit @font-face declarations for them too. Built once per
+/// `compose()` call from `AssetStore::list_fonts`.
 #[derive(Clone)]
 pub(crate) struct FontsWrap {
     pub manifest: Arc<FontsManifest>,
     pub base_url: String,
+    pub uploaded_fonts: Arc<Vec<crate::fonts::UploadedFont>>,
 }
 
 impl FontsWrap {
     fn wrap(&self, inner: &str) -> String {
-        self.manifest.wrap_html(inner, &self.base_url)
+        self.manifest
+            .wrap_html(inner, &self.base_url, &self.uploaded_fonts)
     }
 }
 
@@ -273,6 +279,10 @@ impl Compositor {
             fonts: FontsWrap {
                 manifest: fonts_manifest,
                 base_url: font_base_url.into(),
+                // Start empty; compose() refreshes from the asset store on
+                // every render so newly-uploaded fonts apply immediately
+                // (no compositor-level cache to invalidate).
+                uploaded_fonts: Arc::new(Vec::new()),
             },
             asset_store: None,
         }
@@ -306,6 +316,32 @@ impl Compositor {
         // resolve against this. Built up-front so it's both consistent across
         // all items and reusable for DataIcon resolution below.
         let eval_snapshot = build_eval_snapshot(&self.instance_store).await;
+
+        // Phase 10: refresh the uploaded-fonts list once per render. The asset
+        // store's `list_fonts` is a metadata-only query (no BLOB read), so the
+        // per-render cost is small — and doing it here means newly-uploaded
+        // fonts apply on the next `/image.png` request without any cache
+        // invalidation. The fresh `FontsWrap` is what every render_slot task
+        // clones; the original `self.fonts` (with empty uploaded list) stays
+        // untouched.
+        let fonts_for_render = if let Some(asset_store) = self.asset_store.as_ref() {
+            let summaries = asset_store.list_fonts().unwrap_or_default();
+            let uploaded: Vec<crate::fonts::UploadedFont> = summaries
+                .into_iter()
+                .map(|s| crate::fonts::UploadedFont {
+                    id: s.id,
+                    filename: s.filename,
+                    mime: s.mime,
+                })
+                .collect();
+            FontsWrap {
+                manifest: Arc::clone(&self.fonts.manifest),
+                base_url: self.fonts.base_url.clone(),
+                uploaded_fonts: Arc::new(uploaded),
+            }
+        } else {
+            self.fonts.clone()
+        };
 
         // Phase 7: filter items whose visible_when clause evaluates false.
         // visible[i] mirrors config.items; we track in parallel rather than
@@ -386,7 +422,7 @@ impl Compositor {
                         let store = Arc::clone(&self.instance_store);
                         let url = self.sidecar_url.clone();
                         let mode = render_mode.to_string();
-                        let fonts = self.fonts.clone();
+                        let fonts = fonts_for_render.clone();
                         // Phase 9: pull this plugin's theming overrides (if any
                         // Group in this layout binds it). Cloned per-task to
                         // satisfy the spawn closure's 'static bound.
@@ -428,7 +464,7 @@ impl Compositor {
                         font_family: font_family.clone(),
                         color: color.clone(),
                     };
-                    let fonts = self.fonts.clone();
+                    let fonts = fonts_for_render.clone();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
                         render_static_text(&text, fs, w, h, &url, &iid, &mode, &fmt, &fonts).await
@@ -462,7 +498,7 @@ impl Compositor {
                         font_family: font_family.clone(),
                         color: color.clone(),
                     };
-                    let fonts = self.fonts.clone();
+                    let fonts = fonts_for_render.clone();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
                         render_static_datetime(
@@ -505,7 +541,7 @@ impl Compositor {
                     };
                     let layout_store = Arc::clone(&self.layout_store);
                     let instance_store = Arc::clone(&self.instance_store);
-                    let fonts = self.fonts.clone();
+                    let fonts = fonts_for_render.clone();
                     let idx = handles.len();
                     handles.push(task::spawn(async move {
                         render_data_field(
