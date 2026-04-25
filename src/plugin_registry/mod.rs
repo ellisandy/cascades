@@ -217,6 +217,44 @@ fn default_refresh_interval() -> u64 {
     300
 }
 
+/// Compute a stable, content-addressed hash of a plugin's `default_elements`
+/// vector. Used by Phase 8 to detect when a plugin author has edited the
+/// manifest after a user already customised the spawned group: comparing the
+/// stored hash on the `Group` row to the registry's current hash drives the
+/// "Plugin defaults updated" badge.
+///
+/// # Hash contract — read this before adding fields to [`DefaultElement`]
+///
+/// - **Algorithm:** SHA-256 of `serde_json::to_string(elements)`, hex-encoded
+///   and truncated to the first 16 chars (64 bits — same compactness as the
+///   asset-id format introduced in Phase 6, sufficient for staleness diffs).
+/// - **Stability invariant:** `serde_json::to_string` MUST be deterministic.
+///   `DefaultElement` currently has no `HashMap`/`BTreeMap` fields, so
+///   serialization order matches struct field order. **Adding a `HashMap`
+///   field would silently break the hash** — different runs would compute
+///   different bytes for the same logical input. If you must add one, use
+///   `BTreeMap` (sorted) and add a regression test to
+///   `default_elements_hash_is_deterministic`.
+/// - **Versioning:** if you change the hash algorithm, every existing group
+///   row's `default_elements_hash` becomes stale. Either bump everything
+///   server-side or accept a one-time "defaults updated" wave.
+pub fn default_elements_hash(elements: &[DefaultElement]) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_string(elements)
+        .expect("DefaultElement always serialises (no Maps in struct — see hash contract)");
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    let digest = hasher.finalize();
+    // Hex-encode the first 8 bytes (16 hex chars). Matches asset_id width
+    // and is more than enough entropy to avoid collisions across the small
+    // set of plugin manifests in any given install.
+    digest.iter().take(8).fold(String::with_capacity(16), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
 /// Intermediate structure for deserializing a `plugins.toml` or `plugins.d/*.toml` file.
 ///
 /// Each file may contain one or more `[[plugin]]` entries.
@@ -245,6 +283,26 @@ impl PluginRegistry {
     /// Return a clone of the definition for `id`, if present.
     pub fn get(&self, id: &str) -> Option<PluginDefinition> {
         self.inner.read().unwrap().get(id).cloned()
+    }
+
+    /// Insert (or overwrite) a plugin definition under its `id`. Primarily
+    /// useful for tests that need a registry pre-populated without going
+    /// through TOML parsing. Production code should use [`Self::load_file`]
+    /// or [`Self::load_from_config_dir`] so manifest validation runs.
+    pub fn insert(&self, def: PluginDefinition) {
+        self.inner.write().unwrap().insert(def.id.clone(), def);
+    }
+
+    /// Return the canonical hash of `id`'s `default_elements`, or `None` if
+    /// the plugin is unregistered or has no defaults. See
+    /// [`default_elements_hash`] for the hash contract.
+    pub fn default_elements_hash(&self, id: &str) -> Option<String> {
+        let guard = self.inner.read().unwrap();
+        let def = guard.get(id)?;
+        if def.default_elements.is_empty() {
+            return None;
+        }
+        Some(default_elements_hash(&def.default_elements))
     }
 
     /// Return all registered plugin definitions, sorted by ID.

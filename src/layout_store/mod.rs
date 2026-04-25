@@ -255,6 +255,20 @@ pub enum LayoutItem {
         background: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 8: hash of the plugin's `default_elements` at the time this
+        /// group was spawned (or last reset). Compared to the registry's
+        /// current hash to detect "Plugin defaults updated". Only meaningful
+        /// when `plugin_instance_id` is set; `None` on hand-built groups.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_elements_hash: Option<String>,
+        /// Phase 8: ephemeral flag — `Some(true)` when the registry's current
+        /// hash differs from `default_elements_hash`. Computed by the GET
+        /// layout handler at response time; **not persisted to SQLite** and
+        /// **never deserialised back** (the read path always sets this to
+        /// `None`). Skipped on serialise when `None` so the wire shape stays
+        /// minimal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        defaults_stale: Option<bool>,
     },
 }
 
@@ -405,6 +419,11 @@ impl LayoutStore {
             // Phase 7: serialized HashMap<String,String> of value → asset_id
             // for LayoutItem::DataIcon.
             ("icon_map_json", "TEXT"),
+            // Phase 8: 16-char hex hash of the plugin manifest's
+            // `default_elements` at spawn / last-reset time. Compared to the
+            // registry's current hash to surface a "defaults updated" badge.
+            // Only meaningful on Group rows with `plugin_instance_id` set.
+            ("default_elements_hash", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -470,7 +489,7 @@ impl LayoutStore {
                     field_mapping_id, format_string, label,
                     bold, italic, underline, font_family,
                     parent_id, background, color, asset_id,
-                    visible_when_json, icon_map_json
+                    visible_when_json, icon_map_json, default_elements_hash
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -503,6 +522,7 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(22)?,
                 row.get::<_, Option<String>>(23)?,
                 row.get::<_, Option<String>>(24)?,
+                row.get::<_, Option<String>>(25)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -513,7 +533,7 @@ impl LayoutStore {
              field_mapping_id, format_string, label,
              bold, italic, underline, font_family,
              parent_id, background, color, asset_id,
-             visible_when_json, icon_map_json) in rows
+             visible_when_json, icon_map_json, default_elements_hash) in rows
         {
             let bold = bold.map(|v| v != 0);
             let italic = italic.map(|v| v != 0);
@@ -665,6 +685,11 @@ impl LayoutStore {
                     label,
                     background,
                     parent_id,
+                    default_elements_hash,
+                    // `defaults_stale` is computed at GET-layout time by
+                    // comparing the stored hash to the registry's current
+                    // hash; the storage layer always reads it as None.
+                    defaults_stale: None,
                 },
                 other => {
                     return Err(LayoutStoreError::InvalidItemType(other.to_string()))
@@ -836,15 +861,21 @@ impl LayoutStore {
                 LayoutItem::Group {
                     id, z_index, x, y, width, height,
                     plugin_instance_id, label, background, parent_id,
+                    default_elements_hash,
+                    // `defaults_stale` is ephemeral metadata for GET responses;
+                    // never persisted, so we drop it on write.
+                    defaults_stale: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          plugin_instance_id, label, background, parent_id)
-                         VALUES (?1, ?2, 'group', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                          plugin_instance_id, label, background, parent_id,
+                          default_elements_hash)
+                         VALUES (?1, ?2, 'group', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             plugin_instance_id, label, background, parent_id,
+                            default_elements_hash,
                         ],
                     )?;
                 }
@@ -1653,6 +1684,8 @@ mod tests {
                     label: Some("Weather".to_string()),
                     background: Some("card".to_string()),
                     parent_id: None,
+                    default_elements_hash: None,
+                    defaults_stale: None,
                 },
                 LayoutItem::StaticText {
                     id: "t0".to_string(),
@@ -1697,6 +1730,8 @@ mod tests {
             label: Some("Hello".to_string()),
             background: None,
             parent_id: None,
+            default_elements_hash: None,
+            defaults_stale: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         // None fields should be omitted by skip_serializing_if.
@@ -1727,6 +1762,8 @@ mod tests {
                     x: 0, y: 0, width: 200, height: 200,
                     plugin_instance_id: None, label: None, background: None,
                     parent_id: None,
+                    default_elements_hash: None,
+                    defaults_stale: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d".to_string(),
