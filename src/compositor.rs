@@ -1174,8 +1174,8 @@ fn composite_to_png(
                 // icon_map → asset bytes). Missing entries here are logged
                 // already; we just paint what's there. Same defensive
                 // contract as Image.
-                if let Some(bytes) = data_icon_bytes.get(id) {
-                    if let Err(e) = blit_asset_image(
+                if let Some(bytes) = data_icon_bytes.get(id)
+                    && let Err(e) = blit_asset_image(
                         &mut frame,
                         bytes,
                         (*x).max(0) as u32,
@@ -1183,9 +1183,9 @@ fn composite_to_png(
                         (*width).max(0) as u32,
                         (*height).max(0) as u32,
                         id,
-                    ) {
-                        log::warn!("compose: skipping data_icon '{id}': {e}");
-                    }
+                    )
+                {
+                    log::warn!("compose: skipping data_icon '{id}': {e}");
                 }
             }
         }
