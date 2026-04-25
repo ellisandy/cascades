@@ -2599,21 +2599,28 @@ function iconMapSection(item) {
       return '<option value="' + esc(a.id) + '"' + sel + '>' + esc(a.filename) + '</option>';
     }).join('');
   };
+  // Keys are routed through HTML data-* attributes (not interpolated into JS
+  // string literals), so values like `O'Brien` survive — the browser does
+  // HTML-decode the attribute before exposing it via .dataset, but never
+  // re-interprets it as JavaScript.
   const rowsHtml = keys.length === 0
     ? '<div style="font-size:11px;color:#8b949e;padding:6px 0">No mappings yet — add a row to bind a value to an asset.</div>'
     : keys.map(function(k) {
         const id = map[k];
+        const keyAttr = esc(k);
         return '<div class="im-row" style="display:flex;gap:6px;margin-bottom:4px;align-items:center">' +
-          '<input type="text" value="' + esc(k) + '" data-old-key="' + esc(k) + '" ' +
+          '<input type="text" value="' + keyAttr + '" data-old-key="' + keyAttr + '" ' +
             'placeholder="value (e.g. sunny)" ' +
             'style="flex:0 0 120px" ' +
             'onchange="renameIconMapKey(this.dataset.oldKey, this.value)">' +
-          '<select style="flex:1" onchange="setIconMapAsset(\'' + esc(k) + '\', this.value)">' +
+          '<select style="flex:1" data-key="' + keyAttr + '" ' +
+            'onchange="setIconMapAsset(this.dataset.key, this.value)">' +
             assetOpts(id) +
           '</select>' +
           '<button class="btn btn-danger" style="flex:0 0 28px;padding:4px 6px" ' +
             'title="Remove this mapping" ' +
-            'onclick="removeIconMapKey(\'' + esc(k) + '\')">×</button>' +
+            'data-key="' + keyAttr + '" ' +
+            'onclick="removeIconMapKey(this.dataset.key)">×</button>' +
         '</div>';
       }).join('');
   return '<div class="im-section" style="margin-top:14px;padding-top:10px;border-top:1px solid #30363d">' +
