@@ -51,14 +51,6 @@ install: build ## Build + run the Pi installer (idempotent)
 		sudo ./scripts/install.sh; \
 	fi
 
-.PHONY: install-server-only
-install-server-only: build ## Install everything except the e-ink display loop
-	@if [ "$$(id -u)" -eq 0 ]; then \
-		./scripts/install.sh --skip-display; \
-	else \
-		sudo ./scripts/install.sh --skip-display; \
-	fi
-
 .PHONY: uninstall
 uninstall: ## Stop services + remove binaries (preserves data unless PURGE=1)
 	@if [ "$(PURGE)" = "1" ]; then \
@@ -75,21 +67,20 @@ uninstall: ## Stop services + remove binaries (preserves data unless PURGE=1)
 # ─── Operations ──────────────────────────────────────────────────────────
 
 .PHONY: status
-status: ## systemctl status for all Cascades services
-	@for u in cascades-sidecar cascades cascades-display; do \
+status: ## systemctl status for both Cascades services
+	@for u in cascades-sidecar cascades; do \
 		printf "\n\033[1;36m▶ %s\033[0m\n" "$$u"; \
 		systemctl --no-pager status $$u 2>/dev/null || echo "(not installed)"; \
 	done
 
 .PHONY: logs
-logs: ## Tail -f all three service logs (Ctrl+C to exit)
-	journalctl -f -u cascades -u cascades-sidecar -u cascades-display
+logs: ## Tail -f both service logs (Ctrl+C to exit)
+	journalctl -f -u cascades -u cascades-sidecar
 
 .PHONY: restart
-restart: ## Restart all three services in dependency order
+restart: ## Restart both services in dependency order
 	sudo systemctl restart cascades-sidecar
 	sudo systemctl restart cascades
-	sudo systemctl restart cascades-display 2>/dev/null || true
 
 # ─── Dev ─────────────────────────────────────────────────────────────────
 

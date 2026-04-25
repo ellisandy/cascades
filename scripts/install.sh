@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
 #
-# Cascades Raspberry Pi installer — fully idempotent.
+# Cascades server installer — fully idempotent.
+#
+# Cascades is the *server* half of the dashboard system: it serves rendered
+# PNGs at /image.png (and /api/image/{id}) plus the admin UI at /admin.
+# Clients — typically a Raspberry Pi running a thin display loop like
+# `skagit-flats` — fetch the PNG and push it to a panel. This installer
+# does NOT install anything panel-related; that's the client's job and
+# lives in the client's own repo.
 #
 # Re-running this script after a code update should be safe and should
 # converge the host to the desired state without clobbering user data
 # (SQLite database, secrets.toml, custom config).
 #
 # What it does, in order:
-#   1.  Sanity-checks: root, Pi (or --force-non-pi), pre-built Rust binary present.
-#   2.  apt-installs system packages (Bun-Chromium runtime libs, Python+PIL, SPI tools).
+#   1.  Sanity-checks: root, Linux host (or --force-non-pi to skip the
+#       "looks like a Raspberry Pi" check), pre-built Rust binary present.
+#   2.  apt-installs system packages — almost entirely Chromium runtime libs
+#       so Puppeteer's bundled browser doesn't crash with cryptic SIGSEGV.
 #   3.  Installs Bun for the cascades user if missing.
-#   4.  Creates the `cascades` service user and adds it to `spi`/`gpio` groups.
-#   5.  Lays out /opt/cascades/{cascades,templates/,fonts/,config/,sidecar/,display/,data/}.
-#       - Templates and fonts: rsync-copied (overwrite is fine — hot-reloads in-place).
+#   4.  Creates the `cascades` system user (no panel-related groups).
+#   5.  Lays out /opt/cascades/{cascades,templates/,fonts/,config/,sidecar/,data/}.
+#       - Templates: rsync WITHOUT --delete so admin-UI saves (PR #18) survive
+#         `git pull && make install`.
+#       - Fonts + plugins: rsync WITH --delete (not editable from the UI).
 #       - config/secrets.toml: PRESERVED if present (auto-generated on first server boot).
 #       - data/: PRESERVED (SQLite lives there).
-#   6.  `bun install` in /opt/cascades/sidecar (downloads Chromium for ARM64; ~150MB).
-#   7.  Enables SPI on the Pi (raspi-config nonint do_spi 0).
-#   8.  Vendors the Waveshare 7.5" V2 driver into /opt/cascades/display/waveshare_epd/.
-#   9.  Installs the three systemd units, daemon-reloads, enables them on boot.
-#   10. Restarts services in the correct order to pick up new bits.
+#       - config.toml: PRESERVED if present (operator's customised version).
+#   6.  `bun install --frozen-lockfile` in /opt/cascades/sidecar
+#       (downloads Chromium for the host arch; ~150MB the first time).
+#   7.  Installs two systemd units (cascades-sidecar, cascades), daemon-reloads,
+#       enables them on boot.
+#   8.  Restarts services in dependency order, then health-checks `is-active`
+#       so a missing-apt-dep failure surfaces immediately.
 #
 # Re-run any time. The only state mutation that isn't strictly idempotent is
 # the systemctl restart at the end — that's what you want, otherwise an
@@ -27,7 +40,6 @@
 #
 # Usage:
 #   sudo ./scripts/install.sh
-#   sudo ./scripts/install.sh --skip-display       # don't install the e-ink loop
 #   sudo ./scripts/install.sh --force-non-pi       # for testing on a non-Pi host
 
 set -euo pipefail
@@ -45,18 +57,13 @@ SYSTEMD_DIR="/etc/systemd/system"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-WAVESHARE_REPO="https://github.com/waveshareteam/e-Paper.git"
-WAVESHARE_REF="master"
-
 # Arg parsing
-SKIP_DISPLAY=0
 FORCE_NON_PI=0
 for arg in "$@"; do
     case "$arg" in
-        --skip-display)  SKIP_DISPLAY=1 ;;
         --force-non-pi)  FORCE_NON_PI=1 ;;
         --help|-h)
-            sed -n '3,40p' "$0"
+            sed -n '3,45p' "$0"
             exit 0
             ;;
         *)
@@ -90,12 +97,11 @@ if [[ "${FORCE_NON_PI}" -ne 1 ]]; then
     if [[ ! -r /proc/device-tree/model ]] \
        || ! grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
         die "this doesn't look like a Raspberry Pi.
-     Pass --force-non-pi to override (you'll lose --skip-display safety)."
+     Pass --force-non-pi to install on a generic Linux host (e.g. NUC, NAS, VM)."
     fi
     log "Detected: $(tr -d '\0' < /proc/device-tree/model)"
 else
-    warn "running with --force-non-pi: SPI/Waveshare steps will be skipped"
-    SKIP_DISPLAY=1
+    warn "running with --force-non-pi: skipping the Pi-model check"
 fi
 
 CASCADES_BINARY="${REPO_ROOT}/target/release/cascades"
@@ -111,17 +117,14 @@ step "Installing system packages"
 
 # Idempotent: apt-get skips already-installed packages.
 APT_PKGS=(
-    # Chromium runtime deps that Puppeteer's bundled Chromium needs on ARM64.
+    # Chromium runtime deps that Puppeteer's bundled Chromium needs.
     # Without these the sidecar starts but every render fails with cryptic
-    # SIGSEGV / shared-library errors.
+    # SIGSEGV / shared-library errors. Bookworm and Trixie both ship the
+    # un-suffixed names below as installable (Trixie also offers `*t64`
+    # transitional packages but doesn't require them).
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0
     libcairo2 libasound2 libxss1 libgtk-3-0 fonts-liberation
-    # Python display loop deps.
-    python3 python3-pip python3-pil python3-requests
-    # SPI userspace tools (raspi-config + spidev are pre-installed on
-    # Raspberry Pi OS; on minimal images they aren't).
-    raspi-config
     # Misc utilities the script itself uses.
     rsync curl ca-certificates git
     # Build tools — needed for `bun install` to compile native bits of
@@ -145,15 +148,9 @@ else
     log "Created user '${SERVICE_USER}'"
 fi
 
-# Group membership for SPI / GPIO / video (Chromium occasionally wants the
-# last). usermod -aG is idempotent — adding to a group already in is a no-op.
-if [[ "${SKIP_DISPLAY}" -ne 1 ]]; then
-    for grp in spi gpio video; do
-        if getent group "$grp" >/dev/null 2>&1; then
-            usermod -aG "$grp" "${SERVICE_USER}"
-        fi
-    done
-fi
+# No special group memberships needed. Cascades is a server process — it
+# doesn't talk to SPI, GPIO, or video hardware. The thin display client
+# (e.g. skagit-flats) handles all of that on its own service account.
 
 # ─── Step 3: Bun ──────────────────────────────────────────────────────────
 
@@ -181,8 +178,7 @@ mkdir -p \
     "${INSTALL_DIR}/config/plugins.d" \
     "${INSTALL_DIR}/templates" \
     "${INSTALL_DIR}/fonts" \
-    "${INSTALL_DIR}/sidecar" \
-    "${INSTALL_DIR}/display"
+    "${INSTALL_DIR}/sidecar"
 
 # Binary — install -m sets perms in one shot and is idempotent.
 install -m 0755 "${CASCADES_BINARY}" "${INSTALL_DIR}/cascades"
@@ -230,13 +226,6 @@ rsync -a --delete \
     "${REPO_ROOT}/src/sidecar/" "${INSTALL_DIR}/sidecar/"
 log "Sidecar source synced (node_modules excluded; bun.lock included)"
 
-# Display loop script + waveshare driver placeholder.
-if [[ "${SKIP_DISPLAY}" -ne 1 ]]; then
-    install -m 0755 "${REPO_ROOT}/scripts/pi-display-loop.py" \
-                    "${INSTALL_DIR}/display/loop.py"
-    log "Display loop → ${INSTALL_DIR}/display/loop.py"
-fi
-
 # Ownership — everything under INSTALL_DIR runs as cascades:cascades.
 chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}"
 
@@ -252,47 +241,23 @@ as_service_user bash -c \
     "cd '${INSTALL_DIR}/sidecar' && '${BUN_BIN}' install --frozen-lockfile"
 log "Sidecar deps installed"
 
-# ─── Step 6: SPI + Waveshare driver ───────────────────────────────────────
-
-if [[ "${SKIP_DISPLAY}" -ne 1 ]]; then
-    step "Enabling SPI bus"
-    # do_spi 0 = enable. Idempotent: enabling an already-enabled bus is a no-op.
-    if command -v raspi-config >/dev/null 2>&1; then
-        raspi-config nonint do_spi 0
-        log "SPI enabled (a reboot may be required if it wasn't already)"
-    else
-        warn "raspi-config not available; enable SPI manually via /boot/config.txt"
-    fi
-
-    step "Installing Waveshare 7.5\" V2 driver"
-    DRIVER_DIR="${INSTALL_DIR}/display/waveshare_epd"
-    # Single source-of-truth check: the panel driver itself. `__pycache__`
-    # would be unreliable (only exists after the loop has run at least
-    # once) and `-d "${DRIVER_DIR}"` would match an empty directory left
-    # behind by an aborted clone.
-    if [[ -f "${DRIVER_DIR}/epd7in5_V2.py" ]]; then
-        log "Driver already installed — skipping clone"
-    else
-        TMP_CLONE="$(mktemp -d)"
-        log "Cloning ${WAVESHARE_REPO} (shallow)…"
-        git clone --depth 1 --branch "${WAVESHARE_REF}" \
-                  "${WAVESHARE_REPO}" "${TMP_CLONE}" >/dev/null 2>&1 \
-            || die "Waveshare driver clone failed"
-        SRC="${TMP_CLONE}/RaspberryPi_JetsonNano/python/lib/waveshare_epd"
-        [[ -d "${SRC}" ]] || die "Waveshare driver layout changed; expected ${SRC}"
-        rsync -a "${SRC}/" "${DRIVER_DIR}/"
-        chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${DRIVER_DIR}"
-        rm -rf "${TMP_CLONE}"
-        log "Waveshare driver → ${DRIVER_DIR}"
-    fi
-fi
-
-# ─── Step 7: systemd units ────────────────────────────────────────────────
+# ─── Step 6: systemd units ────────────────────────────────────────────────
 
 step "Installing systemd units"
 
+# Two units: sidecar (Bun + Puppeteer) and the Rust server. The server
+# Requires= the sidecar so they restart and stop together.
+#
+# Convergence: if a previous install (PR #19) had `cascades-display.service`
+# enabled — that unit is gone now — disable + remove the leftover.
+if systemctl list-unit-files cascades-display.service --no-legend 2>/dev/null \
+       | grep -q cascades-display.service; then
+    systemctl disable --now cascades-display.service 2>/dev/null || true
+    rm -f "${SYSTEMD_DIR}/cascades-display.service"
+    log "Removed legacy cascades-display.service from a previous install"
+fi
+
 UNITS_TO_INSTALL=( cascades-sidecar.service cascades.service )
-[[ "${SKIP_DISPLAY}" -eq 1 ]] || UNITS_TO_INSTALL+=( cascades-display.service )
 
 CHANGED_UNITS=0
 for unit in "${UNITS_TO_INSTALL[@]}"; do
@@ -310,29 +275,20 @@ if [[ "${CHANGED_UNITS}" -eq 1 ]]; then
     log "systemd reloaded"
 fi
 
-# Disable the display service if --skip-display was passed and a previous
-# install enabled it — keeps re-runs convergent with the requested flags.
-if [[ "${SKIP_DISPLAY}" -eq 1 ]] \
-   && systemctl is-enabled cascades-display.service >/dev/null 2>&1; then
-    systemctl disable --now cascades-display.service
-    log "Disabled cascades-display.service (--skip-display)"
-fi
-
 for unit in "${UNITS_TO_INSTALL[@]}"; do
     systemctl enable "$unit" >/dev/null
 done
 log "Enabled on boot: ${UNITS_TO_INSTALL[*]}"
 
-# ─── Step 8: restart to pick up new bits ──────────────────────────────────
+# ─── Step 7: restart to pick up new bits ──────────────────────────────────
 
 step "Restarting services"
 
-# Order matters: sidecar first, then server (which depends on it), then
-# display loop (which depends on the server). systemctl restart is
-# blocking, so by the time each call returns the unit is up.
+# Order matters: sidecar first, then server (which Requires= it).
+# systemctl restart is blocking, so by the time each call returns the
+# unit is up.
 systemctl restart cascades-sidecar.service
 systemctl restart cascades.service
-[[ "${SKIP_DISPLAY}" -eq 1 ]] || systemctl restart cascades-display.service
 
 # Health check — `systemctl restart` blocks until the unit transitions
 # but doesn't wait for it to actually stay up. A unit that ExecStart's
@@ -342,9 +298,7 @@ systemctl restart cascades.service
 # go hunting in journalctl.
 sleep 3
 HEALTH_OK=1
-HEALTH_UNITS=( cascades-sidecar cascades )
-[[ "${SKIP_DISPLAY}" -eq 1 ]] || HEALTH_UNITS+=( cascades-display )
-for u in "${HEALTH_UNITS[@]}"; do
+for u in cascades-sidecar cascades; do
     if ! systemctl is-active --quiet "$u"; then
         warn "$u is NOT active. Check: journalctl -u $u --no-pager -n 50"
         HEALTH_OK=0
@@ -354,7 +308,7 @@ if [[ "${HEALTH_OK}" -eq 1 ]]; then
     log "All services healthy"
 fi
 
-# ─── Step 9: post-install summary ─────────────────────────────────────────
+# ─── Step 8: post-install summary ─────────────────────────────────────────
 
 step "Done"
 
@@ -363,18 +317,21 @@ cat <<EOF
 Cascades is installed at ${INSTALL_DIR} and running as systemd units.
 
   Status:
-    systemctl status cascades cascades-sidecar$( [[ ${SKIP_DISPLAY} -eq 1 ]] || printf ' cascades-display' )
+    systemctl status cascades cascades-sidecar
 
   Logs:
     journalctl -u cascades -f
     journalctl -u cascades-sidecar -f
-$( [[ ${SKIP_DISPLAY} -eq 1 ]] || printf '    journalctl -u cascades-display -f' )
 
   Web UI:
     http://$(hostname -I | awk '{print $1}'):9090/admin
 
   API key (after first boot — Rust server auto-generates):
     sudo cat ${INSTALL_DIR}/config/secrets.toml
+
+  Image endpoints for the thin display client to fetch:
+    http://localhost:9090/image.png                  (legacy alias, no auth)
+    http://localhost:9090/api/image/default          (requires Bearer <api_key>)
 
 To uninstall:
     sudo make uninstall          # keeps data
