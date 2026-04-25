@@ -1549,6 +1549,10 @@ function apiToItems(apiItems) {
       // distinguish "no info" from "explicitly false." Server only sets
       // this to true/false when the comparison is meaningful, never absent.
       defaults_stale:        !!item.defaults_stale,
+      // Phase 9: per-layout theming overrides on plugin Groups.
+      // Object keyed by SettingsField.key; values vary by field type
+      // (string for color, bool for toggle, object for text_style).
+      style_overrides:       item.style_overrides     || null,
     };
   });
 }
@@ -1596,6 +1600,10 @@ function itemsToPayload(items) {
       // Server ignores the field on non-Groups, but we explicitly emit null
       // so the wire shape stays uniform and easy to inspect.
       default_elements_hash: isGroup ? (item.default_elements_hash || null) : null,
+      // Phase 9: theming overrides only on Groups; server ignores otherwise.
+      // Empty object preserved as null on the wire (server treats either as
+      // "no overrides"; null is the more compact wire shape).
+      style_overrides:       isGroup ? (item.style_overrides || null) : null,
     };
   });
 }
@@ -2509,6 +2517,14 @@ function renderProps() {
   // Phase 7b: data_icon also gets a value→asset map editor below the type
   // fields. Built separately so we can reorder/style independently.
   const iconMapBlock = item.type === 'data_icon' ? iconMapSection(item) : '';
+  // Phase 8b: plugin-bound groups get a "Reset to defaults" affordance plus
+  // a stale-banner when the manifest has drifted from the stored hash.
+  // Hand-built groups (no plugin_instance_id) don't get this section — the
+  // backend would 400 on reset and the action would be meaningless.
+  const pluginDefaultsBlock =
+    (item.type === 'group' && item.plugin_id)
+      ? pluginDefaultsSection(item)
+      : '';
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
   panel.innerHTML =
@@ -2523,6 +2539,7 @@ function renderProps() {
     '</div>' +
     iconMapBlock +
     conditionalSection +
+    pluginDefaultsBlock +
     '<div style="margin-top:10px; display: flex; gap: 6px; flex-wrap: wrap;">' +
       '<button class="btn" onclick="bringToFront()" title="Bring to front (top of stack)">⇈ Top</button>' +
       '<button class="btn" onclick="bringForward()" title="Bring forward one step">↑ Fwd</button>' +
@@ -2696,6 +2713,98 @@ function removeIconMapKey(key) {
   delete item.icon_map[key];
   renderProps();
   renderCanvas();
+}
+
+// ─── Phase 8b: plugin-defaults section (badge + Reset button) ─────────────
+// Surfaced only on Group items bound to a plugin instance. The server
+// decorates GET /api/admin/layout responses with `defaults_stale: true`
+// when the registry's manifest hash differs from the stored hash; we read
+// that flag and show a banner above the Reset button.
+function pluginDefaultsSection(item) {
+  const stale = !!item.defaults_stale;
+  const banner = stale
+    ? '<div class="defaults-banner" style="' +
+        'background:rgba(240,136,62,0.18);border:1px solid #f0883e;' +
+        'border-radius:4px;padding:8px;margin-bottom:8px;' +
+        'font-size:12px;color:#f0883e;line-height:1.4">' +
+        '<b>Plugin defaults updated.</b> The plugin author has changed ' +
+        'this widget\u2019s default layout since you customised it. ' +
+        'Reset to apply the new defaults.' +
+      '</div>'
+    : '';
+  // Plain-button styling when not stale, accented when stale.
+  const btnClass = stale ? 'btn btn-primary' : 'btn';
+  const btnStyle = stale ? '' : 'opacity:0.85';
+  return '<div class="plugin-defaults-section" ' +
+      'style="margin-top:14px;padding-top:10px;border-top:1px solid #30363d">' +
+    '<div style="font-size:11px;color:#8b949e;text-transform:uppercase;' +
+      'letter-spacing:0.5px;margin-bottom:6px">Plugin defaults</div>' +
+    banner +
+    '<button type="button" class="' + btnClass + '" ' +
+      'style="' + btnStyle + '" ' +
+      'onclick="onResetGroup()">Reset to plugin defaults</button>' +
+    '<div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.4">' +
+      'Wipes every item inside this group and respawns the plugin author\u2019s ' +
+      'defaults. The group is also resized to its default dimensions.' +
+    '</div>' +
+  '</div>';
+}
+
+// Reset action — confirms with the user (showing impact details) before
+// POSTing to the server. The 8a backend wipes transitive descendants and
+// respawns from the manifest, so we surface BOTH effects in the prompt:
+//   1. Discard count (computed client-side via collectDescendants).
+//   2. Group resize (the manifest's bounding box wins).
+async function onResetGroup() {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'group' || !item.plugin_id) {
+    showToast('Reset only applies to plugin-bound groups', 'error');
+    return;
+  }
+  if (!state.currentLayoutId) {
+    showToast('No layout loaded', 'error');
+    return;
+  }
+
+  // Count descendants client-side. Mirror of the server's collect_descendants.
+  const ds = new Set();
+  collectDescendants(item.id, ds);
+  const count = ds.size;
+
+  const msg =
+    'Reset "' + (item.label || item.plugin_id) + '" to plugin defaults?\n\n' +
+    'This will:\n' +
+    '  \u2022 Discard ' + count + ' item' + (count === 1 ? '' : 's') +
+      ' inside this group (including any you added manually)\n' +
+    '  \u2022 Resize the group to the plugin\u2019s default dimensions\n\n' +
+    'You can\u2019t undo this from the editor — only by editing the JSON.';
+  if (!confirm(msg)) return;
+
+  try {
+    const url = '/api/admin/layout/' + encodeURIComponent(state.currentLayoutId) +
+                '/groups/' + encodeURIComponent(item.id) + '/reset';
+    const res = await apiFetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const errText = await res.text();
+      showToast('Reset failed: ' + errText, 'error');
+      return;
+    }
+    const body = await res.json();
+    // The wipe just changed every child of the focused group; if the user
+    // was editing inside it, drop scope so they don't see "ghost" rows.
+    if (state.focusedGroupId === item.id) {
+      state.focusedGroupId = null;
+    }
+    // Replace local state with the server's authoritative layout. This is
+    // the same shape we get from GET /api/admin/layout/{id}, including the
+    // `defaults_stale` decoration — so the banner clears automatically.
+    state.items = apiToItems(body.layout.items || []);
+    selectItem(item.id);
+    renderCanvas();
+    showToast('Reset: discarded ' + body.discarded_count + ' items', 'success');
+  } catch (e) {
+    showToast('Reset error: ' + e.message, 'error');
+  }
 }
 
 // Sensible set of fonts for e-ink rendering.  Generic families first
@@ -3598,12 +3707,21 @@ function renderOutliner() {
         (!inScope ? ' out-of-scope' : '') +
         (isFocusedGroup ? ' focused-group' : '');
       const pad = depth * 10 + 8;
+      // Phase 8b: defaults-updated badge on plugin groups whose stored hash
+      // differs from the registry's current hash. The flag is server-set on
+      // GET and ephemeral (not round-tripped on save).
+      const staleBadge = (it.type === 'group' && it.defaults_stale)
+        ? ' <span title="Plugin author has updated this widget\u2019s defaults"' +
+          ' style="background:#f0883e;color:#0d1117;font-size:9px;' +
+          'padding:1px 4px;border-radius:3px;margin-left:6px;' +
+          'font-weight:bold;letter-spacing:0.3px">UPDATED</span>'
+        : '';
       const row =
         '<div class="' + cls + '" data-id="' + esc(it.id) + '" ' +
         'onclick="onOutlinerClick(event, \'' + esc(it.id) + '\')" ' +
         'ondblclick="onOutlinerDblClick(event, \'' + esc(it.id) + '\')" ' +
         'style="padding-left:' + pad + 'px">' +
-        esc(itemLabel(it)) + '</div>';
+        esc(itemLabel(it)) + staleBadge + '</div>';
       return row + (it.type === 'group' ? buildLevel(it.id, depth + 1) : '');
     }).join('');
   }

@@ -99,6 +99,95 @@ default     = ""             # Default value when user provides none. Optional.
 
 ---
 
+## Theming knobs (Phase 9)
+
+Plugin authors can declare a small bounded set of theming knobs alongside
+data settings. The user picks values per-layout in the admin "Plugin
+customization" inspector; the template binds them via CSS custom properties
+and falls back to author-declared defaults via the `default` filter.
+
+**Theming-typed fields share the `[[plugin.settings_schema]]` shape but are
+stored differently from data settings:**
+
+| Aspect | Data settings (`text`/`number`/...) | Theming knobs (`text_style`/`color`/`toggle`) |
+|---|---|---|
+| Storage | `instance_store.settings` (per-instance) | `Group.style_overrides` (**per-layout**) |
+| Liquid binding | `{{ settings.foo }}` | `{{ style.foo }}` |
+| Use for | Data fetch parameters, identity | Visual customization |
+
+### Theming field types
+
+| Type | Value shape | Suggested template binding |
+|---|---|---|
+| `color` | string (CSS hex) | `{{ style.<key> \| default("#000") }}` |
+| `toggle` | bool | `{% if style.<key> \| default(false) %}` |
+| `text_style` | object with `family`, `size`, `weight`, `italic`, `underline`, `color` | `{{ style.<key>.color \| default("#000") }}` etc. |
+
+### Authoring contract
+
+- **Always supply a `default(...)`.** The manifest's `default` field is a
+  placeholder hint for the admin form; it does NOT back the rendered value.
+  The template's `default(...)` filter is the *single* declaration of your
+  visual default.
+- **Don't expose subkeys you don't bind.** Just don't reference them. The
+  admin inspector shows the full shape regardless; users can leave them blank.
+- **Theming is opt-in.** A plugin with no theming-typed schema entries gets
+  no Plugin Customization UI in the inspector. Existing plugins keep working
+  unchanged.
+
+### Reference example
+
+`config/plugins.d/weather.toml`:
+
+```toml
+[[plugin.settings_schema]]
+key = "temp_style"
+label = "Temperature style"
+type = "text_style"
+
+[[plugin.settings_schema]]
+key = "accent_color"
+label = "Accent colour"
+type = "color"
+```
+
+`templates/weather_full.html.liquid`:
+
+```liquid
+<style>
+  .weather-root {
+    --temp-color: {{ style.temp_style.color | default("#000000") }};
+    --temp-size: {{ style.temp_style.size | default(96) }}px;
+    --accent: {{ style.accent_color | default("#000000") }};
+  }
+</style>
+<div class="weather-root">
+  <span style="color: var(--temp-color); font-size: var(--temp-size);">
+    {{ data.temperature_f | round(0) }}°F
+  </span>
+</div>
+```
+
+### Theming with un-decomposed plugins
+
+If your plugin's template uses internal layout logic that shouldn't be broken
+apart (flex rows, conditional trip-decision blocks), declare a single
+`default_elements` entry with `kind = "plugin_slot"`. The admin's spawn-on-drop
+creates a Group around your monolithic template; the Group is what holds
+`style_overrides`, even though it has only one PluginSlot child.
+
+```toml
+[[plugin.default_elements]]
+kind = "plugin_slot"
+x = 0
+y = 0
+width = 800
+height = 480
+orientation = "full"   # selects the template variant
+```
+
+---
+
 ## Template naming convention
 
 The compositor resolves templates by plugin instance ID and layout variant:
@@ -194,6 +283,28 @@ stale data is being shown.
   <span class="label text--gray-50">stale data</span>
 {% endif %}
 ```
+
+### `style`
+
+Per-layout user customisation values for theming-typed settings fields. See
+the **Theming** section below — `style` is the read-side counterpart to
+`[[plugin.settings_schema]]` entries with `type = "text_style"`, `"color"`,
+or `"toggle"`.
+
+```liquid
+<style>
+  :root {
+    --temp-color: {{ style.temp_style.color | default("#000") }};
+    --temp-size:  {{ style.temp_style.size  | default(96) }}px;
+    --accent:     {{ style.accent_color     | default("#000") }};
+  }
+</style>
+```
+
+If the user hasn't customised a knob (or hasn't customised the plugin at all),
+the corresponding key is undefined; the `default` filter substitutes the
+template's fallback. **Always supply a `default(...)`** — it's the
+single declaration of your visual default.
 
 ---
 

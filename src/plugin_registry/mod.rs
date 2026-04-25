@@ -97,22 +97,46 @@ pub struct PluginCriterion {
 ///
 /// The settings schema drives auto-generated configuration UI and validation.
 /// Sensitive fields (e.g. API keys) should be stored encrypted.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// # Phase 9 — theming knobs share this shape
+///
+/// Phase 9 adds three new `field_type` values — `"text_style"`, `"color"`,
+/// `"toggle"` — that store their values **per-layout** on the plugin Group's
+/// `style_overrides` column rather than in `instance_store.settings`. The
+/// schema declaration is identical; only the dispatch (where the value lives,
+/// how the admin form-renderer routes saves) differs. See
+/// [`is_theme_field_type`] for the discriminator.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SettingsField {
-    /// Machine-readable key stored in the plugin instance settings JSON.
+    /// Machine-readable key stored in the plugin instance settings JSON
+    /// (data-typed fields) or in the Group's `style_overrides` JSON
+    /// (theming-typed fields). The schema is uniform; the storage is split.
     pub key: String,
     /// Human-readable label for the UI.
     pub label: String,
-    /// Input type hint: `"text"`, `"number"`, `"password"`, `"select"`.
+    /// Input type hint. **Data types**: `"text"`, `"number"`, `"password"`,
+    /// `"select"`. **Theming types** (Phase 9): `"text_style"`, `"color"`,
+    /// `"toggle"`.
     #[serde(rename = "type")]
     pub field_type: String,
     /// Whether the field must be provided before the plugin can run.
     #[serde(default)]
     pub required: bool,
     /// UI placeholder text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     /// Default value used when the user provides none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+}
+
+/// Phase 9: predicate that splits theming knobs from data-settings knobs.
+///
+/// Used by both the admin UI (which API endpoint to POST to) and the
+/// compositor (which store to read for render). Keeping the rule in one
+/// place is the whole point — see the [`SettingsField`] doc-comment.
+pub fn is_theme_field_type(field_type: &str) -> bool {
+    matches!(field_type, "text_style" | "color" | "toggle")
 }
 
 /// A fully-resolved plugin definition loaded from TOML.

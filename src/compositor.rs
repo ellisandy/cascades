@@ -321,6 +321,28 @@ impl Compositor {
             })
             .collect();
 
+        // Phase 9: build (plugin_instance_id → style_overrides) map from the
+        // Group items in this layout. Done up-front so render_slot calls
+        // don't need to re-scan items for every PluginSlot. At-most-one
+        // invariant: if multiple Groups bind the same plugin_instance_id in
+        // the same layout (a misconfiguration), the first encountered wins.
+        // Lookup is by id ordering (stable across reloads).
+        let plugin_styles: HashMap<String, HashMap<String, serde_json::Value>> = {
+            let mut out = HashMap::new();
+            for item in &config.items {
+                if let LayoutItem::Group {
+                    plugin_instance_id: Some(pi),
+                    style_overrides: Some(map),
+                    ..
+                } = item
+                    && !map.is_empty()
+                {
+                    out.entry(pi.clone()).or_insert_with(|| map.clone());
+                }
+            }
+            out
+        };
+
         // For each item, we either spawn an async render task or handle it inline.
         // task_for_item[i] = Some(handle_index) if item i has an async task, else None.
         let mut task_for_item: Vec<Option<usize>> = Vec::with_capacity(config.items.len());
@@ -365,9 +387,16 @@ impl Compositor {
                         let url = self.sidecar_url.clone();
                         let mode = render_mode.to_string();
                         let fonts = self.fonts.clone();
+                        // Phase 9: pull this plugin's theming overrides (if any
+                        // Group in this layout binds it). Cloned per-task to
+                        // satisfy the spawn closure's 'static bound.
+                        let style = plugin_styles
+                            .get(plugin_instance_id)
+                            .cloned()
+                            .unwrap_or_default();
                         let idx = handles.len();
                         handles.push(task::spawn(async move {
-                            render_slot(slot, engine, store, url, mode, fonts).await
+                            render_slot(slot, engine, store, url, mode, fonts, style).await
                         }));
                         Some(idx)
                     }
@@ -668,6 +697,9 @@ async fn render_slot(
     sidecar_url: String,
     mode: String,
     fonts: FontsWrap,
+    // Phase 9: per-layout theming overrides for this plugin's Group, if any.
+    // Empty map → template uses its built-in `| default(...)` fallbacks.
+    style_overrides: HashMap<String, serde_json::Value>,
 ) -> Result<Vec<u8>, CompositorError> {
     let id = slot.plugin_instance_id.clone();
     let store2 = Arc::clone(&store);
@@ -708,6 +740,7 @@ async fn render_slot(
         trip_decision: None,
         now: NowContext::from_unix(now_secs),
         error,
+        style: style_overrides,
     };
 
     let html = engine.render(&template_name, &ctx)?;
@@ -1739,6 +1772,7 @@ mod tests {
             parent_id: None,
             default_elements_hash: None,
             defaults_stale: None,
+            style_overrides: None,
         };
         let task_for_item = vec![None];
         let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
@@ -1776,6 +1810,7 @@ mod tests {
             parent_id: None,
             default_elements_hash: None,
             defaults_stale: None,
+            style_overrides: None,
         };
         let task_for_item = vec![None];
         let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
@@ -1801,6 +1836,7 @@ mod tests {
             parent_id: None,
             default_elements_hash: None,
             defaults_stale: None,
+            style_overrides: None,
         };
         // Child is a StaticDivider at z=1 inside the group.
         let child = LayoutItem::StaticDivider {

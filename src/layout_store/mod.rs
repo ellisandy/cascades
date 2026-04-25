@@ -269,6 +269,14 @@ pub enum LayoutItem {
         /// minimal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         defaults_stale: Option<bool>,
+        /// Phase 9: per-layout theming overrides. Keyed by `SettingsField.key`
+        /// (only fields with theming-typed `field_type` per
+        /// `is_theme_field_type`). Values are whatever shape the field type
+        /// emits — string for `color`, bool for `toggle`, object for
+        /// `text_style`. `None` or empty → all subkeys fall back to the
+        /// template's `| default(...)` filter at render time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_overrides: Option<std::collections::HashMap<String, serde_json::Value>>,
     },
 }
 
@@ -424,6 +432,10 @@ impl LayoutStore {
             // registry's current hash to surface a "defaults updated" badge.
             // Only meaningful on Group rows with `plugin_instance_id` set.
             ("default_elements_hash", "TEXT"),
+            // Phase 9: serialised HashMap<String, JsonValue> of theming-knob
+            // overrides on plugin Groups. Per-layout customisation that flows
+            // into the Liquid render context as `style.*`.
+            ("style_overrides_json", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -489,7 +501,8 @@ impl LayoutStore {
                     field_mapping_id, format_string, label,
                     bold, italic, underline, font_family,
                     parent_id, background, color, asset_id,
-                    visible_when_json, icon_map_json, default_elements_hash
+                    visible_when_json, icon_map_json, default_elements_hash,
+                    style_overrides_json
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -523,6 +536,7 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(23)?,
                 row.get::<_, Option<String>>(24)?,
                 row.get::<_, Option<String>>(25)?,
+                row.get::<_, Option<String>>(26)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -533,7 +547,8 @@ impl LayoutStore {
              field_mapping_id, format_string, label,
              bold, italic, underline, font_family,
              parent_id, background, color, asset_id,
-             visible_when_json, icon_map_json, default_elements_hash) in rows
+             visible_when_json, icon_map_json, default_elements_hash,
+             style_overrides_json) in rows
         {
             let bold = bold.map(|v| v != 0);
             let italic = italic.map(|v| v != 0);
@@ -547,6 +562,21 @@ impl LayoutStore {
                     Err(e) => {
                         log::warn!("layout '{layout_id}' item '{item_id}': bad visible_when_json: {e}");
                         None
+                    }
+                });
+            // Phase 9: parse style_overrides up-front (before the match arms
+            // move `item_id`) so we can log the offending id on parse failure.
+            // Same forgiving-degradation contract as visible_when_json.
+            let style_overrides: Option<std::collections::HashMap<String, serde_json::Value>> =
+                style_overrides_json.as_deref().and_then(|s| {
+                    match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(s) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            log::warn!(
+                                "layout '{layout_id}' group '{item_id}': bad style_overrides_json: {e}"
+                            );
+                            None
+                        }
                     }
                 });
             let item = match item_type.as_str() {
@@ -690,6 +720,7 @@ impl LayoutStore {
                     // comparing the stored hash to the registry's current
                     // hash; the storage layer always reads it as None.
                     defaults_stale: None,
+                    style_overrides,
                 },
                 other => {
                     return Err(LayoutStoreError::InvalidItemType(other.to_string()))
@@ -862,20 +893,26 @@ impl LayoutStore {
                     id, z_index, x, y, width, height,
                     plugin_instance_id, label, background, parent_id,
                     default_elements_hash,
+                    style_overrides,
                     // `defaults_stale` is ephemeral metadata for GET responses;
                     // never persisted, so we drop it on write.
                     defaults_stale: _,
                 } => {
+                    let style_json: Option<String> = style_overrides
+                        .as_ref()
+                        .filter(|m| !m.is_empty())
+                        .map(|m| serde_json::to_string(m)
+                            .expect("HashMap<String, JsonValue> always serialises"));
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           plugin_instance_id, label, background, parent_id,
-                          default_elements_hash)
-                         VALUES (?1, ?2, 'group', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                          default_elements_hash, style_overrides_json)
+                         VALUES (?1, ?2, 'group', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             plugin_instance_id, label, background, parent_id,
-                            default_elements_hash,
+                            default_elements_hash, style_json,
                         ],
                     )?;
                 }
@@ -1686,6 +1723,7 @@ mod tests {
                     parent_id: None,
                     default_elements_hash: None,
                     defaults_stale: None,
+                    style_overrides: None,
                 },
                 LayoutItem::StaticText {
                     id: "t0".to_string(),
@@ -1732,6 +1770,7 @@ mod tests {
             parent_id: None,
             default_elements_hash: None,
             defaults_stale: None,
+            style_overrides: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         // None fields should be omitted by skip_serializing_if.
@@ -1764,6 +1803,7 @@ mod tests {
                     parent_id: None,
                     default_elements_hash: None,
                     defaults_stale: None,
+                    style_overrides: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d".to_string(),
