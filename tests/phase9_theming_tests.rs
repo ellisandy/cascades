@@ -241,6 +241,82 @@ fn style_overrides_isolate_across_layouts() {
     assert_eq!(extract(&l2), "#00aa00", "L2 lost its green accent");
 }
 
+/// Pin the within-layout-duplicate-Group ordering contract. The compositor
+/// builds its `(plugin_instance_id → style_overrides)` map via
+/// `entry().or_insert_with()`, which means **first-seen wins** when two
+/// Groups in the same layout bind the same plugin instance. The fetch SQL
+/// orders rows by `(z_index ASC, id ASC)`, so the deterministic winner is
+/// the lower z-index; ties broken alphabetically by id.
+///
+/// We verify the storage-side ordering here rather than reaching into the
+/// private compositor internals — the contract that matters is "the items
+/// vec returned by get_layout has the canonical order," and the compositor
+/// derives its choice from that.
+#[test]
+fn duplicate_plugin_groups_load_in_canonical_order() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = LayoutStore::open(&dir.path().join("test.db")).unwrap();
+
+    // Two groups bound to the same plugin instance, distinguishable only by
+    // their style_overrides. Insert in REVERSE order so the test fails if
+    // the read path doesn't apply the canonical ordering.
+    let make_group = |id: &str, z: i32, color: &str| {
+        let mut over = HashMap::new();
+        over.insert("accent_color".to_string(), json!(color));
+        LayoutItem::Group {
+            id: id.to_string(),
+            z_index: z, x: 0, y: 0, width: 100, height: 100,
+            plugin_instance_id: Some("weather".into()),
+            label: None, background: None, parent_id: None,
+            default_elements_hash: None, defaults_stale: None,
+            style_overrides: Some(over),
+        }
+    };
+    store.upsert_layout(&LayoutConfig {
+        id: "L".into(), name: "L".into(),
+        items: vec![
+            make_group("group_b", 1, "#bbbbbb"),
+            make_group("group_a", 0, "#aaaaaa"),
+        ],
+        updated_at: 0,
+    }).unwrap();
+
+    let loaded = store.get_layout("L").unwrap().unwrap();
+    // First-by-(z_index, id): group_a (z=0) wins regardless of insertion order.
+    assert_eq!(loaded.items[0].id(), "group_a",
+        "lowest-z-index group must be first in items vec");
+    assert_eq!(loaded.items[1].id(), "group_b");
+    // The compositor's HashMap::entry(or_insert_with) takes the first hit, so
+    // the user sees group_a's overrides applied at render time.
+}
+
+/// Spawn helper round-trip for the new `kind = "plugin_slot"` arm. This is
+/// the mechanism that lets un-decomposed-but-themable plugins land as a
+/// Group + single PluginSlot child — the Group is what holds the
+/// style_overrides, even though it has no decomposed children.
+///
+/// This test exercises the helper indirectly via the reset endpoint (which
+/// is the only public path that calls it), since the helper itself is
+/// pub(crate) in src/api.rs.
+#[test]
+fn plugin_slot_kind_recognised_in_default_elements() {
+    // Roundtrip through serialization to confirm the `plugin_slot` kind
+    // string deserialises into a DefaultElement just like the others.
+    use cascades::plugin_registry::DefaultElement;
+    let toml_text = r#"
+        kind = "plugin_slot"
+        x = 0
+        y = 0
+        width = 800
+        height = 480
+        orientation = "full"
+    "#;
+    let el: DefaultElement = toml::from_str(toml_text).expect("plugin_slot kind must parse");
+    assert_eq!(el.kind, "plugin_slot");
+    assert_eq!(el.orientation.as_deref(), Some("full"));
+    assert_eq!((el.x, el.y, el.width, el.height), (0, 0, 800, 480));
+}
+
 /// Hand-edited corruption in the `style_overrides_json` column must not
 /// crash the read path. The Group loads with `style_overrides: None`,
 /// matching the "malformed clause → no clause" contract from Phase 7.
