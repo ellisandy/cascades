@@ -87,6 +87,14 @@ pub struct RenderContext {
     pub now: NowContext,
     /// Non-null when the last fetch failed and stale data is being shown.
     pub error: Option<String>,
+    /// Phase 9: theming-knob overrides for the plugin Group rendering this
+    /// slot. Templates read sub-keys via `{{ style.<knob_key>.<sub> }}`
+    /// (e.g. `{{ style.temp_style.color }}`) with the `default` filter
+    /// supplying fallbacks. Empty when the slot has no Group binding or
+    /// the user hasn't customised any knobs — templates render with their
+    /// built-in defaults in that case.
+    #[serde(default)]
+    pub style: HashMap<String, JsonValue>,
 }
 
 // ─── Engine ──────────────────────────────────────────────────────────────────
@@ -194,6 +202,12 @@ impl TemplateEngine {
 
 fn build_env() -> Environment<'static> {
     let mut env = Environment::new();
+    // Phase 9: theming knobs are accessed via chained lookups like
+    // `style.temp_style.color`. With the default Lenient mode, accessing
+    // `.color` on an undefined `temp_style` raises an error before our
+    // `default` filter has a chance to substitute. Chainable lets the
+    // chain return undefined, which the filter then catches.
+    env.set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
     env.add_filter("number_with_delimiter", filter_number_with_delimiter);
     env.add_filter("round", filter_round);
     env.add_filter("default", filter_default);
@@ -445,6 +459,7 @@ mod tests {
             trip_decision: None,
             now: NowContext::from_unix(1_775_390_400), // 2026-04-05 12:00:00 UTC
             error: None,
+            style: HashMap::new(),
         }
     }
 
@@ -748,6 +763,7 @@ mod tests {
             }),
             now: NowContext::from_unix(1_775_390_400),
             error: None,
+            style: HashMap::new(),
         };
 
         let html = engine.render("river", &ctx).unwrap();

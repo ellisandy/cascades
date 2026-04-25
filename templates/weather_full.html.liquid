@@ -1,5 +1,18 @@
-<div class="layout--stretch flex--col">
-  <div class="title_bar">
+{# Phase 9: theming knobs bound via CSS custom properties. The user picks
+   values in the admin "Plugin customization" inspector; absent overrides
+   fall back to the defaults declared inline below. The | default filter
+   is the *single* place author-defaults are expressed — manifest `default`
+   strings are placeholders only. #}
+<style>
+  .weather-root {
+    --temp-color: {{ style.temp_style.color | default("#000000") }};
+    --temp-size: {{ style.temp_style.size | default(96) }}px;
+    --temp-weight: {{ style.temp_style.weight | default("normal") }};
+    --accent: {{ style.accent_color | default("#000000") }};
+  }
+</style>
+<div class="layout--stretch flex--col weather-root">
+  <div class="title_bar" style="color: var(--accent);">
     <span class="title">{{ settings.station_name | default("Weather") }}</span>
     {% if error %}
       <span class="label text--gray-50">stale data</span>
@@ -7,7 +20,8 @@
   </div>
 
   <div class="flex--col layout--center-x" style="flex: 1;">
-    <span class="value value--xxxlarge">{{ data.temperature_f | round(0) }}°F</span>
+    <span class="value value--xxxlarge"
+          style="color: var(--temp-color); font-size: var(--temp-size); font-weight: var(--temp-weight);">{{ data.temperature_f | round(0) }}°F</span>
     <span class="label">{{ data.sky_condition }}</span>
   </div>
 

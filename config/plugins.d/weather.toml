@@ -39,6 +39,21 @@ type = "text"
 required = false
 placeholder = "KMWH"
 
+# Phase 9: theming knobs. Theming-typed fields ("text_style", "color",
+# "toggle") declare the same shape as data settings, but values are stored
+# per-layout on the plugin Group's `style_overrides` column. The Liquid
+# template reads them via `{{ style.<key>.<sub> | default(<value>) }}`.
+
+[[plugin.settings_schema]]
+key = "temp_style"
+label = "Temperature style"
+type = "text_style"
+
+[[plugin.settings_schema]]
+key = "accent_color"
+label = "Accent colour"
+type = "color"
+
 # Decomposition: dropping "weather" onto the canvas spawns a Group with these
 # children instead of a single opaque PluginSlot.
 [[plugin.default_elements]]

@@ -43,6 +43,7 @@ fn river_full_renders_level_and_flow() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("river_full", &ctx);
@@ -72,6 +73,7 @@ fn river_full_shows_go_decision() {
         }),
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("river_full", &ctx);
@@ -96,6 +98,7 @@ fn river_full_shows_stale_error() {
         trip_decision: None,
         now: now(),
         error: Some("fetch timeout".to_owned()),
+        style: HashMap::new(),
     };
 
     let html = render("river_full", &ctx);
@@ -124,6 +127,7 @@ fn weather_full_renders_temperature_and_conditions() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("weather_full", &ctx);
@@ -152,6 +156,7 @@ fn weather_full_omits_precip_when_zero() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("weather_full", &ctx);
@@ -180,6 +185,7 @@ fn ferry_full_renders_vessel_and_route() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("ferry_full", &ctx);
@@ -207,6 +213,7 @@ fn ferry_full_limits_to_three_departures() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("ferry_full", &ctx);
@@ -236,6 +243,7 @@ fn trail_full_renders_name_and_condition() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("trail_full", &ctx);
@@ -262,6 +270,7 @@ fn trail_full_no_active_alerts() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("trail_full", &ctx);
@@ -289,6 +298,7 @@ fn road_full_renders_closure() {
         }),
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("road_full", &ctx);
@@ -314,6 +324,7 @@ fn road_full_renders_open_road() {
         trip_decision: None,
         now: now(),
         error: None,
+        style: HashMap::new(),
     };
 
     let html = render("road_full", &ctx);

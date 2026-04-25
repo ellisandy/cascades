@@ -848,6 +848,12 @@ struct ItemPayload {
     /// `/default_elements` endpoint and round-trips it back).
     #[serde(default)]
     default_elements_hash: Option<String>,
+    /// Phase 9: per-layout theming overrides on plugin Groups. Keyed by
+    /// settings-schema field key; values are whatever the field type emits
+    /// (string, bool, or sub-object for `text_style`). Server ignores on
+    /// non-Group items.
+    #[serde(default)]
+    style_overrides: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl ItemPayload {
@@ -954,6 +960,7 @@ impl ItemPayload {
                 // `defaults_stale` is computed at GET-layout time; never
                 // set from a write payload.
                 defaults_stale: None,
+                style_overrides: self.style_overrides,
             }),
             "image" => Ok(LayoutItem::Image {
                 id: self.id,
@@ -1742,6 +1749,29 @@ fn spawn_children_from_manifest(
                 parent_id: parent,
                 visible_when: None,
             },
+            // Phase 9: un-decomposed themable plugins. The author declares a
+            // single-element default with `kind = "plugin_slot"` and the
+            // plugin's monolithic template renders inside the spawned Group.
+            // The Group is what holds `style_overrides`; the plugin_slot child
+            // just keeps the `plugin_instance_id` binding the compositor uses.
+            "plugin_slot" => LayoutItem::PluginSlot {
+                id: child_id,
+                z_index,
+                x,
+                y,
+                width: el.width,
+                height: el.height,
+                plugin_instance_id: instance_id.to_string(),
+                // `orientation` doubles as the variant slot for plugin_slot
+                // children — manifest authors set it to "full" / "half_*" /
+                // "quadrant" to pick a template. Default to "full".
+                layout_variant: el
+                    .orientation
+                    .clone()
+                    .unwrap_or_else(|| "full".to_string()),
+                parent_id: parent,
+                visible_when: None,
+            },
             "data_field" => {
                 // Same upsert logic as admin_get_default_elements — every
                 // data_field child needs a stable field_mapping_id row in
@@ -1775,7 +1805,7 @@ fn spawn_children_from_manifest(
             other => {
                 return Err(format!(
                     "default_elements: unsupported kind '{other}' (expected static_text / \
-                     static_datetime / static_divider / data_field)"
+                     static_datetime / static_divider / data_field / plugin_slot)"
                 ));
             }
         };
@@ -4766,6 +4796,20 @@ mod tests {
                 "itemsToPayload missing icon_map emission for data_icon");
     }
 
+    /// Phase 9a smoke test — asserts the bundled admin template carries
+    /// `style_overrides` through both directions of the wire. The inspector
+    /// "Plugin customization" UI lands in 9b; this only covers the JS
+    /// data-flow that the 9a backend depends on.
+    #[test]
+    fn admin_html_contains_phase9a_markers() {
+        // apiToItems hydration.
+        assert!(ADMIN_HTML.contains("style_overrides:       item.style_overrides"),
+                "apiToItems missing style_overrides hydration");
+        // itemsToPayload emission — Group-only.
+        assert!(ADMIN_HTML.contains("isGroup ? (item.style_overrides || null)"),
+                "itemsToPayload missing style_overrides emission for Groups");
+    }
+
     /// Phase 8a smoke test — asserts the bundled admin template's data-flow
     /// changes for the new `/default_elements` wire shape and the
     /// `default_elements_hash` round-trip. Inspector UI (badge + Reset
@@ -4867,6 +4911,7 @@ mod tests {
                     parent_id: None,
                     default_elements_hash: Some("oldhash000000000".into()),
                     defaults_stale: None,
+                    style_overrides: None,
                 },
                 LayoutItem::StaticText {
                     id: "user-edit".into(),
@@ -4942,7 +4987,7 @@ mod tests {
                 z_index: 0, x: 0, y: 0, width: 100, height: 100,
                 plugin_instance_id: None,
                 label: None, background: None, parent_id: None,
-                default_elements_hash: None, defaults_stale: None,
+                default_elements_hash: None, defaults_stale: None, style_overrides: None,
             }],
         };
         state.layout_store.upsert_layout(&layout).unwrap();
@@ -4978,6 +5023,7 @@ mod tests {
                 // Deliberately wrong hash → must report defaults_stale: true.
                 default_elements_hash: Some("zzzzzzzzzzzzzzzz".into()),
                 defaults_stale: None,
+                style_overrides: None,
             }],
         };
         state.layout_store.upsert_layout(&layout).unwrap();
@@ -5020,6 +5066,7 @@ mod tests {
                 label: None, background: None, parent_id: None,
                 default_elements_hash: Some(current.clone()),
                 defaults_stale: None,
+                style_overrides: None,
             }],
         };
         state.layout_store.upsert_layout(&layout).unwrap();

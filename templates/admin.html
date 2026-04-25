@@ -1549,6 +1549,10 @@ function apiToItems(apiItems) {
       // distinguish "no info" from "explicitly false." Server only sets
       // this to true/false when the comparison is meaningful, never absent.
       defaults_stale:        !!item.defaults_stale,
+      // Phase 9: per-layout theming overrides on plugin Groups.
+      // Object keyed by SettingsField.key; values vary by field type
+      // (string for color, bool for toggle, object for text_style).
+      style_overrides:       item.style_overrides     || null,
     };
   });
 }
@@ -1596,6 +1600,10 @@ function itemsToPayload(items) {
       // Server ignores the field on non-Groups, but we explicitly emit null
       // so the wire shape stays uniform and easy to inspect.
       default_elements_hash: isGroup ? (item.default_elements_hash || null) : null,
+      // Phase 9: theming overrides only on Groups; server ignores otherwise.
+      // Empty object preserved as null on the wire (server treats either as
+      // "no overrides"; null is the more compact wire shape).
+      style_overrides:       isGroup ? (item.style_overrides || null) : null,
     };
   });
 }

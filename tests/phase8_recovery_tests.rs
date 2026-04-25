@@ -125,6 +125,7 @@ fn default_elements_hash_roundtrips_on_group() {
         parent_id: None,
         default_elements_hash: Some(stamp.clone()),
         defaults_stale: None,
+        style_overrides: None,
     };
     store
         .upsert_layout(&LayoutConfig {
@@ -164,6 +165,7 @@ fn pre_phase_8_group_loads_with_none_hash() {
         parent_id: None,
         default_elements_hash: None,
         defaults_stale: None,
+        style_overrides: None,
     };
     store
         .upsert_layout(&LayoutConfig {
