@@ -1540,6 +1540,15 @@ function apiToItems(apiItems) {
       icon_map:         item.icon_map            || {},
       parent_id:        item.parent_id           || null,
       background:       item.background          || null,
+      // Phase 8: hash of the plugin's default_elements at spawn / last reset.
+      // Only set on plugin-bound Group items; round-tripped on save.
+      default_elements_hash: item.default_elements_hash || null,
+      // Phase 8: ephemeral server-decorated flag. The `!!` coerces
+      // `undefined` → `false`, which is the correct default — without it,
+      // a missing field would be `undefined` and the badge UI would have to
+      // distinguish "no info" from "explicitly false." Server only sets
+      // this to true/false when the comparison is meaningful, never absent.
+      defaults_stale:        !!item.defaults_stale,
     };
   });
 }
@@ -1583,6 +1592,10 @@ function itemsToPayload(items) {
       icon_map:            item.type === 'data_icon' ? (item.icon_map || {}) : null,
       parent_id:           item.parent_id || null,
       background:          isGroup ? (item.background || null) : null,
+      // Phase 8: only Groups bound to a plugin instance carry a hash.
+      // Server ignores the field on non-Groups, but we explicitly emit null
+      // so the wire shape stays uniform and easy to inspect.
+      default_elements_hash: isGroup ? (item.default_elements_hash || null) : null,
     };
   });
 }
@@ -1673,11 +1686,17 @@ async function quickAdd(pluginId, variant) {
 // [[default_elements]]. Returns true if the group was spawned; false when the
 // caller should fall back to a single plugin_slot.
 async function spawnPluginAt(pluginId, variant, dropX, dropY) {
+  // Phase 8: response shape is `{ elements, default_elements_hash }`.
+  // The hash is round-tripped on save so the server can later detect
+  // "manifest changed since you spawned" and surface a Reset prompt.
   let elements = null;
+  let defaultElementsHash = null;
   try {
     const res = await apiFetch('/api/admin/plugins/' + encodeURIComponent(pluginId) + '/default_elements');
     if (!res.ok) return false;
-    elements = await res.json();
+    const body = await res.json();
+    elements = body.elements;
+    defaultElementsHash = body.default_elements_hash || null;
   } catch (e) {
     return false;
   }
@@ -1703,6 +1722,9 @@ async function spawnPluginAt(pluginId, variant, dropX, dropY) {
     plugin_id: pluginId, variant: variant,
     text: '', font_size: 24, orientation: 'horizontal',
     label: pluginId, background: 'card',
+    // Phase 8: stamp on the group at spawn so future save-cycles round-trip
+    // it. itemsToPayload will emit it back to the server.
+    default_elements_hash: defaultElementsHash,
   });
 
   elements.forEach(function(el, i) {

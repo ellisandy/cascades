@@ -158,6 +158,7 @@ fn group_visible_when_is_always_none() {
         id: "g".to_string(),
         z_index: 0, x: 0, y: 0, width: 100, height: 100,
         plugin_instance_id: None, label: None, background: None, parent_id: None,
+        default_elements_hash: None, defaults_stale: None,
     };
     assert!(g.visible_when().is_none());
 }

@@ -1737,6 +1737,8 @@ mod tests {
             label: None,
             background: Some("card".to_string()),
             parent_id: None,
+            default_elements_hash: None,
+            defaults_stale: None,
         };
         let task_for_item = vec![None];
         let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
@@ -1772,6 +1774,8 @@ mod tests {
             label: None,
             background: None,
             parent_id: None,
+            default_elements_hash: None,
+            defaults_stale: None,
         };
         let task_for_item = vec![None];
         let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
@@ -1795,6 +1799,8 @@ mod tests {
             label: None,
             background: Some("card".to_string()),
             parent_id: None,
+            default_elements_hash: None,
+            defaults_stale: None,
         };
         // Child is a StaticDivider at z=1 inside the group.
         let child = LayoutItem::StaticDivider {

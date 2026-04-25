@@ -189,6 +189,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/layout/{id}/item", post(admin_post_item))
         .route("/api/admin/layout/{id}/item/{item_id}", put(admin_put_item))
         .route("/api/admin/layout/{id}/item/{item_id}", delete(admin_delete_item))
+        .route(
+            "/api/admin/layout/{id}/groups/{group_id}/reset",
+            post(admin_reset_group_to_defaults),
+        )
         // Source presets
         .route("/api/admin/presets", get(admin_list_presets))
         .route("/api/admin/sources/from-preset", post(admin_create_from_preset))
@@ -837,6 +841,13 @@ struct ItemPayload {
     /// for that variant; ignored on others.
     #[serde(default)]
     icon_map: Option<std::collections::HashMap<String, String>>,
+    /// Phase 8: hash of the plugin's `default_elements` at spawn / last-reset
+    /// time. Only meaningful on Group items with a `plugin_instance_id`.
+    /// Carried through both directions of the wire so the client can stamp
+    /// it after a fresh spawn (it fetches the manifest hash from the
+    /// `/default_elements` endpoint and round-trips it back).
+    #[serde(default)]
+    default_elements_hash: Option<String>,
 }
 
 impl ItemPayload {
@@ -939,6 +950,10 @@ impl ItemPayload {
                 label: self.label,
                 background: self.background,
                 parent_id: self.parent_id,
+                default_elements_hash: self.default_elements_hash,
+                // `defaults_stale` is computed at GET-layout time; never
+                // set from a write payload.
+                defaults_stale: None,
             }),
             "image" => Ok(LayoutItem::Image {
                 id: self.id,
@@ -1264,7 +1279,35 @@ async fn admin_get_layout(
     }
 
     match app.layout_store.get_layout(&id) {
-        Ok(Some(layout)) => Json(layout).into_response(),
+        Ok(Some(mut layout)) => {
+            // Phase 8: decorate plugin-bound Group items with `defaults_stale`
+            // so the admin UI can show a "Plugin defaults updated" badge
+            // without a second roundtrip per group. Computed by comparing the
+            // stored hash to the registry's current hash for the same plugin.
+            //
+            // Fail-closed semantics: if the registry doesn't know the plugin
+            // (e.g. instance_store has it but plugin_registry doesn't),
+            // `defaults_stale` stays None — we can't tell, so we don't claim.
+            for item in layout.items.iter_mut() {
+                if let LayoutItem::Group {
+                    plugin_instance_id: Some(pi),
+                    default_elements_hash: Some(stored),
+                    defaults_stale,
+                    ..
+                } = item
+                {
+                    // Resolve instance → plugin_id → current hash. Same lookup
+                    // chain as `admin_get_default_elements`.
+                    if let Ok(Some(inst)) = app.instance_store.get_instance(pi)
+                        && let Some(current) =
+                            app.plugin_registry.default_elements_hash(&inst.plugin_id)
+                    {
+                        *defaults_stale = Some(current != *stored);
+                    }
+                }
+            }
+            Json(layout).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             log::error!("admin_get_layout '{}': {}", id, e);
@@ -1539,7 +1582,18 @@ async fn admin_get_default_elements(
     };
 
     let Some(def) = app.plugin_registry.get(&instance.plugin_id) else {
-        return Json(Vec::<DefaultElementResponse>::new()).into_response();
+        return Json(DefaultElementsResponse {
+            elements: Vec::new(),
+            default_elements_hash: None,
+        })
+        .into_response();
+    };
+    // Phase 8: bundle the manifest hash with the elements so the JS spawn
+    // helper can stamp it on the new Group row in a single fetch.
+    let default_elements_hash = if def.default_elements.is_empty() {
+        None
+    } else {
+        Some(crate::plugin_registry::default_elements_hash(&def.default_elements))
     };
 
     let mut out: Vec<DefaultElementResponse> = Vec::with_capacity(def.default_elements.len());
@@ -1580,7 +1634,11 @@ async fn admin_get_default_elements(
         });
     }
 
-    Json(out).into_response()
+    Json(DefaultElementsResponse {
+        elements: out,
+        default_elements_hash,
+    })
+    .into_response()
 }
 
 /// Deterministic field-mapping id derived from `(data_source_id, json_path)`.
@@ -1593,7 +1651,330 @@ fn stable_field_mapping_id(data_source_id: &str, json_path: &str) -> String {
     format!("fm-{data_source_id}-{sanitized}")
 }
 
+/// Phase 8: spawn fresh child `LayoutItem`s from a plugin manifest's
+/// `default_elements`, positioned so their bounding box's top-left sits at
+/// `(group_origin_x, group_origin_y)`. Returns the children alongside the
+/// computed (width, height) of their union — the caller is expected to
+/// resize the parent Group to match.
+///
+/// Mirrors the client-side translation in `spawnPluginAt` (see
+/// `templates/admin.html`). The two implementations exist in parallel
+/// because Phase 8a is server-only — initial spawns still happen in JS, but
+/// `POST /admin/layout/{lid}/groups/{gid}/reset` needs to do the same work
+/// without round-tripping through the client. **If you change either, change
+/// both.** A divergence will silently produce different geometry on reset
+/// vs. on first drop, which is exactly the regret-class bug Phase 8 was
+/// meant to prevent.
+fn spawn_children_from_manifest(
+    elements: &[DefaultElement],
+    instance_id: &str,
+    group_id: &str,
+    group_origin_x: i32,
+    group_origin_y: i32,
+    base_z: i32,
+    layout_store: &LayoutStore,
+) -> Result<(Vec<LayoutItem>, i32, i32), String> {
+    if elements.is_empty() {
+        return Ok((Vec::new(), 0, 0));
+    }
+    // Compute the manifest bounding-box so we can translate to the group's
+    // existing origin (a "reset" must not jump the group on screen).
+    let min_x = elements.iter().map(|e| e.x).min().unwrap_or(0);
+    let min_y = elements.iter().map(|e| e.y).min().unwrap_or(0);
+    let max_x = elements.iter().map(|e| e.x + e.width).max().unwrap_or(0);
+    let max_y = elements.iter().map(|e| e.y + e.height).max().unwrap_or(0);
+    let union_w = (max_x - min_x).max(20);
+    let union_h = (max_y - min_y).max(20);
+
+    let mut children = Vec::with_capacity(elements.len());
+    for (i, el) in elements.iter().enumerate() {
+        let child_id = format!(
+            "{group_id}-c{i}-{ts:x}",
+            // Tag with a low-bits timestamp so a reset doesn't collide with
+            // any pre-existing item id from the wiped-out tree. Globally
+            // unique by construction.
+            ts = unix_now_millis()
+        );
+        let x = group_origin_x + (el.x - min_x);
+        let y = group_origin_y + (el.y - min_y);
+        let z_index = base_z + (i as i32) + 1;
+        let parent = Some(group_id.to_string());
+
+        let item = match el.kind.as_str() {
+            "static_text" => LayoutItem::StaticText {
+                id: child_id,
+                z_index,
+                x,
+                y,
+                width: el.width,
+                height: el.height,
+                text_content: el.text_content.clone().unwrap_or_default(),
+                font_size: el.font_size.unwrap_or(16),
+                orientation: el.orientation.clone(),
+                bold: None, italic: None, underline: None,
+                font_family: None, color: None,
+                parent_id: parent,
+                visible_when: None,
+            },
+            "static_datetime" => LayoutItem::StaticDateTime {
+                id: child_id,
+                z_index,
+                x,
+                y,
+                width: el.width,
+                height: el.height,
+                font_size: el.font_size.unwrap_or(16),
+                format: el.format.clone(),
+                orientation: el.orientation.clone(),
+                bold: None, italic: None, underline: None,
+                font_family: None, color: None,
+                parent_id: parent,
+                visible_when: None,
+            },
+            "static_divider" => LayoutItem::StaticDivider {
+                id: child_id,
+                z_index,
+                x,
+                y,
+                width: el.width,
+                height: el.height,
+                orientation: el.orientation.clone(),
+                parent_id: parent,
+                visible_when: None,
+            },
+            "data_field" => {
+                // Same upsert logic as admin_get_default_elements — every
+                // data_field child needs a stable field_mapping_id row in
+                // data_source_fields before the layout is saved.
+                let path = el.field_path.as_deref().ok_or_else(|| {
+                    format!("data_field default_element missing field_path (kind={})", el.kind)
+                })?;
+                let name = el.label.clone().unwrap_or_else(|| path.to_string());
+                let fm_id = stable_field_mapping_id(instance_id, path);
+                let fm = layout_store
+                    .upsert_field_mapping_by_path(&fm_id, instance_id, "builtin", &name, path)
+                    .map_err(|e| format!("upsert field mapping for '{path}': {e}"))?;
+                LayoutItem::DataField {
+                    id: child_id,
+                    z_index,
+                    x,
+                    y,
+                    width: el.width,
+                    height: el.height,
+                    field_mapping_id: fm.id,
+                    font_size: el.font_size.unwrap_or(16),
+                    format_string: el.format_string.clone().unwrap_or_else(|| "{{value}}".to_string()),
+                    label: el.label.clone(),
+                    orientation: el.orientation.clone(),
+                    bold: None, italic: None, underline: None,
+                    font_family: None, color: None,
+                    parent_id: parent,
+                    visible_when: None,
+                }
+            }
+            other => {
+                return Err(format!(
+                    "default_elements: unsupported kind '{other}' (expected static_text / \
+                     static_datetime / static_divider / data_field)"
+                ));
+            }
+        };
+        children.push(item);
+    }
+    Ok((children, union_w, union_h))
+}
+
+fn unix_now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Wire shape for `POST /api/admin/layout/{id}/groups/{group_id}/reset`.
+/// Returned to the client so the UI can show "discarded N items" + refresh
+/// without a follow-up GET.
+#[derive(Debug, Serialize)]
+struct ResetGroupResponse {
+    /// Number of descendant items wiped (transitive count of items whose
+    /// parent chain reached the target group).
+    discarded_count: usize,
+    /// Hash that was stamped on the group post-reset — equals the manifest's
+    /// current hash. Surfaced so the UI can confirm staleness cleared.
+    default_elements_hash: String,
+    /// Updated full layout (admin UIs that hold a local copy can replace
+    /// state without a separate GET).
+    layout: LayoutConfig,
+}
+
+/// `POST /api/admin/layout/{id}/groups/{group_id}/reset` — wipe a plugin
+/// group's children and respawn from the manifest's `default_elements`,
+/// stamping the current hash. **Destructive:** every descendant of the
+/// group (transitive) is removed, including any user-added items inside
+/// the plugin region.
+///
+/// Returns 404 when the layout, group, plugin instance, or plugin definition
+/// can't be found. Returns 400 when the group has no `plugin_instance_id`
+/// (resetting a hand-built group is meaningless) or when the plugin has no
+/// `default_elements` to spawn.
+async fn admin_reset_group_to_defaults(
+    headers: HeaderMap,
+    Path((layout_id, group_id)): Path<(String, String)>,
+    State(app): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&headers, &app.api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Read the layout (returns 404 if missing).
+    let mut layout = match app.layout_store.get_layout(&layout_id) {
+        Ok(Some(l)) => l,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_reset_group_to_defaults get_layout '{layout_id}': {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    // Locate the target Group + capture its origin so respawn keeps it in
+    // place. We need a copy of the geometry before we mutate the items vec.
+    let (group_origin_x, group_origin_y, group_z, instance_id) = {
+        let g = layout.items.iter().find(|it| it.id() == group_id);
+        let Some(LayoutItem::Group {
+            x, y, z_index, plugin_instance_id: Some(pi), ..
+        }) = g
+        else {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(
+                    "group not found or has no plugin_instance_id".to_string(),
+                ))
+                .unwrap();
+        };
+        (*x, *y, *z_index, pi.clone())
+    };
+
+    // Resolve plugin definition.
+    let instance = match app.instance_store.get_instance(&instance_id) {
+        Ok(Some(i)) => i,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::error!("admin_reset_group_to_defaults get_instance '{instance_id}': {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let Some(def) = app.plugin_registry.get(&instance.plugin_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if def.default_elements.is_empty() {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(
+                "plugin has no default_elements; nothing to spawn".to_string(),
+            ))
+            .unwrap();
+    }
+
+    // Compute the hash from the same manifest snapshot we're about to spawn
+    // from — so a registry reload mid-request can't desync the stamp.
+    let new_hash = crate::plugin_registry::default_elements_hash(&def.default_elements);
+
+    // Wipe descendants — collect all transitive children of the group.
+    let descendants = collect_descendants(&layout.items, &group_id);
+    let discarded_count = descendants.len();
+    layout.items.retain(|it| !descendants.contains(it.id()));
+
+    // Spawn fresh children from the manifest snapshot.
+    let (children, union_w, union_h) = match spawn_children_from_manifest(
+        &def.default_elements,
+        &instance_id,
+        &group_id,
+        group_origin_x,
+        group_origin_y,
+        group_z,
+        &app.layout_store,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("admin_reset_group_to_defaults spawn_children: {e}");
+            return Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .body(Body::from(format!("spawn from manifest failed: {e}")))
+                .unwrap();
+        }
+    };
+
+    // Update the group: stamp the new hash and resize to the children's
+    // union so the visual frame still encloses everything that was spawned.
+    if let Some(LayoutItem::Group {
+        width,
+        height,
+        default_elements_hash,
+        ..
+    }) = layout.items.iter_mut().find(|it| it.id() == group_id)
+    {
+        *width = union_w;
+        *height = union_h;
+        *default_elements_hash = Some(new_hash.clone());
+    }
+
+    // Append the new children. `upsert_layout` will sort by z_index on read.
+    layout.items.extend(children);
+
+    if let Err(e) = app.layout_store.upsert_layout(&layout) {
+        log::error!("admin_reset_group_to_defaults upsert_layout: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Return the saved layout (re-fetched so the caller sees exactly what
+    // was persisted, including any default ordering applied by the store).
+    let saved = match app.layout_store.get_layout(&layout_id) {
+        Ok(Some(l)) => l,
+        _ => layout, // best-effort fallback if re-read fails
+    };
+
+    Json(ResetGroupResponse {
+        discarded_count,
+        default_elements_hash: new_hash,
+        layout: saved,
+    })
+    .into_response()
+}
+
+/// Collect transitive descendant ids of `group_id` from the items list. Does
+/// not include the group itself. Order is unspecified.
+fn collect_descendants(items: &[LayoutItem], group_id: &str) -> std::collections::HashSet<String> {
+    use std::collections::{HashSet, VecDeque};
+    let mut out: HashSet<String> = HashSet::new();
+    let mut frontier: VecDeque<String> = VecDeque::new();
+    frontier.push_back(group_id.to_string());
+    while let Some(parent) = frontier.pop_front() {
+        for it in items {
+            if it.parent_id() == Some(parent.as_str())
+                && out.insert(it.id().to_string())
+            {
+                frontier.push_back(it.id().to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Wire shape for `GET /api/admin/plugins/{id}/default_elements`.
+///
+/// Phase 8 promoted the response from a bare `Vec<DefaultElementResponse>` to
+/// `{ elements, default_elements_hash }` so the admin UI can stamp the hash
+/// on a freshly-spawned plugin Group without a second roundtrip. The hash is
+/// `None` when the plugin has no `default_elements` (legacy single-PluginSlot
+/// drop path).
+#[derive(Debug, Serialize)]
+struct DefaultElementsResponse {
+    elements: Vec<DefaultElementResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_elements_hash: Option<String>,
+}
+
+/// One entry inside [`DefaultElementsResponse::elements`].
 #[derive(Debug, Serialize)]
 struct DefaultElementResponse {
     #[serde(flatten)]
@@ -3871,7 +4252,15 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(body.is_array(), "default_elements should return a JSON array");
+        // Phase 8: response is `{ elements: [...], default_elements_hash: "..." }`.
+        // The hash field is omitted when no default_elements are declared
+        // (skip_serializing_if). Test fixture's "weather" plugin has no
+        // default_elements registered, so we just assert the envelope shape.
+        assert!(body.is_object(), "default_elements should return a JSON object");
+        assert!(
+            body.get("elements").map(|v| v.is_array()).unwrap_or(false),
+            "response should have an 'elements' array; got {body}"
+        );
     }
 
     #[tokio::test]
@@ -4375,5 +4764,277 @@ mod tests {
                 "itemsToPayload missing visible_when emission");
         assert!(ADMIN_HTML.contains("item.type === 'data_icon' ? (item.icon_map"),
                 "itemsToPayload missing icon_map emission for data_icon");
+    }
+
+    /// Phase 8a smoke test — asserts the bundled admin template's data-flow
+    /// changes for the new `/default_elements` wire shape and the
+    /// `default_elements_hash` round-trip. Inspector UI (badge + Reset
+    /// button) lands in 8b; this test is intentionally narrow and only
+    /// covers the JS pieces that the 8a backend depends on. A regression
+    /// here would silently break plugin spawns until 8b ships.
+    #[test]
+    fn admin_html_contains_phase8a_markers() {
+        // spawnPluginAt reads the new envelope shape.
+        assert!(ADMIN_HTML.contains("body.elements"),
+                "spawnPluginAt missing `body.elements` (new wire shape)");
+        assert!(ADMIN_HTML.contains("body.default_elements_hash"),
+                "spawnPluginAt missing default_elements_hash extraction");
+        // Hash is stamped on the spawned Group.
+        assert!(ADMIN_HTML.contains("default_elements_hash: defaultElementsHash"),
+                "spawnPluginAt not stamping default_elements_hash on Group");
+
+        // Both directions of the wire carry the hash.
+        assert!(ADMIN_HTML.contains("default_elements_hash: item.default_elements_hash"),
+                "apiToItems missing default_elements_hash hydration");
+        assert!(ADMIN_HTML.contains("isGroup ? (item.default_elements_hash || null)"),
+                "itemsToPayload missing default_elements_hash emission for Groups");
+
+        // Ephemeral defaults_stale flag is read but never written.
+        assert!(ADMIN_HTML.contains("defaults_stale:        !!item.defaults_stale"),
+                "apiToItems missing defaults_stale coercion");
+    }
+
+    // ── Phase 8: reset-to-defaults endpoint + GET-layout decoration ───────
+
+    fn weather_default_elements() -> Vec<DefaultElement> {
+        vec![
+            DefaultElement {
+                kind: "static_text".to_string(),
+                x: 0, y: 0, width: 200, height: 24,
+                z_index: 0,
+                field_path: None, label: None, format_string: None,
+                font_size: Some(20),
+                text_content: Some("Forecast".to_string()),
+                format: None,
+                orientation: None,
+            },
+            DefaultElement {
+                kind: "static_divider".to_string(),
+                x: 0, y: 30, width: 200, height: 2,
+                z_index: 1,
+                field_path: None, label: None, format_string: None,
+                font_size: None,
+                text_content: None, format: None,
+                orientation: Some("horizontal".to_string()),
+            },
+        ]
+    }
+
+    /// Register the `weather` plugin with the test registry so the reset
+    /// endpoint can resolve `default_elements`. Uses the public `insert`
+    /// helper rather than TOML so tests stay self-contained.
+    fn register_weather_plugin(state: &Arc<AppState>) {
+        use crate::plugin_registry::{DataStrategy, PluginDefinition};
+        let def = PluginDefinition {
+            id: "weather".to_string(),
+            name: "Weather".to_string(),
+            description: String::new(),
+            source: "weather".to_string(),
+            refresh_interval_secs: 300,
+            data_strategy: DataStrategy::Polling,
+            template_full: None,
+            template_half_horizontal: None,
+            template_half_vertical: None,
+            template_quadrant: None,
+            criteria: Vec::new(),
+            settings_schema: Vec::new(),
+            default_elements: weather_default_elements(),
+        };
+        state.plugin_registry.insert(def);
+    }
+
+    /// `POST /admin/layout/{id}/groups/{gid}/reset` wipes children, respawns
+    /// from the manifest, and stamps the current hash on the group.
+    #[tokio::test]
+    async fn admin_reset_group_wipes_children_and_stamps_hash() {
+        let (state, _dir) = make_writable_test_state();
+        register_weather_plugin(&state);
+        let app = build_router(Arc::clone(&state));
+
+        // Pre-populate: a layout with a weather Group + one stale child the
+        // user "added" inside the group; reset must remove that child too.
+        let layout = LayoutConfig {
+            id: "L".to_string(),
+            name: "L".to_string(),
+            updated_at: 0,
+            items: vec![
+                LayoutItem::Group {
+                    id: "g0".into(),
+                    z_index: 0, x: 50, y: 60, width: 200, height: 50,
+                    plugin_instance_id: Some("weather".into()),
+                    label: Some("Weather".into()),
+                    background: Some("card".into()),
+                    parent_id: None,
+                    default_elements_hash: Some("oldhash000000000".into()),
+                    defaults_stale: None,
+                },
+                LayoutItem::StaticText {
+                    id: "user-edit".into(),
+                    z_index: 1, x: 60, y: 70, width: 100, height: 20,
+                    text_content: "user added".into(),
+                    font_size: 14,
+                    orientation: None,
+                    bold: None, italic: None, underline: None, font_family: None, color: None,
+                    parent_id: Some("g0".into()),
+                    visible_when: None,
+                },
+            ],
+        };
+        state.layout_store.upsert_layout(&layout).unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/layout/L/groups/g0/reset")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK,
+            "reset endpoint should return 200");
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Discard count includes the user's hand-added child.
+        assert_eq!(body["discarded_count"].as_u64(), Some(1),
+            "expected 1 discarded child (the user-added text)");
+        // The stamped hash equals the current manifest hash.
+        let expected_hash = crate::plugin_registry::default_elements_hash(
+            &weather_default_elements(),
+        );
+        assert_eq!(body["default_elements_hash"].as_str(), Some(expected_hash.as_str()));
+
+        // The persisted layout has the manifest's children + the stamped hash.
+        let saved = state.layout_store.get_layout("L").unwrap().unwrap();
+        let group = saved.items.iter().find(|it| it.id() == "g0").unwrap();
+        match group {
+            LayoutItem::Group { default_elements_hash, x, y, .. } => {
+                assert_eq!(default_elements_hash.as_deref(), Some(expected_hash.as_str()));
+                // Origin preserved: reset must NOT jump the group on screen.
+                assert_eq!((*x, *y), (50, 60));
+            }
+            _ => panic!("g0 must still be a Group"),
+        }
+
+        // Children = exactly the manifest's elements. The user's "user-edit"
+        // child must be gone.
+        let children: Vec<_> = saved.items.iter()
+            .filter(|it| it.parent_id() == Some("g0"))
+            .collect();
+        assert_eq!(children.len(), 2, "expected 2 manifest children, got {children:?}");
+        assert!(saved.items.iter().all(|it| it.id() != "user-edit"),
+            "user-edit must be wiped");
+    }
+
+    /// Reset on a group with no `plugin_instance_id` returns 400 — there's
+    /// no manifest to spawn from.
+    #[tokio::test]
+    async fn admin_reset_group_rejects_handbuilt_group() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+
+        let layout = LayoutConfig {
+            id: "L".to_string(),
+            name: "L".to_string(),
+            updated_at: 0,
+            items: vec![LayoutItem::Group {
+                id: "g0".into(),
+                z_index: 0, x: 0, y: 0, width: 100, height: 100,
+                plugin_instance_id: None,
+                label: None, background: None, parent_id: None,
+                default_elements_hash: None, defaults_stale: None,
+            }],
+        };
+        state.layout_store.upsert_layout(&layout).unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/layout/L/groups/g0/reset")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `GET /api/admin/layout/{id}` decorates plugin Groups with
+    /// `defaults_stale: true` when the stored hash differs from the
+    /// registry's current hash.
+    #[tokio::test]
+    async fn admin_get_layout_marks_stale_groups() {
+        let (state, _dir) = make_writable_test_state();
+        register_weather_plugin(&state);
+        let app = build_router(Arc::clone(&state));
+
+        let layout = LayoutConfig {
+            id: "L".to_string(),
+            name: "L".to_string(),
+            updated_at: 0,
+            items: vec![LayoutItem::Group {
+                id: "g0".into(),
+                z_index: 0, x: 0, y: 0, width: 200, height: 50,
+                plugin_instance_id: Some("weather".into()),
+                label: None, background: None, parent_id: None,
+                // Deliberately wrong hash → must report defaults_stale: true.
+                default_elements_hash: Some("zzzzzzzzzzzzzzzz".into()),
+                defaults_stale: None,
+            }],
+        };
+        state.layout_store.upsert_layout(&layout).unwrap();
+
+        let req = Request::builder()
+            .uri("/api/admin/layout/L")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let group = &body["items"][0];
+        assert_eq!(group["type"], "group");
+        assert_eq!(group["defaults_stale"].as_bool(), Some(true),
+            "stale group must be flagged: got {body}");
+    }
+
+    /// Conversely, a group whose stored hash matches the manifest's current
+    /// hash gets `defaults_stale: false` — the badge must clear after a reset.
+    #[tokio::test]
+    async fn admin_get_layout_marks_fresh_groups_not_stale() {
+        let (state, _dir) = make_writable_test_state();
+        register_weather_plugin(&state);
+        let app = build_router(Arc::clone(&state));
+
+        let current = crate::plugin_registry::default_elements_hash(
+            &weather_default_elements(),
+        );
+        let layout = LayoutConfig {
+            id: "L".to_string(),
+            name: "L".to_string(),
+            updated_at: 0,
+            items: vec![LayoutItem::Group {
+                id: "g0".into(),
+                z_index: 0, x: 0, y: 0, width: 200, height: 50,
+                plugin_instance_id: Some("weather".into()),
+                label: None, background: None, parent_id: None,
+                default_elements_hash: Some(current.clone()),
+                defaults_stale: None,
+            }],
+        };
+        state.layout_store.upsert_layout(&layout).unwrap();
+
+        let req = Request::builder()
+            .uri("/api/admin/layout/L")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let group = &body["items"][0];
+        assert_eq!(group["defaults_stale"].as_bool(), Some(false));
     }
 }
