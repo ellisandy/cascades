@@ -172,6 +172,13 @@ Almost always a missing Chromium runtime lib. `journalctl -u
 cascades-sidecar` will show which `.so` the dynamic loader couldn't find;
 add to `APT_PKGS` in `scripts/install.sh` and re-run `make install`.
 
+**`/image.png` returns 500 with `ENOEXEC` in the sidecar log**
+You're on an old install (before PR #22) where Puppeteer downloaded a
+Linux-x64 Chrome binary that can't run on aarch64. Re-run `make install`
+to pick up the apt-`chromium` + `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`
+fix. The stale download under `/home/cascades/.cache/puppeteer/` can be
+deleted to reclaim ~150MB; the new install path doesn't use it.
+
 **`cargo build --release` is OOM'ing on a small Pi**
 Pi Zero 2 W has 416 MB of RAM. Use:
 ```bash

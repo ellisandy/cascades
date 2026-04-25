@@ -117,11 +117,20 @@ step "Installing system packages"
 
 # Idempotent: apt-get skips already-installed packages.
 APT_PKGS=(
-    # Chromium runtime deps that Puppeteer's bundled Chromium needs.
-    # Without these the sidecar starts but every render fails with cryptic
-    # SIGSEGV / shared-library errors. Bookworm and Trixie both ship the
-    # un-suffixed names below as installable (Trixie also offers `*t64`
-    # transitional packages but doesn't require them).
+    # The system Chromium binary itself. We point Puppeteer at this
+    # (PUPPETEER_EXECUTABLE_PATH below + in the sidecar systemd unit)
+    # instead of letting Puppeteer download its own. Two reasons:
+    # 1. Puppeteer 22.x only ships a Linux-x64 Chrome binary — running
+    #    it on aarch64 fails posix_spawn with ENOEXEC. The apt package
+    #    is built for the host's arch, so this works on Pi (arm64) and
+    #    NUCs/VMs (x86_64) alike.
+    # 2. Saves ~150MB of download per install + matches the convention
+    #    on Raspberry Pi OS where chromium is the standard browser.
+    chromium
+    # Chromium's runtime shared-library deps. Listed explicitly even
+    # though `chromium` pulls most of them in — keeps the install
+    # deterministic and gives clean apt errors if a future Debian
+    # release drops one.
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0
     libcairo2 libasound2 libxss1 libgtk-3-0 fonts-liberation
@@ -235,11 +244,16 @@ step "Installing sidecar dependencies (downloads ARM64 Chromium — slow first t
 
 # --frozen-lockfile keeps repeated installs deterministic — refuses to
 # install if bun.lock would need updating. The repo ships a checked-in
-# lockfile for exactly this reason. (`install.sh` excludes the lockfile
-# from rsync but `bun install` writes it back when satisfied.)
+# lockfile for exactly this reason.
+#
+# PUPPETEER_SKIP_DOWNLOAD=true tells Puppeteer's postinstall not to
+# fetch its bundled Chrome — we use the apt `chromium` package above
+# (see PUPPETEER_EXECUTABLE_PATH in the sidecar systemd unit). Skips
+# a ~150MB download and avoids the Puppeteer-22.x-only-ships-x64
+# trap on aarch64.
 as_service_user bash -c \
-    "cd '${INSTALL_DIR}/sidecar' && '${BUN_BIN}' install --frozen-lockfile"
-log "Sidecar deps installed"
+    "cd '${INSTALL_DIR}/sidecar' && PUPPETEER_SKIP_DOWNLOAD=true '${BUN_BIN}' install --frozen-lockfile"
+log "Sidecar deps installed (Puppeteer Chrome download skipped — using apt chromium)"
 
 # ─── Step 6: systemd units ────────────────────────────────────────────────
 
