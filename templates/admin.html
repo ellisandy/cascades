@@ -1686,10 +1686,16 @@ function buildPalette(plugins) {
     }).join('');
     var browseBtn = '<button class="variant-btn" onclick="event.stopPropagation();openJsonExplorer(\'' +
       safeId + '\')" title="Browse JSON fields for ' + safeName + '">\uD83D\uDD0D fields</button>';
+    // PR C: link to the split-pane template editor for this plugin. Opens
+    // in a new tab so the layout work-in-progress isn't lost.
+    var editBtn = '<a class="variant-btn" target="_blank" rel="noopener"' +
+      ' onclick="event.stopPropagation()" href="/admin/plugins/' +
+      encodeURIComponent(safeId) + '/edit"' +
+      ' title="Edit ' + safeName + ' templates">✎ edit</a>';
     return '<div class="palette-item" draggable="true"' +
       ' ondragstart="onPaletteDragStart(event,{type:\'plugin\',id:\'' + safeId + '\',variant:\'full\'})">' +
       '<div class="palette-item-name">' + safeName + '</div>' +
-      '<div class="palette-variants">' + variants + ' ' + browseBtn + '</div></div>';
+      '<div class="palette-variants">' + variants + ' ' + browseBtn + ' ' + editBtn + '</div></div>';
   }).join('');
 }
 

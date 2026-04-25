@@ -182,6 +182,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin", get(get_admin_ui))
         .route("/admin/login", post(post_admin_login))
         .route("/admin/logout", get(get_admin_logout))
+        .route("/admin/plugins/{id}/edit", get(get_plugin_editor_ui))
         .route("/api/admin/layouts", get(admin_list_layouts))
         .route("/api/admin/layout", post(admin_post_layout))
         .route("/api/admin/layout/{id}", get(admin_get_layout))
@@ -1241,7 +1242,76 @@ async fn get_admin_logout() -> impl IntoResponse {
         .unwrap()
 }
 
+/// `GET /admin/plugins/{id}/edit` — serve the split-pane plugin template
+/// editor (PR C). Reads `?variant=<name>` client-side; the route itself
+/// only needs the plugin id.
+///
+/// Auth: same model as `/admin` — requires the `cascades_admin_key`
+/// session cookie, otherwise redirects to `/admin` so the user can log
+/// in. The PR A preview endpoint and PR B source GET/PUT endpoints
+/// the page calls have their own auth gates, so the redirect is purely
+/// a UX nicety to avoid a half-rendered editor with broken fetches.
+///
+/// # XSS gating: id whitelist, not JSON encoding
+///
+/// The page injects the plugin id into a JavaScript `const` declaration
+/// in the served HTML. `serde_json::to_string` does NOT escape `<`, so
+/// an id of `</script><img src=x onerror=alert(1)>` would break out of
+/// the script context and execute attacker-controlled HTML. We gate
+/// this with [`is_valid_template_segment`] — the same `[A-Za-z0-9_-]`
+/// whitelist PR B's source GET/PUT use — so the only ids that reach
+/// the substitution are guaranteed to be HTML-safe by construction.
+/// Cookie-only auth means this is defence in depth (an attacker would
+/// already need the admin key), but rejecting unsafe ids costs one
+/// branch and matches the validation downstream API endpoints will
+/// apply anyway: a page that loads is guaranteed to be able to call
+/// the rest of the editor's endpoints.
+async fn get_plugin_editor_ui(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(app): State<Arc<AppState>>,
+) -> Response<Body> {
+    if !is_admin_cookie_valid(&headers, &app.api_key) {
+        return Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(header::LOCATION, "/admin")
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    // Reject ids that would HTML-break out of the const declaration the
+    // page injects them into (see the doc-comment above for the threat
+    // model). The same whitelist the PR B source GET/PUT endpoints use,
+    // so a successfully-loaded editor page is guaranteed to be able to
+    // talk to the underlying API endpoints.
+    if !is_valid_template_segment(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "plugin id must match [A-Za-z0-9_-]{1,64}",
+        )
+            .into_response();
+    }
+
+    // After the whitelist, the id is ASCII-safe but we still JSON-encode
+    // it to keep the substitution a single, mechanical operation rather
+    // than a hand-crafted "splat the value into source" path. The
+    // placeholder includes the surrounding quotes so the result lands as
+    // a valid JSON string literal in the const declaration.
+    let id_json = serde_json::to_string(&id).unwrap_or_else(|_| "\"\"".to_string());
+    let html = PLUGIN_EDITOR_HTML.replace(
+        "\"__CASCADES_PLUGIN_ID_PLACEHOLDER__\"",
+        &id_json,
+    );
+
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
 const ADMIN_HTML: &str = include_str!("../templates/admin.html");
+const PLUGIN_EDITOR_HTML: &str = include_str!("../templates/admin_plugin_editor.html");
 
 const ADMIN_LOGIN_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -6558,5 +6628,156 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "non-font bytes claiming to be a font must be rejected");
+    }
+
+    // ── PR C: GET /admin/plugins/{id}/edit ───────────────────────────────────
+
+    /// Construct an authenticated request to the editor route. Used by the
+    /// auth/HTML-shape tests below. Cookie auth mirrors the real admin SPA.
+    fn editor_req(plugin_id: &str, with_cookie: bool) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/admin/plugins/{plugin_id}/edit"));
+        if with_cookie {
+            b = b.header(header::COOKIE, "cascades_admin_key=test-key");
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn plugin_editor_unauth_redirects_to_admin() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let response = app.oneshot(editor_req("weather", false)).await.unwrap();
+        // Without the session cookie we redirect to /admin (where the user
+        // can log in), instead of returning 401 — the editor is a browser
+        // surface, not a programmatic API.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(location, "/admin");
+    }
+
+    #[tokio::test]
+    async fn plugin_editor_authed_returns_html_with_plugin_id_baked_in() {
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let response = app.oneshot(editor_req("weather", true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ct = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/html"), "expected text/html, got {ct}");
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+
+        // The placeholder marker must have been replaced with a JSON literal
+        // — and the literal must reflect the path-segment id.
+        assert!(
+            !body.contains("__CASCADES_PLUGIN_ID_PLACEHOLDER__"),
+            "placeholder must be substituted before serving"
+        );
+        assert!(
+            body.contains(r#"const PLUGIN_ID = "weather""#),
+            "expected baked-in plugin id, got page body of {} bytes",
+            body.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_editor_html_carries_phase_c_markers() {
+        // Smoke test on the embedded HTML — guards "someone reverted half
+        // the file" without needing a browser harness. Match strings are
+        // specific enough that a typo or partial revert would break them.
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("Plugin template editor"),
+            "missing page title"
+        );
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("/api/admin/template/preview"),
+            "preview endpoint URL missing — page won't fetch previews"
+        );
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("/api/admin/plugins/"),
+            "source GET/PUT base URL missing"
+        );
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("PREVIEW_DEBOUNCE_MS"),
+            "debounce constant missing — preview-on-keystroke would fire on every char"
+        );
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("\"__CASCADES_PLUGIN_ID_PLACEHOLDER__\""),
+            "placeholder marker missing — server-side substitution would fail silently"
+        );
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("highlightGutterError"),
+            "error-line gutter helper missing"
+        );
+        assert!(
+            PLUGIN_EDITOR_HTML.contains("Ctrl+S"),
+            "save shortcut hint missing — minor but a regression alert"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_editor_rejects_ids_with_quotes() {
+        // An id with quotes can't pass the [A-Za-z0-9_-] whitelist, so the
+        // handler should refuse before serving the page. This guards the
+        // const-declaration string-context — a quote-bearing id would
+        // otherwise need ad-hoc escaping. (`serde_json::to_string` does
+        // escape `"`, but we don't rely on that — the whitelist is the
+        // gate, see the handler's doc-comment.)
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .uri("/admin/plugins/we%22ather/edit")
+            .header(header::COOKIE, "cascades_admin_key=test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn plugin_editor_rejects_ids_that_could_break_out_of_script_tag() {
+        // `</script>` is the canonical "HTML-context-breaking" payload —
+        // `serde_json::to_string` does NOT escape `<` (RFC 8259 doesn't
+        // require it), so without the whitelist a malicious id like
+        // `</script><img src=x onerror=alert(1)>` would land verbatim in
+        // the const declaration and execute. Cookie-only auth gates
+        // exploitation, but defence in depth costs one branch.
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            // URL-encoded `</script>` — matchit lets it through as raw
+            // bytes, then our whitelist rejects.
+            .uri("/admin/plugins/%3C%2Fscript%3E/edit")
+            .header(header::COOKIE, "cascades_admin_key=test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_spa_links_to_plugin_editor() {
+        // Smoke check — a future revert that drops the editor link from
+        // `buildPalette` would silently strip the discovery path. Cheap
+        // insurance: the URL prefix has to stay in admin.html.
+        assert!(
+            ADMIN_HTML.contains("/admin/plugins/"),
+            "admin SPA palette must link to /admin/plugins/{{id}}/edit"
+        );
+        assert!(
+            ADMIN_HTML.contains("title=\"Edit ")
+                || ADMIN_HTML.contains("/edit\""),
+            "expected an `edit` button rendering in admin.html palette"
+        );
     }
 }
