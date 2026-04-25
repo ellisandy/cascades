@@ -6,7 +6,6 @@ source = "noaa"
 refresh_interval_secs = 300
 data_strategy = "polling"
 
-template_full = "templates/weather_full.html.jinja"
 
 [[plugin.criteria]]
 key = "temperature_f"

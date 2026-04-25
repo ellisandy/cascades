@@ -6,7 +6,6 @@ source = "road_closures"
 refresh_interval_secs = 1800
 data_strategy = "polling"
 
-template_full = "templates/road_full.html.jinja"
 
 [[plugin.criteria]]
 key = "status"

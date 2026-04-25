@@ -6,7 +6,6 @@ source = "trail_conditions"
 refresh_interval_secs = 900
 data_strategy = "polling"
 
-template_full = "templates/trail_full.html.jinja"
 
 [[plugin.settings_schema]]
 key = "park_code"

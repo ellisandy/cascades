@@ -6,7 +6,6 @@ source = "wsdot"
 refresh_interval_secs = 60
 data_strategy = "polling"
 
-template_full = "templates/ferry_full.html.jinja"
 
 [[plugin.settings_schema]]
 key = "route_id"
