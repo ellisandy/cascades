@@ -4318,4 +4318,62 @@ mod tests {
         assert!(ADMIN_HTML.contains("item.type === 'image' ? (item.asset_id"),
                 "itemsToPayload missing asset_id emission for image type");
     }
+
+    /// Phase 7b smoke test — asserts the bundled admin template wires up the
+    /// `visible_when` "Show only when..." section, the DataIcon palette entry,
+    /// the icon_map editor, and the data_icon branches in the data-flow
+    /// helpers (apiToItems / itemsToPayload). Same "catches a partial revert"
+    /// philosophy as 5b/6b — string matches must be specific enough that a
+    /// typo would break them.
+    #[test]
+    fn admin_html_contains_phase7b_markers() {
+        // Palette entry — Data Icon must be draggable from STATIC.
+        assert!(ADMIN_HTML.contains("Data Icon</div>"),
+                "missing Data Icon palette label");
+        assert!(ADMIN_HTML.contains("type:'data_icon'"),
+                "missing data_icon palette drag payload");
+
+        // Modal wiring: shared with DataField via state.dfModalTarget.
+        assert!(ADMIN_HTML.contains("dfModalTarget"),
+                "missing dfModalTarget state discriminator");
+        assert!(ADMIN_HTML.contains("'data_icon'"),
+                "missing data_icon string in modal/submit logic");
+        assert!(ADMIN_HTML.contains("id=\"df-modal-title\""),
+                "missing dynamic modal title element");
+
+        // visible_when section + helpers.
+        assert!(ADMIN_HTML.contains("Show only when"),
+                "missing 'Show only when' section header");
+        assert!(ADMIN_HTML.contains("function visibleWhenSection"),
+                "missing visibleWhenSection builder");
+        assert!(ADMIN_HTML.contains("function updateVisibleWhenField"),
+                "missing updateVisibleWhenField handler");
+        assert!(ADMIN_HTML.contains("function clearVisibleWhen"),
+                "missing clearVisibleWhen handler");
+
+        // Icon-map editor + helpers.
+        assert!(ADMIN_HTML.contains("function iconMapSection"),
+                "missing iconMapSection builder");
+        assert!(ADMIN_HTML.contains("function addIconMapRow"),
+                "missing addIconMapRow handler");
+        assert!(ADMIN_HTML.contains("function renameIconMapKey"),
+                "missing renameIconMapKey handler");
+        assert!(ADMIN_HTML.contains("function setIconMapAsset"),
+                "missing setIconMapAsset handler");
+        assert!(ADMIN_HTML.contains("function removeIconMapKey"),
+                "missing removeIconMapKey handler");
+        assert!(ADMIN_HTML.contains("Icon map (value"),
+                "missing icon_map editor section header");
+
+        // Data-flow: visible_when + icon_map flow through apiToItems and
+        // itemsToPayload (both directions of the wire).
+        assert!(ADMIN_HTML.contains("visible_when:     item.visible_when"),
+                "apiToItems missing visible_when hydration");
+        assert!(ADMIN_HTML.contains("icon_map:         item.icon_map"),
+                "apiToItems missing icon_map hydration");
+        assert!(ADMIN_HTML.contains("visible_when:        !isGroup ? (item.visible_when"),
+                "itemsToPayload missing visible_when emission");
+        assert!(ADMIN_HTML.contains("item.type === 'data_icon' ? (item.icon_map"),
+                "itemsToPayload missing icon_map emission for data_icon");
+    }
 }

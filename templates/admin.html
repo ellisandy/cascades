@@ -728,6 +728,14 @@
            onclick="onStaticClick('data_field')">
         <div class="palette-item-name">Data Field</div>
       </div>
+      <!-- Phase 7: data_icon — value→asset_id lookup driven by a field_mapping_id.
+           Reuses the data_field drop modal; the type flag picks the create path. -->
+      <div class="palette-item"
+           draggable="true"
+           ondragstart="onPaletteDragStart(event, {type:'data_icon'})"
+           onclick="onStaticClick('data_icon')">
+        <div class="palette-item-name">Data Icon</div>
+      </div>
     </div>
 
     <!-- Phase 6b: asset library. PNG / JPEG up to 1 MiB; drag onto canvas
@@ -808,10 +816,13 @@
   </div>
 </div>
 
-<!-- ── Data Field modal ── -->
+<!-- ── Data Field / Data Icon modal ──
+     Shared between data_field (text) and data_icon (image-lookup) creation.
+     The `df-only` rows hide for data_icon; state.dfModalTarget picks the
+     submit branch in submitDataFieldModal(). -->
 <div id="datafield-modal" class="hidden">
   <div id="text-modal-box">
-    <h3>Add Data Field</h3>
+    <h3 id="df-modal-title">Add Data Field</h3>
     <label>Source</label>
     <select id="df-modal-source" onchange="onDfSourceChange(this.value)">
       <option value="">Loading...</option>
@@ -820,10 +831,14 @@
     <input type="text" id="df-modal-jsonpath" placeholder="$.water_level_ft">
     <label>Label</label>
     <input type="text" id="df-modal-label" placeholder="Water Level">
-    <label>Format string</label>
-    <input type="text" id="df-modal-format" value="{{value}}" placeholder="{{value}} ft">
-    <label>Font size (px)</label>
-    <input type="number" id="df-modal-fontsize" value="24" min="8" max="200">
+    <div class="df-only-row">
+      <label>Format string</label>
+      <input type="text" id="df-modal-format" value="{{value}}" placeholder="{{value}} ft">
+    </div>
+    <div class="df-only-row">
+      <label>Font size (px)</label>
+      <input type="number" id="df-modal-fontsize" value="24" min="8" max="200">
+    </div>
     <div class="modal-btns">
       <button class="btn btn-primary" onclick="submitDataFieldModal()">Add</button>
       <button class="btn" onclick="cancelDataFieldModal()">Cancel</button>
@@ -961,6 +976,10 @@ const state = {
   // focused group's subtree are dimmed and non-interactive. Double-click a
   // group on the canvas (or in the outliner) to enter; Escape exits.
   focusedGroupId: null,
+  // Phase 7b: discriminator for the shared Data Field / Data Icon modal.
+  // 'data_field' = original behaviour (text item); 'data_icon' = create an
+  // image-lookup item with empty icon_map (filled in inspector).
+  dfModalTarget: 'data_field',
 };
 
 let canvasScale = 1;
@@ -1515,6 +1534,10 @@ function apiToItems(apiItems) {
       color:            item.color               || null,
       // Phase 6: foreign key into AssetStore for image items.
       asset_id:         item.asset_id            || null,
+      // Phase 7: serialised conditional clause (path/op/value) or null.
+      visible_when:     item.visible_when        || null,
+      // Phase 7: value→asset_id map for data_icon items. Object form.
+      icon_map:         item.icon_map            || {},
       parent_id:        item.parent_id           || null,
       background:       item.background          || null,
     };
@@ -1540,7 +1563,9 @@ function itemsToPayload(items) {
       font_size:           isTextLike ? item.font_size : null,
       orientation:         (item.type === 'static_divider' || item.type === 'static_text' || item.type === 'static_datetime')
                              ? item.orientation : null,
-      field_mapping_id:    item.type === 'data_field'    ? item.field_mapping_id : null,
+      // Phase 7: data_icon also carries a field_mapping_id (drives icon lookup).
+      field_mapping_id:    (item.type === 'data_field' || item.type === 'data_icon')
+                             ? (item.field_mapping_id || null) : null,
       format_string:       item.type === 'data_field'    ? item.format_string    : null,
       label:               (item.type === 'data_field' || isGroup) ? (item.label || null) : null,
       bold:                isTextLike ? !!item.bold      : null,
@@ -1551,6 +1576,11 @@ function itemsToPayload(items) {
       color:               isTextLike ? (item.color || null) : null,
       // Phase 6: only image items emit asset_id; backend rejects images without it.
       asset_id:            item.type === 'image' ? (item.asset_id || null) : null,
+      // Phase 7: every non-Group variant may carry a visible_when clause.
+      // Group is excluded by design (cascading-hide is a deferred feature).
+      visible_when:        !isGroup ? (item.visible_when || null) : null,
+      // Phase 7: data_icon-only payload — value→asset_id lookup table.
+      icon_map:            item.type === 'data_icon' ? (item.icon_map || {}) : null,
       parent_id:           item.parent_id || null,
       background:          isGroup ? (item.background || null) : null,
     };
@@ -1752,6 +1782,14 @@ async function onCanvasDrop(e) {
     selectItem(state.items[state.items.length - 1].id);
   } else if (data.type === 'data_field') {
     state.pendingDrop = c;
+    state.dfModalTarget = 'data_field';
+    showDataFieldModal();
+  } else if (data.type === 'data_icon') {
+    // Phase 7b: data_icon reuses the data-field modal to capture
+    // source + jsonpath. icon_map starts empty; user fills it in the
+    // property inspector after the item is on the canvas.
+    state.pendingDrop = c;
+    state.dfModalTarget = 'data_icon';
     showDataFieldModal();
   } else if (data.type === 'asset') {
     // Phase 6b: create a LayoutItem::Image bound to the dropped asset.
@@ -1781,6 +1819,11 @@ function onStaticClick(type) {
     selectItem(state.items[state.items.length - 1].id);
   } else if (type === 'data_field') {
     state.pendingDrop = { x: cx, y: cy };
+    state.dfModalTarget = 'data_field';
+    showDataFieldModal();
+  } else if (type === 'data_icon') {
+    state.pendingDrop = { x: cx, y: cy };
+    state.dfModalTarget = 'data_icon';
     showDataFieldModal();
   } else {
     pushItem({ id: uid(), type: 'static_divider', z_index: nextZ(), x: 0, y: cy, w: CANVAS_W, h: 4,
@@ -2193,6 +2236,9 @@ const COLORS = {
   // Phase 6b: image items get their own colour so the editor outline is
   // distinguishable when the underlying image is dark/transparent.
   image:           { bg: 'rgba(255,255,255,0.0)',  border: '#a371f7' },
+  // Phase 7b: data_icon shares image's transparent bg but borrows the
+  // data_field orange accent (it's data-driven, like data_field).
+  data_icon:       { bg: 'rgba(255,255,255,0.0)',  border: '#f0883e' },
   group:           { bg: 'rgba(139,148,158,0.08)', border: '#8b949e' },
 };
 
@@ -2274,6 +2320,31 @@ function makeEl(item) {
       'pointer-events:none;';
   }
 
+  // Phase 7b: data_icon — preview the FIRST mapped asset so the editor box
+  // isn't empty. The compositor picks per-render based on live data, but in
+  // the editor we just want geometry confirmation. Empty icon_map → just the
+  // type badge stays.
+  if (item.type === 'data_icon') {
+    var iconMap = item.icon_map || {};
+    var firstKey = Object.keys(iconMap)[0];
+    var firstAsset = firstKey && iconMap[firstKey];
+    if (firstAsset) {
+      const img = document.createElement('img');
+      img.src = '/api/assets/' + encodeURIComponent(firstAsset);
+      img.alt = '';
+      img.draggable = false;
+      img.style.cssText =
+        'position:absolute;left:0;top:0;width:100%;height:100%;' +
+        'object-fit:contain;pointer-events:none;opacity:0.85;';
+      el.appendChild(img);
+    }
+    label.style.cssText +=
+      ';position:absolute;top:0;left:0;' +
+      'background:rgba(13,17,23,0.7);color:#c9d1d9;' +
+      'padding:2px 4px;font-size:10px;border-radius:0 0 3px 0;' +
+      'pointer-events:none;';
+  }
+
   // Show resize handles only in single-select mode to avoid ambiguity.
   if (isSelected && state.selectedIds.length === 1) {
     ['nw','n','ne','e','se','s','sw','w'].forEach(function(h) {
@@ -2303,6 +2374,12 @@ function itemLabel(item) {
     // Look up the cached filename for a friendlier badge than the raw id.
     const a = cachedAssets.find(function(x) { return x.id === item.asset_id; });
     return '\u{1F5BC} ' + (a ? a.filename : (item.asset_id || 'no asset'));
+  }
+  if (item.type === 'data_icon') {
+    // Phase 7b: badge by the icon-map size so authors see at a glance
+    // whether they've populated the lookup table.
+    var n = Object.keys(item.icon_map || {}).length;
+    return '\u{1F5BC} Data Icon (' + n + ' map)';
   }
   return item.type;
 }
@@ -2391,7 +2468,25 @@ function renderProps() {
       '<select onchange="updateProp(\'asset_id\',this.value)">' + opts + '</select>' +
       '<label>Info</label>' +
       '<div style="font-size:11px;color:#8b949e">' + meta + '</div>';
+  } else if (item.type === 'data_icon') {
+    // Phase 7b: data_icon inspector. Source/JSONPath are read-only because
+    // the field mapping was committed at creation time. The icon-map editor
+    // is the heart of this section — see iconMapSection() below.
+    typeFields =
+      '<label>Source</label>' +
+      '<input type="text" value="' + esc(item.source_id || '') + '" readonly style="opacity:0.6">' +
+      '<label>JSONPath</label>' +
+      '<input type="text" value="' + esc(item.json_path || '') + '" readonly style="opacity:0.6">' +
+      '<label>Field mapping</label>' +
+      '<input type="text" value="' + esc(item.field_mapping_id || '') + '" readonly style="opacity:0.6">';
   }
+
+  // Phase 7b: visible_when applies to every non-group variant. Built outside
+  // the per-type branch so we don't duplicate the markup six times.
+  const conditionalSection = item.type === 'group' ? '' : visibleWhenSection(item);
+  // Phase 7b: data_icon also gets a value→asset map editor below the type
+  // fields. Built separately so we can reorder/style independently.
+  const iconMapBlock = item.type === 'data_icon' ? iconMapSection(item) : '';
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
   panel.innerHTML =
@@ -2404,6 +2499,8 @@ function renderProps() {
       '<label>z-index</label><input type="number" value="' + item.z_index + '" onchange="updatePropRender(\'z_index\',+this.value)">' +
       typeFields +
     '</div>' +
+    iconMapBlock +
+    conditionalSection +
     '<div style="margin-top:10px; display: flex; gap: 6px; flex-wrap: wrap;">' +
       '<button class="btn" onclick="bringToFront()" title="Bring to front (top of stack)">⇈ Top</button>' +
       '<button class="btn" onclick="bringForward()" title="Bring forward one step">↑ Fwd</button>' +
@@ -2412,6 +2509,164 @@ function renderProps() {
       '<button class="btn" onclick="duplicateSelected()" title="Duplicate selected (Ctrl+D)">⎘ Dup</button>' +
       '<button class="btn btn-danger" onclick="deleteSelected()" style="flex: 1;">Delete</button>' +
     '</div>';
+}
+
+// ─── Phase 7b: visible_when "Show only when..." section ───
+// One clause per item (path | op | value). The `exists` operator greys out
+// the value field because it's ignored. Empty path or op clears the clause
+// (sets to null) — easier UX than a separate "remove" button.
+function visibleWhenSection(item) {
+  const vw = item.visible_when || { path: '', op: '=', value: '' };
+  const opOpts = ['=','!=','>','<','>=','<=','exists'].map(function(o) {
+    return '<option value="' + o + '"' + (vw.op === o ? ' selected' : '') + '>' + o + '</option>';
+  }).join('');
+  // Stringify the value for the input box; on commit we try JSON.parse first
+  // (so true / 30 / "x" survive) and fall back to a string. JSON.stringify
+  // would wrap strings in quotes; we don't want that in the editor.
+  var rawVal = vw.value;
+  var valStr;
+  if (rawVal === null || rawVal === undefined) valStr = '';
+  else if (typeof rawVal === 'string') valStr = rawVal;
+  else valStr = JSON.stringify(rawVal);
+  const isExists = vw.op === 'exists';
+  return '<div class="vw-section" style="margin-top:14px;padding-top:10px;border-top:1px solid #30363d">' +
+    '<div style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">' +
+    'Show only when…</div>' +
+    '<div class="prop-grid">' +
+      '<label>Path</label>' +
+      '<input type="text" value="' + esc(vw.path || '') + '" placeholder="$.weather.precip_chance_pct" ' +
+        'onchange="updateVisibleWhenField(\'path\',this.value)">' +
+      '<label>Op</label>' +
+      '<select onchange="updateVisibleWhenField(\'op\',this.value)">' + opOpts + '</select>' +
+      '<label>Value</label>' +
+      '<input type="text" value="' + esc(valStr) + '" placeholder="' +
+        (isExists ? '(ignored for exists)' : '50, true, "warn"') +
+        '"' + (isExists ? ' disabled style="opacity:0.4"' : '') +
+        ' onchange="updateVisibleWhenField(\'value\',this.value)">' +
+    '</div>' +
+    '<div style="margin-top:6px;display:flex;gap:6px;align-items:center">' +
+      '<button class="btn" onclick="clearVisibleWhen()" ' +
+        (item.visible_when ? '' : 'disabled style="opacity:0.4"') + '>Clear</button>' +
+      '<span style="font-size:11px;color:#8b949e">' +
+        (item.visible_when ? 'Active' : 'No clause — always visible') +
+      '</span>' +
+    '</div>' +
+  '</div>';
+}
+
+function updateVisibleWhenField(key, value) {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  // Lazily upgrade an absent clause to a default skeleton on first edit so
+  // the user can fill in fields one at a time without setting all three.
+  if (!item.visible_when) item.visible_when = { path: '', op: '=', value: '' };
+  if (key === 'value') {
+    // Try JSON-parse so the user can type 30 → number, true → bool, "x" → str.
+    try { item.visible_when.value = JSON.parse(value); }
+    catch { item.visible_when.value = value; }
+  } else {
+    item.visible_when[key] = value;
+  }
+  // If both path and op are empty, treat as "cleared".
+  const c = item.visible_when;
+  if (!c.path && (!c.op || c.op === '=')) {
+    item.visible_when = null;
+  }
+  renderProps();
+  renderCanvas();
+}
+
+function clearVisibleWhen() {
+  const item = findItem(state.selectedId);
+  if (!item) return;
+  item.visible_when = null;
+  renderProps();
+  renderCanvas();
+}
+
+// ─── Phase 7b: data_icon icon_map editor ───
+// One row per (value → asset_id). Value text input commits on blur via
+// remap-key (delete old key, set new) — same pattern as a Python dict
+// rename. Asset dropdown commits immediately. "+ Add row" appends an empty
+// row; the × button removes a key.
+function iconMapSection(item) {
+  const map = item.icon_map || {};
+  const keys = Object.keys(map);
+  const assetOpts = function(selectedId) {
+    const head = '<option value=""' + (!selectedId ? ' selected' : '') + '>(none)</option>';
+    return head + cachedAssets.map(function(a) {
+      const sel = a.id === selectedId ? ' selected' : '';
+      return '<option value="' + esc(a.id) + '"' + sel + '>' + esc(a.filename) + '</option>';
+    }).join('');
+  };
+  const rowsHtml = keys.length === 0
+    ? '<div style="font-size:11px;color:#8b949e;padding:6px 0">No mappings yet — add a row to bind a value to an asset.</div>'
+    : keys.map(function(k) {
+        const id = map[k];
+        return '<div class="im-row" style="display:flex;gap:6px;margin-bottom:4px;align-items:center">' +
+          '<input type="text" value="' + esc(k) + '" data-old-key="' + esc(k) + '" ' +
+            'placeholder="value (e.g. sunny)" ' +
+            'style="flex:0 0 120px" ' +
+            'onchange="renameIconMapKey(this.dataset.oldKey, this.value)">' +
+          '<select style="flex:1" onchange="setIconMapAsset(\'' + esc(k) + '\', this.value)">' +
+            assetOpts(id) +
+          '</select>' +
+          '<button class="btn btn-danger" style="flex:0 0 28px;padding:4px 6px" ' +
+            'title="Remove this mapping" ' +
+            'onclick="removeIconMapKey(\'' + esc(k) + '\')">×</button>' +
+        '</div>';
+      }).join('');
+  return '<div class="im-section" style="margin-top:14px;padding-top:10px;border-top:1px solid #30363d">' +
+    '<div style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">' +
+      'Icon map (value → asset)</div>' +
+    rowsHtml +
+    '<button class="btn" style="margin-top:6px" onclick="addIconMapRow()">+ Add row</button>' +
+  '</div>';
+}
+
+function addIconMapRow() {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'data_icon') return;
+  if (!item.icon_map) item.icon_map = {};
+  // Find a free placeholder key so multiple empty adds don't collide on "".
+  let n = 1;
+  while (Object.prototype.hasOwnProperty.call(item.icon_map, 'value' + n)) n++;
+  item.icon_map['value' + n] = '';
+  renderProps();
+}
+
+function renameIconMapKey(oldKey, newKey) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'data_icon') return;
+  if (oldKey === newKey) return;
+  const map = item.icon_map || {};
+  if (Object.prototype.hasOwnProperty.call(map, newKey) && newKey !== '') {
+    showToast('Key "' + newKey + '" already exists', 'error');
+    renderProps();
+    return;
+  }
+  const v = map[oldKey];
+  delete map[oldKey];
+  if (newKey !== '') map[newKey] = v;
+  renderProps();
+  renderCanvas();
+}
+
+function setIconMapAsset(key, assetId) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'data_icon') return;
+  if (!item.icon_map) item.icon_map = {};
+  item.icon_map[key] = assetId;
+  renderCanvas();
+}
+
+function removeIconMapKey(key) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'data_icon') return;
+  if (!item.icon_map) return;
+  delete item.icon_map[key];
+  renderProps();
+  renderCanvas();
 }
 
 // Sensible set of fonts for e-ink rendering.  Generic families first
@@ -2998,6 +3253,14 @@ async function showInlineExplorer(sourceId) {
 async function showDataFieldModal() {
   const modal = document.getElementById('datafield-modal');
   modal.classList.remove('hidden');
+  // Phase 7b: swap title + hide format/fontsize rows for data_icon target.
+  const isIcon = state.dfModalTarget === 'data_icon';
+  document.getElementById('df-modal-title').textContent =
+    isIcon ? 'Add Data Icon' : 'Add Data Field';
+  Array.prototype.forEach.call(
+    document.querySelectorAll('#datafield-modal .df-only-row'),
+    function(el) { el.style.display = isIcon ? 'none' : ''; }
+  );
   const sel = document.getElementById('df-modal-source');
   // Populate sources from cached plugins
   if (!cachedPlugins.length) {
@@ -3030,13 +3293,16 @@ async function submitDataFieldModal() {
   const labelVal = document.getElementById('df-modal-label').value.trim();
   const formatStr = document.getElementById('df-modal-format').value.trim() || '{{value}}';
   const fontSize = parseInt(document.getElementById('df-modal-fontsize').value, 10) || 24;
+  // Capture target before cancelDataFieldModal() — that resets the modal but
+  // not state.dfModalTarget; we still want a defensive snapshot.
+  const target = state.dfModalTarget || 'data_field';
   cancelDataFieldModal();
   if (!sourceId || !jsonPath) {
     showToast('Source and JSONPath are required', 'error');
     return;
   }
 
-  // Create a field mapping via API
+  // Create a field mapping via API — both data_field and data_icon need one.
   try {
     const res = await apiFetch('/api/admin/sources/' + encodeURIComponent(sourceId) + '/fields', {
       method: 'POST',
@@ -3049,17 +3315,34 @@ async function submitDataFieldModal() {
     const fm = await res.json();
     const pos = state.pendingDrop || { x: 10, y: 10 };
     state.pendingDrop = null;
-    pushItem({
-      id: uid(), type: 'data_field', z_index: nextZ(),
-      x: pos.x, y: pos.y, w: 200, h: Math.max(40, fontSize + 20),
-      plugin_id: '', variant: 'full', text: '', font_size: fontSize,
-      orientation: 'horizontal',
-      field_mapping_id: fm.id,
-      format_string: formatStr,
-      label: labelVal,
-      source_id: sourceId,
-      json_path: jsonPath,
-    });
+    if (target === 'data_icon') {
+      // Phase 7b: data_icon — empty icon_map. The user fills value→asset rows
+      // in the property inspector. 64×64 default box matches the typical
+      // weather/condition glyph footprint.
+      pushItem({
+        id: uid(), type: 'data_icon', z_index: nextZ(),
+        x: pos.x, y: pos.y, w: 64, h: 64,
+        plugin_id: '', variant: 'full', text: '', font_size: 24,
+        orientation: 'horizontal',
+        field_mapping_id: fm.id,
+        icon_map: {},
+        label: labelVal,
+        source_id: sourceId,
+        json_path: jsonPath,
+      });
+    } else {
+      pushItem({
+        id: uid(), type: 'data_field', z_index: nextZ(),
+        x: pos.x, y: pos.y, w: 200, h: Math.max(40, fontSize + 20),
+        plugin_id: '', variant: 'full', text: '', font_size: fontSize,
+        orientation: 'horizontal',
+        field_mapping_id: fm.id,
+        format_string: formatStr,
+        label: labelVal,
+        source_id: sourceId,
+        json_path: jsonPath,
+      });
+    }
     selectItem(state.items[state.items.length - 1].id);
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
