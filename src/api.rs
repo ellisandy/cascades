@@ -323,18 +323,23 @@ async fn admin_upload_asset(
         None => {
             return text_status(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "only PNG and JPEG uploads are accepted",
+                "only PNG, JPEG, WOFF2, WOFF, and TTF uploads are accepted",
             );
         }
     };
 
     match app.asset_store.insert_or_get(&bytes, &filename, mime) {
         Ok(id) => {
+            // Phase 10: include `kind` in the response so the admin UI can
+            // categorise the upload immediately (image → asset library;
+            // font → font picker) without re-fetching list().
+            let kind = crate::asset_store::AssetKind::from_mime(mime);
             let body = serde_json::json!({
                 "id": id,
                 "filename": filename,
                 "mime": mime,
                 "size": bytes.len(),
+                "kind": kind,
             });
             (StatusCode::OK, Json(body)).into_response()
         }
@@ -1104,11 +1109,19 @@ struct LayoutSummary {
 }
 
 /// Plugin instance entry returned by `GET /api/admin/plugins`.
+///
+/// Phase 9b: `settings_schema` carries the plugin definition's declared
+/// fields so the admin "Plugin customization" inspector can render
+/// theming-knob controls (text_style / color / toggle) without a second
+/// roundtrip. Empty when the plugin definition is unknown to the registry
+/// (instance exists but the manifest was unloaded).
 #[derive(Debug, Serialize)]
 struct PluginInstanceSummary {
     id: String,
     name: String,
     supported_variants: Vec<&'static str>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    settings_schema: Vec<crate::plugin_registry::SettingsField>,
 }
 
 /// Body for `POST /api/admin/sources/:id/fields`.
@@ -1550,10 +1563,22 @@ async fn admin_list_plugins(
 
     let plugins: Vec<PluginInstanceSummary> = instances
         .into_iter()
-        .map(|inst| PluginInstanceSummary {
-            name: capitalize_first(&inst.plugin_id),
-            id: inst.id,
-            supported_variants: vec!["full", "half_horizontal", "half_vertical", "quadrant"],
+        .map(|inst| {
+            // Phase 9b: pull the plugin's settings_schema from the registry
+            // so the admin can render theming-knob controls without a
+            // second fetch. Unknown plugin → empty schema, which the UI
+            // treats as "no theming knobs declared."
+            let settings_schema = app
+                .plugin_registry
+                .get(&inst.plugin_id)
+                .map(|def| def.settings_schema)
+                .unwrap_or_default();
+            PluginInstanceSummary {
+                name: capitalize_first(&inst.plugin_id),
+                id: inst.id,
+                supported_variants: vec!["full", "half_horizontal", "half_vertical", "quadrant"],
+                settings_schema,
+            }
         })
         .collect();
 
@@ -4810,6 +4835,113 @@ mod tests {
                 "itemsToPayload missing style_overrides emission for Groups");
     }
 
+    /// Phase 9b smoke test — asserts the inspector "Plugin customization"
+    /// section, the per-field-type renderers, the style-override mutation
+    /// helpers, and the JS-side theme-field discriminator are all wired
+    /// into the bundled admin template. Same partial-revert-catch
+    /// philosophy as 5b/6b/7b/8b.
+    #[test]
+    fn admin_html_contains_phase9b_markers() {
+        // Inspector section + dispatch.
+        assert!(ADMIN_HTML.contains("function pluginCustomizationSection"),
+                "missing pluginCustomizationSection builder");
+        assert!(ADMIN_HTML.contains("function isThemeFieldType"),
+                "missing JS-side isThemeFieldType discriminator");
+        assert!(ADMIN_HTML.contains("function pluginSchemaFor"),
+                "missing pluginSchemaFor lookup helper");
+        assert!(ADMIN_HTML.contains("Plugin customization</div>"),
+                "missing 'Plugin customization' section header");
+
+        // Per-field-type renderers.
+        assert!(ADMIN_HTML.contains("function colorKnobControl"),
+                "missing colorKnobControl renderer");
+        assert!(ADMIN_HTML.contains("function toggleKnobControl"),
+                "missing toggleKnobControl renderer");
+        assert!(ADMIN_HTML.contains("function textStyleKnobControl"),
+                "missing textStyleKnobControl renderer");
+
+        // Mutation helpers — single source of truth for style_overrides edits.
+        assert!(ADMIN_HTML.contains("function updateStyleOverride"),
+                "missing updateStyleOverride helper");
+        assert!(ADMIN_HTML.contains("function updateStyleSubkey"),
+                "missing updateStyleSubkey helper for text_style subfields");
+        assert!(ADMIN_HTML.contains("function toggleStyleSubkey"),
+                "missing toggleStyleSubkey helper for B/I/U buttons");
+        assert!(ADMIN_HTML.contains("function clearStyleOverride"),
+                "missing clearStyleOverride helper for the per-knob reset button");
+
+        // Section gated to plugin-bound Groups only.
+        assert!(ADMIN_HTML.contains("pluginCustomizationBlock"),
+                "renderProps missing pluginCustomizationBlock variable");
+    }
+
+    /// Phase 9b backend smoke test — `GET /api/admin/plugins` must include
+    /// `settings_schema` so the admin UI can render theming-knob controls
+    /// without a second roundtrip. Asserts the wire-shape extension.
+    #[tokio::test]
+    async fn admin_list_plugins_exposes_settings_schema() {
+        let (state, _dir) = make_writable_test_state();
+
+        // Register a plugin with one theming + one data field so we can
+        // verify both shapes survive the response.
+        use crate::plugin_registry::{DataStrategy, PluginDefinition, SettingsField};
+        let def = PluginDefinition {
+            id: "weather".to_string(),
+            name: "Weather".to_string(),
+            description: String::new(),
+            source: "weather".to_string(),
+            refresh_interval_secs: 300,
+            data_strategy: DataStrategy::Polling,
+            // Note: post-cleanup PluginDefinition has no template_* fields
+            // (#14 removed them). Templates are resolved by naming convention.
+            criteria: Vec::new(),
+            settings_schema: vec![
+                SettingsField {
+                    key: "station_id".to_string(),
+                    label: "Station ID".to_string(),
+                    field_type: "text".to_string(),
+                    required: false,
+                    placeholder: None,
+                    default: None,
+                },
+                SettingsField {
+                    key: "accent_color".to_string(),
+                    label: "Accent".to_string(),
+                    field_type: "color".to_string(),
+                    required: false,
+                    placeholder: None,
+                    default: None,
+                },
+            ],
+            default_elements: Vec::new(),
+        };
+        state.plugin_registry.insert(def);
+        let app = build_router(Arc::clone(&state));
+
+        let req = Request::builder()
+            .uri("/api/admin/plugins")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let weather = body.as_array().unwrap().iter()
+            .find(|p| p["id"] == "weather")
+            .expect("weather instance must be in the response");
+        let schema = weather["settings_schema"].as_array()
+            .expect("weather must carry settings_schema");
+        assert_eq!(schema.len(), 2, "expected 2 schema fields, got: {schema:?}");
+        // Theming fields use the same shape — admin UI dispatches on `type`.
+        let types: Vec<&str> = schema.iter()
+            .map(|f| f["type"].as_str().unwrap_or(""))
+            .collect();
+        assert!(types.contains(&"text"), "data type missing: {types:?}");
+        assert!(types.contains(&"color"), "theming type missing: {types:?}");
+    }
+
     /// Phase 8b smoke test — asserts the inspector badge, banner, Reset
     /// button, and confirmation flow are all wired into the bundled admin
     /// template. Same partial-revert-catches philosophy as 5b/6b/7b.
@@ -5121,5 +5253,105 @@ mod tests {
 
         let group = &body["items"][0];
         assert_eq!(group["defaults_stale"].as_bool(), Some(false));
+    }
+
+    // ── Phase 10: user-uploaded fonts ─────────────────────────────────────
+
+    /// Phase 10 smoke test — confirms the bundled admin template carries
+    /// the JS-side font picker merge (`fontFamilyOptions`), the broadened
+    /// upload `accept` attribute, and the asset-list dispatch on
+    /// `kind === 'font'`. Same partial-revert-catch philosophy as 5b/6b/7b/9b.
+    #[test]
+    fn admin_html_contains_phase10_markers() {
+        // Picker merge function present and used.
+        assert!(ADMIN_HTML.contains("function fontFamilyOptions"),
+                "missing fontFamilyOptions builder");
+        assert!(ADMIN_HTML.contains("fontFamilyOptions().map"),
+                "fontFamilyOptions must be consumed by at least one renderer");
+        // Upload form widens the accept list to fonts.
+        assert!(ADMIN_HTML.contains("font/woff2"),
+                "upload accept attribute missing font/woff2");
+        // Asset library distinguishes fonts from images.
+        assert!(ADMIN_HTML.contains("a.kind === 'font'"),
+                "renderAssetList missing kind === 'font' branch");
+    }
+
+    /// `POST /api/admin/assets` accepts a woff2 upload and stores it with
+    /// `kind: "font"`. Mirrors the existing image-upload path test but for
+    /// the new MIME.
+    #[tokio::test]
+    async fn admin_post_assets_accepts_woff2_upload() {
+        use axum::http::header;
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+
+        // Minimal valid WOFF2 header bytes — sniffer only needs the 4-byte
+        // signature, padding to satisfy the "non-empty" guard.
+        let mut woff2 = b"wOF2".to_vec();
+        woff2.extend_from_slice(&[0u8; 60]);
+
+        // Build a minimal multipart body.
+        let boundary = "----TestBoundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"Inter-Bold.woff2\"\r\n\
+              Content-Type: font/woff2\r\n\r\n",
+        );
+        body.extend_from_slice(&woff2);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/assets")
+            .header("x-api-key", "test-key")
+            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK,
+            "WOFF2 upload should succeed, got {}", response.status());
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["mime"], "font/woff2");
+        assert_eq!(json["kind"], "font",
+            "upload response must include kind: font for the admin UI to dispatch correctly");
+        assert_eq!(json["filename"], "Inter-Bold.woff2");
+    }
+
+    /// `POST /api/admin/assets` rejects unknown formats with 415. Important
+    /// negative test — the front-line validation is the MIME sniffer, not
+    /// the Content-Type header (which is user-controlled).
+    #[tokio::test]
+    async fn admin_post_assets_rejects_unknown_format() {
+        use axum::http::header;
+        let (state, _dir) = make_writable_test_state();
+        let app = build_router(Arc::clone(&state));
+
+        // Plain text — no magic bytes match any allowed format.
+        let body_bytes = b"hello, this is plain text not a font";
+        let boundary = "----TestBoundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            // Even claiming `font/woff2` in the header — the sniffer
+            // ignores it and looks at the bytes.
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"sneaky.woff2\"\r\n\
+              Content-Type: font/woff2\r\n\r\n",
+        );
+        body.extend_from_slice(body_bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin/assets")
+            .header("x-api-key", "test-key")
+            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "non-font bytes claiming to be a font must be rejected");
     }
 }

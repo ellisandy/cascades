@@ -745,9 +745,9 @@
       <div class="asset-empty">Loading...</div>
     </div>
     <div style="margin-top:8px">
-      <label class="asset-upload-btn" for="asset-file-input">+ Upload PNG/JPEG</label>
+      <label class="asset-upload-btn" for="asset-file-input">+ Upload image / font</label>
       <input id="asset-file-input" type="file"
-             accept="image/png,image/jpeg"
+             accept="image/png,image/jpeg,font/woff2,font/woff,font/ttf,.woff2,.woff,.ttf"
              style="display:none"
              onchange="onAssetFilePicked(event)">
     </div>
@@ -1455,6 +1455,20 @@ function renderAssetList() {
   el.innerHTML = cachedAssets.map(function(a) {
     const safeId = esc(a.id);
     const safeName = esc(a.filename);
+    // Phase 10: dispatch by kind. Image assets stay draggable as before
+    // (drop creates a LayoutItem::Image). Fonts render as a simple
+    // typographic chip — they're not draggable onto the canvas; the user
+    // selects them via the font picker in any text item's inspector.
+    if (a.kind === 'font') {
+      return '<div class="asset-item" title="' + safeName +
+        ' — use this font via any text item’s Font picker">' +
+        '<div class="asset-thumb" style="display:flex;align-items:center;' +
+          'justify-content:center;font-size:11px;color:#8b949e;' +
+          'background:#0d1117;border:1px dashed #30363d;border-radius:4px;' +
+          'padding:8px 4px;text-align:center">font</div>' +
+        '<div class="asset-name">' + safeName + '</div>' +
+        '</div>';
+    }
     return '<div class="asset-item" draggable="true" ' +
       // The drop handler reads {type:"asset", id:"asset-…"} from the
       // dataTransfer payload and creates a LayoutItem::Image.
@@ -2525,6 +2539,14 @@ function renderProps() {
     (item.type === 'group' && item.plugin_id)
       ? pluginDefaultsSection(item)
       : '';
+  // Phase 9b: plugin-bound groups also get a "Plugin customization" section
+  // when the plugin's settings_schema declares any theming-typed fields
+  // (text_style / color / toggle). Section auto-hides for plugins that
+  // haven't opted in (no theming knobs declared).
+  const pluginCustomizationBlock =
+    (item.type === 'group' && item.plugin_id)
+      ? pluginCustomizationSection(item)
+      : '';
 
   const label = item.type === 'plugin_slot' ? (item.plugin_id || '?') + ' (plugin_slot)' : item.type;
   panel.innerHTML =
@@ -2540,6 +2562,7 @@ function renderProps() {
     iconMapBlock +
     conditionalSection +
     pluginDefaultsBlock +
+    pluginCustomizationBlock +
     '<div style="margin-top:10px; display: flex; gap: 6px; flex-wrap: wrap;">' +
       '<button class="btn" onclick="bringToFront()" title="Bring to front (top of stack)">⇈ Top</button>' +
       '<button class="btn" onclick="bringForward()" title="Bring forward one step">↑ Fwd</button>' +
@@ -2807,6 +2830,223 @@ async function onResetGroup() {
   }
 }
 
+// ─── Phase 9b: plugin-customization section (theming knobs) ────────────────
+// Read the plugin's settings_schema (cached on the client; fetched lazily
+// alongside cachedPlugins). For each theming-typed field, render an inline
+// control. Edits write to item.style_overrides[knob_key] in-place; the
+// existing layout-save flow round-trips it to the server's Group row.
+
+// Mirror of `plugin_registry::is_theme_field_type`. The single source of
+// truth lives in Rust; this is the JS-side dispatch.
+function isThemeFieldType(t) {
+  return t === 'text_style' || t === 'color' || t === 'toggle';
+}
+
+// Find a plugin instance's schema in cachedPlugins. Returns [] when the
+// plugin is unknown (e.g. instance exists but the manifest was unloaded —
+// fail-closed: just don't show the customization UI).
+function pluginSchemaFor(pluginInstanceId) {
+  const p = cachedPlugins.find(function(x) { return x.id === pluginInstanceId; });
+  return (p && p.settings_schema) || [];
+}
+
+function pluginCustomizationSection(item) {
+  const schema = pluginSchemaFor(item.plugin_id);
+  const themeFields = schema.filter(function(f) { return isThemeFieldType(f.type); });
+  if (themeFields.length === 0) {
+    // Plugin author hasn't declared any theming knobs — section is silent.
+    // (Phase 9 scope: theming is opt-in, see plugin-authoring.md.)
+    return '';
+  }
+  const overrides = item.style_overrides || {};
+  const rows = themeFields.map(function(f) {
+    const val = overrides[f.key];
+    let control;
+    switch (f.type) {
+      case 'color':     control = colorKnobControl(f, val); break;
+      case 'toggle':    control = toggleKnobControl(f, val); break;
+      case 'text_style': control = textStyleKnobControl(f, val); break;
+      default:          control = '';
+    }
+    const isSet = val !== undefined && val !== null;
+    const clearBtn = isSet
+      ? '<button type="button" class="btn" ' +
+          'title="Reset to template default" ' +
+          'data-knob="' + esc(f.key) + '" ' +
+          'onclick="clearStyleOverride(this.dataset.knob)" ' +
+          'style="font-size:11px;padding:2px 8px;flex:0 0 auto">reset</button>'
+      : '';
+    return '<div class="pc-row" style="margin-bottom:10px">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+        '<label style="font-size:12px;color:#c9d1d9;flex:1">' + esc(f.label) + '</label>' +
+        clearBtn +
+      '</div>' +
+      control +
+    '</div>';
+  }).join('');
+  return '<div class="plugin-customization-section" ' +
+      'style="margin-top:14px;padding-top:10px;border-top:1px solid #30363d">' +
+    '<div style="font-size:11px;color:#8b949e;text-transform:uppercase;' +
+      'letter-spacing:0.5px;margin-bottom:8px">Plugin customization</div>' +
+    rows +
+  '</div>';
+}
+
+// ─── Per-knob renderers ────────────────────────────────────────────────────
+
+// `color`: a CSS hex picker. Empty → falls back to the template's default.
+function colorKnobControl(field, value) {
+  const v = (typeof value === 'string' && value) ? value : '#000000';
+  return '<input type="color" value="' + esc(v) + '" ' +
+    'data-knob="' + esc(field.key) + '" ' +
+    'oninput="updateStyleOverride(this.dataset.knob, this.value)" ' +
+    'style="width:48px;height:28px;padding:0;border:1px solid #30363d;' +
+    'border-radius:4px;background:#21262d;cursor:pointer">';
+}
+
+// `toggle`: a checkbox. Coerces undefined to false so the checkbox state
+// is meaningful when no override is set.
+function toggleKnobControl(field, value) {
+  const checked = value === true ? ' checked' : '';
+  return '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">' +
+    '<input type="checkbox"' + checked + ' ' +
+      'data-knob="' + esc(field.key) + '" ' +
+      'onchange="updateStyleOverride(this.dataset.knob, this.checked)">' +
+    '<span style="color:#8b949e">' + (checked ? 'on' : 'off') + '</span>' +
+  '</label>';
+}
+
+// `text_style`: a flat bag of {family, size, weight, italic, underline, color}.
+// All subfields are optional; the template's default(...) filter fills blanks.
+// We render every subfield uniformly — plugin authors don't declare which
+// subfields are "exposed"; if they don't bind one in CSS, that's the same as
+// not exposing it. (See plugin-authoring.md → Theming → "Don't expose
+// subkeys you don't bind.")
+function textStyleKnobControl(field, value) {
+  const v = (value && typeof value === 'object') ? value : {};
+  // Phase 10: pull the merged curated + uploaded list so theming knobs can
+  // pick uploaded families too.
+  const familyOpts = fontFamilyOptions().map(function(f) {
+    return '<option value="' + esc(f.value) + '"' +
+      ((v.family || '') === f.value ? ' selected' : '') + '>' + esc(f.label) + '</option>';
+  }).join('');
+  const subBtn = function(sub, label, title) {
+    const pressed = !!v[sub];
+    const style = pressed
+      ? 'background:#58a6ff;color:#0d1117;font-weight:bold;'
+      : 'background:#21262d;color:#c9d1d9;';
+    return '<button type="button" title="' + title + '" ' +
+      'style="' + style + 'border:1px solid #30363d;border-radius:4px;' +
+      'padding:4px 8px;font-size:12px;cursor:pointer;min-width:28px;" ' +
+      'data-knob="' + esc(field.key) + '" data-sub="' + sub + '" ' +
+      'onclick="toggleStyleSubkey(this.dataset.knob, this.dataset.sub)">' + label + '</button>';
+  };
+  return '<div class="pc-text-style" style="display:grid;' +
+      'grid-template-columns:auto 1fr;gap:6px 8px;align-items:center;' +
+      'font-size:12px">' +
+    '<span style="color:#8b949e">Font</span>' +
+    '<select data-knob="' + esc(field.key) + '" data-sub="family" ' +
+      'onchange="updateStyleSubkey(this.dataset.knob, this.dataset.sub, this.value)">' +
+      familyOpts +
+    '</select>' +
+    '<span style="color:#8b949e">Size</span>' +
+    '<input type="number" min="8" max="200" ' +
+      'value="' + (v.size != null ? esc(v.size) : '') + '" ' +
+      'placeholder="auto" ' +
+      'data-knob="' + esc(field.key) + '" data-sub="size" ' +
+      'onchange="updateStyleSubkey(this.dataset.knob, this.dataset.sub, ' +
+        'this.value === \'\' ? null : +this.value)" ' +
+      'style="width:80px;padding:4px;background:#0d1117;color:#c9d1d9;' +
+      'border:1px solid #30363d;border-radius:4px">' +
+    '<span style="color:#8b949e">Style</span>' +
+    '<div style="display:flex;gap:4px">' +
+      subBtn('weight', '<b>B</b>', 'Bold (toggles weight: bold/normal)') +
+      subBtn('italic', '<i>I</i>', 'Italic') +
+      subBtn('underline', '<u>U</u>', 'Underline') +
+    '</div>' +
+    '<span style="color:#8b949e">Color</span>' +
+    '<input type="color" value="' + esc(v.color || '#000000') + '" ' +
+      'data-knob="' + esc(field.key) + '" data-sub="color" ' +
+      'oninput="updateStyleSubkey(this.dataset.knob, this.dataset.sub, this.value)" ' +
+      'style="width:48px;height:28px;padding:0;border:1px solid #30363d;' +
+      'border-radius:4px;background:#21262d;cursor:pointer">' +
+  '</div>';
+}
+
+// ─── Style-override mutation helpers ───────────────────────────────────────
+// Single source of truth for writing into item.style_overrides.
+// Renders inline so the user sees the change immediately; the existing
+// layout-save flow round-trips it on save.
+
+function updateStyleOverride(knob, value) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'group') return;
+  if (!item.style_overrides) item.style_overrides = {};
+  item.style_overrides[knob] = value;
+  // No need to rerender the inspector — the input itself reflects the new
+  // value. The canvas doesn't show theming overrides at editing time
+  // (theming applies at compose time, not in the editor preview).
+}
+
+function updateStyleSubkey(knob, sub, value) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'group') return;
+  if (!item.style_overrides) item.style_overrides = {};
+  if (!item.style_overrides[knob] || typeof item.style_overrides[knob] !== 'object') {
+    item.style_overrides[knob] = {};
+  }
+  if (value === null || value === '') {
+    delete item.style_overrides[knob][sub];
+    // Clean up empty parent objects so style_overrides doesn't accumulate
+    // {temp_style: {}} entries that round-trip but mean nothing.
+    if (Object.keys(item.style_overrides[knob]).length === 0) {
+      delete item.style_overrides[knob];
+    }
+  } else {
+    item.style_overrides[knob][sub] = value;
+  }
+}
+
+function toggleStyleSubkey(knob, sub) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'group') return;
+  if (!item.style_overrides) item.style_overrides = {};
+  if (!item.style_overrides[knob] || typeof item.style_overrides[knob] !== 'object') {
+    item.style_overrides[knob] = {};
+  }
+  // For `weight`, toggle stores "bold" / "normal" — the template binds it
+  // verbatim into CSS. For italic/underline, store true / drop key.
+  if (sub === 'weight') {
+    const cur = item.style_overrides[knob].weight;
+    if (cur === 'bold') {
+      delete item.style_overrides[knob].weight;
+    } else {
+      item.style_overrides[knob].weight = 'bold';
+    }
+  } else {
+    if (item.style_overrides[knob][sub]) {
+      delete item.style_overrides[knob][sub];
+    } else {
+      item.style_overrides[knob][sub] = true;
+    }
+  }
+  if (Object.keys(item.style_overrides[knob]).length === 0) {
+    delete item.style_overrides[knob];
+  }
+  renderProps(); // toggle pressed-state needs the redraw
+}
+
+function clearStyleOverride(knob) {
+  const item = findItem(state.selectedId);
+  if (!item || item.type !== 'group') return;
+  if (!item.style_overrides) return;
+  delete item.style_overrides[knob];
+  if (Object.keys(item.style_overrides).length === 0) {
+    item.style_overrides = null;
+  }
+  renderProps();
+}
+
 // Sensible set of fonts for e-ink rendering.  Generic families first
 // (always available in the sidecar's browser), then widely-shipped named
 // fonts that render well at low DPI.
@@ -2822,8 +3062,34 @@ const FONT_FAMILIES = [
   { value: 'Verdana, sans-serif',          label: 'Verdana' },
 ];
 
+// Phase 10: merge curated FONT_FAMILIES with user-uploaded fonts so the
+// picker shows everything together. Uploaded entries derive their value
+// (the CSS font-family name the sidecar's @font-face declares) and label
+// from the asset's filename — same naming the compositor uses on the
+// server side. Returns a fresh array each call so a re-render after an
+// upload picks up the new entry without a page reload.
+function fontFamilyOptions() {
+  const uploaded = (cachedAssets || [])
+    .filter(function(a) { return a.kind === 'font'; })
+    .map(function(a) {
+      const stem = a.filename.replace(/\.(woff2|woff|ttf)$/i, '');
+      return { value: stem, label: stem + ' (uploaded)' };
+    });
+  // Deduplicate by value so a curated and an uploaded family with the same
+  // name don't both render — the curated entry wins (predictable defaults).
+  const seen = new Set(FONT_FAMILIES.map(function(f) { return f.value; }));
+  const dedupedUploaded = uploaded.filter(function(f) {
+    if (seen.has(f.value)) return false;
+    seen.add(f.value);
+    return true;
+  });
+  return FONT_FAMILIES.concat(dedupedUploaded);
+}
+
 function textFormatFields(item) {
-  const fontOpts = FONT_FAMILIES.map(function(f) {
+  // Phase 10: merge curated + uploaded fonts so user-uploaded families show
+  // up alongside the curated five.
+  const fontOpts = fontFamilyOptions().map(function(f) {
     return '<option value="' + esc(f.value) + '"' +
       ((item.font_family || '') === f.value ? ' selected' : '') + '>' + esc(f.label) + '</option>';
   }).join('');

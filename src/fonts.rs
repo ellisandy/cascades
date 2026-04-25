@@ -73,26 +73,107 @@ impl FontsManifest {
 
     /// Wrap inner HTML in a full document with `<head><style>…</style></head>`.
     /// The sidecar passes the result to Puppeteer with `waitUntil: networkidle0`,
-    /// which blocks on font fetches — so curated fonts are guaranteed applied
+    /// which blocks on font fetches — so all fonts are guaranteed applied
     /// before the screenshot.
     ///
     /// Style block contents (in order):
     /// 1. **`@font-face`** declarations from the curated manifest.
-    /// 2. **Base utility CSS** ([`BASE_CSS`]) — hand-rolled flex-layout +
+    /// 2. **`@font-face`** declarations for user-uploaded fonts (Phase 10),
+    ///    pointing at `/api/assets/{id}` URLs.
+    /// 3. **Base utility CSS** ([`BASE_CSS`]) — hand-rolled flex-layout +
     ///    typographic-scale rules used by every plugin template. Without
     ///    this every template would render as unstyled HTML — the utility
     ///    classes (`flex--col`, `value--xxxlarge`, etc.) would have no
     ///    rules backing them.
-    pub fn wrap_html(&self, inner_html: &str, base_url: &str) -> String {
-        let face_css = self.to_font_face_css(base_url);
+    ///
+    /// `uploaded_fonts` is the list of font-typed assets from the
+    /// AssetStore; pass an empty slice to skip the second block. Compositor
+    /// builds this list once per render via `AssetStore::list_fonts`.
+    pub fn wrap_html(
+        &self,
+        inner_html: &str,
+        base_url: &str,
+        uploaded_fonts: &[UploadedFont],
+    ) -> String {
+        let curated_face_css = self.to_font_face_css(base_url);
+        let uploaded_face_css = uploaded_font_face_css(uploaded_fonts, base_url);
         format!(
             "<!DOCTYPE html>\
              <html><head><meta charset=\"utf-8\"><style>\
-             {face_css}\
+             {curated_face_css}\
+             {uploaded_face_css}\
              {BASE_CSS}\
              </style></head><body>{inner_html}</body></html>"
         )
     }
+}
+
+/// Phase 10: a user-uploaded font asset, in the minimal shape `wrap_html`
+/// needs to emit a valid `@font-face` declaration. Built by the compositor
+/// from `AssetSummary`s where `kind == "font"`.
+#[derive(Debug, Clone)]
+pub struct UploadedFont {
+    /// Asset id used in the URL: `/api/assets/{id}`.
+    pub id: String,
+    /// Filename — used both as the `font-family` name (after extension
+    /// strip) and to pick the right `format(...)` hint from the extension.
+    pub filename: String,
+    /// MIME from the upload, e.g. `"font/woff2"`. Used to derive the
+    /// `format(...)` hint independent of filename in case the user
+    /// uploaded a `.woff2` named `Whatever.bin`.
+    pub mime: String,
+}
+
+impl UploadedFont {
+    /// CSS `font-family` name derived from the upload filename. Strips the
+    /// extension; replaces nothing else (so `Inter-Bold.woff2` stays
+    /// `Inter-Bold` rather than collapsing to `Inter`). Plugin authors
+    /// reference the same string in `font-family:` declarations.
+    pub fn family_name(&self) -> &str {
+        match self.filename.rfind('.') {
+            Some(dot) => &self.filename[..dot],
+            None => &self.filename,
+        }
+    }
+
+    /// CSS `format(...)` hint matching the asset's MIME. Chromium uses the
+    /// hint to skip incompatible sources without fetching them. Unknown
+    /// MIME → `"woff2"` as the safest default (it's the most-supported
+    /// modern format).
+    pub fn format_hint(&self) -> &'static str {
+        match self.mime.as_str() {
+            "font/woff2" => "woff2",
+            "font/woff" => "woff",
+            "font/ttf" => "truetype",
+            _ => "woff2",
+        }
+    }
+}
+
+fn uploaded_font_face_css(fonts: &[UploadedFont], base_url: &str) -> String {
+    if fonts.is_empty() {
+        return String::new();
+    }
+    let trimmed = base_url.trim_end_matches('/');
+    let mut out = String::new();
+    for f in fonts {
+        out.push_str("@font-face {\n");
+        out.push_str(&format!("  font-family: \"{}\";\n", f.family_name()));
+        // Uploaded fonts don't (yet) declare weight/style — we'd need a
+        // separate inspector flow for that. Default to normal/normal so
+        // the @font-face is well-formed and the user can apply the family
+        // by name without picking a weight.
+        out.push_str("  font-weight: normal;\n");
+        out.push_str("  font-style: normal;\n");
+        out.push_str(&format!(
+            "  src: url(\"{trimmed}/api/assets/{}\") format(\"{}\");\n",
+            f.id,
+            f.format_hint()
+        ));
+        out.push_str("  font-display: swap;\n");
+        out.push_str("}\n");
+    }
+    out
 }
 
 /// Hand-rolled utility CSS injected into every sidecar render. Source of
@@ -115,7 +196,7 @@ mod tests {
     #[test]
     fn wrap_html_inlines_base_css_utility_classes() {
         let manifest = FontsManifest::empty();
-        let wrapped = manifest.wrap_html("<div>hi</div>", "http://example/");
+        let wrapped = manifest.wrap_html("<div>hi</div>", "http://example/", &[]);
         // Sample a handful of classes to confirm the include_str! actually
         // landed in the output. Spot-checking is enough — if any rule
         // shows up the file was loaded.

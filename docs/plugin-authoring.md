@@ -369,6 +369,38 @@ available:
 
 ---
 
+## Fonts (Phase 10)
+
+The render pipeline ships with a curated set of five OFL fonts: **Inter**,
+**IBM Plex Sans**, **DM Serif Display**, **JetBrains Mono**, and **Space
+Grotesk**. They're loaded via `@font-face` on every render and available
+to templates via standard CSS `font-family` declarations:
+
+```jinja
+<span style="font-family: 'Inter'; font-weight: 700;">{{ data.value }}</span>
+```
+
+### User-uploaded fonts
+
+Users can upload additional fonts (`.woff2`, `.woff`, `.ttf` — up to 1 MiB
+each) through the admin asset library. Uploaded fonts:
+
+- Are stored in the same SQLite-backed asset table as image assets, but
+  with `kind = "font"` so the compositor can route them separately.
+- Get an `@font-face` declaration injected on every render, with
+  `font-family` derived from the upload's filename (extension stripped).
+  `Inter-Bold.woff2` becomes `font-family: "Inter-Bold"`.
+- Show up in the admin's font picker (in any text item's inspector and in
+  Phase 9 `text_style` knobs) labelled `<name> (uploaded)`.
+- Default to `font-weight: normal` and `font-style: normal` — Phase 10 has
+  no per-upload weight/style picker yet, so multi-weight families need one
+  upload per weight (`Inter-Bold.woff2`, `Inter-Regular.woff2`).
+
+Authors don't need to do anything special — just declare a font family in
+your template's CSS, and if the user uploads a matching file, it'll apply.
+
+---
+
 ## End-to-end example: Tide Gauge plugin
 
 This example creates a minimal tide gauge plugin that shows the current tide
