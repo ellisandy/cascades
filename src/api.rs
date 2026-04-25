@@ -1104,11 +1104,19 @@ struct LayoutSummary {
 }
 
 /// Plugin instance entry returned by `GET /api/admin/plugins`.
+///
+/// Phase 9b: `settings_schema` carries the plugin definition's declared
+/// fields so the admin "Plugin customization" inspector can render
+/// theming-knob controls (text_style / color / toggle) without a second
+/// roundtrip. Empty when the plugin definition is unknown to the registry
+/// (instance exists but the manifest was unloaded).
 #[derive(Debug, Serialize)]
 struct PluginInstanceSummary {
     id: String,
     name: String,
     supported_variants: Vec<&'static str>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    settings_schema: Vec<crate::plugin_registry::SettingsField>,
 }
 
 /// Body for `POST /api/admin/sources/:id/fields`.
@@ -1550,10 +1558,22 @@ async fn admin_list_plugins(
 
     let plugins: Vec<PluginInstanceSummary> = instances
         .into_iter()
-        .map(|inst| PluginInstanceSummary {
-            name: capitalize_first(&inst.plugin_id),
-            id: inst.id,
-            supported_variants: vec!["full", "half_horizontal", "half_vertical", "quadrant"],
+        .map(|inst| {
+            // Phase 9b: pull the plugin's settings_schema from the registry
+            // so the admin can render theming-knob controls without a
+            // second fetch. Unknown plugin → empty schema, which the UI
+            // treats as "no theming knobs declared."
+            let settings_schema = app
+                .plugin_registry
+                .get(&inst.plugin_id)
+                .map(|def| def.settings_schema)
+                .unwrap_or_default();
+            PluginInstanceSummary {
+                name: capitalize_first(&inst.plugin_id),
+                id: inst.id,
+                supported_variants: vec!["full", "half_horizontal", "half_vertical", "quadrant"],
+                settings_schema,
+            }
         })
         .collect();
 
@@ -4808,6 +4828,115 @@ mod tests {
         // itemsToPayload emission — Group-only.
         assert!(ADMIN_HTML.contains("isGroup ? (item.style_overrides || null)"),
                 "itemsToPayload missing style_overrides emission for Groups");
+    }
+
+    /// Phase 9b smoke test — asserts the inspector "Plugin customization"
+    /// section, the per-field-type renderers, the style-override mutation
+    /// helpers, and the JS-side theme-field discriminator are all wired
+    /// into the bundled admin template. Same partial-revert-catch
+    /// philosophy as 5b/6b/7b/8b.
+    #[test]
+    fn admin_html_contains_phase9b_markers() {
+        // Inspector section + dispatch.
+        assert!(ADMIN_HTML.contains("function pluginCustomizationSection"),
+                "missing pluginCustomizationSection builder");
+        assert!(ADMIN_HTML.contains("function isThemeFieldType"),
+                "missing JS-side isThemeFieldType discriminator");
+        assert!(ADMIN_HTML.contains("function pluginSchemaFor"),
+                "missing pluginSchemaFor lookup helper");
+        assert!(ADMIN_HTML.contains("Plugin customization</div>"),
+                "missing 'Plugin customization' section header");
+
+        // Per-field-type renderers.
+        assert!(ADMIN_HTML.contains("function colorKnobControl"),
+                "missing colorKnobControl renderer");
+        assert!(ADMIN_HTML.contains("function toggleKnobControl"),
+                "missing toggleKnobControl renderer");
+        assert!(ADMIN_HTML.contains("function textStyleKnobControl"),
+                "missing textStyleKnobControl renderer");
+
+        // Mutation helpers — single source of truth for style_overrides edits.
+        assert!(ADMIN_HTML.contains("function updateStyleOverride"),
+                "missing updateStyleOverride helper");
+        assert!(ADMIN_HTML.contains("function updateStyleSubkey"),
+                "missing updateStyleSubkey helper for text_style subfields");
+        assert!(ADMIN_HTML.contains("function toggleStyleSubkey"),
+                "missing toggleStyleSubkey helper for B/I/U buttons");
+        assert!(ADMIN_HTML.contains("function clearStyleOverride"),
+                "missing clearStyleOverride helper for the per-knob reset button");
+
+        // Section gated to plugin-bound Groups only.
+        assert!(ADMIN_HTML.contains("pluginCustomizationBlock"),
+                "renderProps missing pluginCustomizationBlock variable");
+    }
+
+    /// Phase 9b backend smoke test — `GET /api/admin/plugins` must include
+    /// `settings_schema` so the admin UI can render theming-knob controls
+    /// without a second roundtrip. Asserts the wire-shape extension.
+    #[tokio::test]
+    async fn admin_list_plugins_exposes_settings_schema() {
+        let (state, _dir) = make_writable_test_state();
+
+        // Register a plugin with one theming + one data field so we can
+        // verify both shapes survive the response.
+        use crate::plugin_registry::{DataStrategy, PluginDefinition, SettingsField};
+        let def = PluginDefinition {
+            id: "weather".to_string(),
+            name: "Weather".to_string(),
+            description: String::new(),
+            source: "weather".to_string(),
+            refresh_interval_secs: 300,
+            data_strategy: DataStrategy::Polling,
+            template_full: None,
+            template_half_horizontal: None,
+            template_half_vertical: None,
+            template_quadrant: None,
+            criteria: Vec::new(),
+            settings_schema: vec![
+                SettingsField {
+                    key: "station_id".to_string(),
+                    label: "Station ID".to_string(),
+                    field_type: "text".to_string(),
+                    required: false,
+                    placeholder: None,
+                    default: None,
+                },
+                SettingsField {
+                    key: "accent_color".to_string(),
+                    label: "Accent".to_string(),
+                    field_type: "color".to_string(),
+                    required: false,
+                    placeholder: None,
+                    default: None,
+                },
+            ],
+            default_elements: Vec::new(),
+        };
+        state.plugin_registry.insert(def);
+        let app = build_router(Arc::clone(&state));
+
+        let req = Request::builder()
+            .uri("/api/admin/plugins")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let weather = body.as_array().unwrap().iter()
+            .find(|p| p["id"] == "weather")
+            .expect("weather instance must be in the response");
+        let schema = weather["settings_schema"].as_array()
+            .expect("weather must carry settings_schema");
+        assert_eq!(schema.len(), 2, "expected 2 schema fields, got: {schema:?}");
+        // Theming fields use the same shape — admin UI dispatches on `type`.
+        let types: Vec<&str> = schema.iter()
+            .map(|f| f["type"].as_str().unwrap_or(""))
+            .collect();
+        assert!(types.contains(&"text"), "data type missing: {types:?}");
+        assert!(types.contains(&"color"), "theming type missing: {types:?}");
     }
 
     /// Phase 8b smoke test — asserts the inspector badge, banner, Reset
