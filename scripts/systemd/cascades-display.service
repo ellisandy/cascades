@@ -1,0 +1,39 @@
+[Unit]
+# Pi-side e-ink push loop. Fetches /api/image/default from the local Cascades
+# server every N seconds and writes the result to the Waveshare 7.5" panel.
+#
+# This is the piece that closes the all-on-Pi loop: server renders → sidecar
+# screenshots → this loop pushes pixels → panel updates.
+Description=Cascades display refresh loop (Waveshare 7.5" e-ink)
+Documentation=https://github.com/ellisandy/cascades
+After=cascades.service
+Wants=cascades.service
+
+[Service]
+Type=simple
+User=cascades
+Group=cascades
+WorkingDirectory=/opt/cascades/display
+
+# Tunable knobs. CASCADES_API_KEY is read from /opt/cascades/config/secrets.toml
+# at runtime by the loop itself — no need to bake it into the unit file.
+Environment=CASCADES_URL=http://127.0.0.1:9090
+Environment=CASCADES_DISPLAY_ID=default
+Environment=CASCADES_INTERVAL_SECS=60
+ExecStart=/usr/bin/python3 /opt/cascades/display/loop.py
+
+# Loop is robust to the server being slow at boot (curl returns connection
+# refused → loop sleeps and retries), so on-failure is the right policy: only
+# restart if the Python process actually dies.
+Restart=on-failure
+RestartSec=10
+
+# Needs SPI access for the panel; user is in `spi` and `gpio` groups via
+# install.sh. No filesystem writes outside Python's working dir.
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

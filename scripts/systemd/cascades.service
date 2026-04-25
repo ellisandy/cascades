@@ -1,0 +1,46 @@
+[Unit]
+# The Rust HTTP server. Depends on the sidecar — Requires= forces a
+# dependency restart, After= orders the boot sequence so the server doesn't
+# fire its first render-call into a closed port. The server actually
+# tolerates a missing sidecar (renders just fail with a logged warning), but
+# starting them in the right order avoids a flurry of error logs at boot.
+Description=Cascades server (HTTP + admin UI + composition)
+Documentation=https://github.com/ellisandy/cascades
+After=cascades-sidecar.service network-online.target
+Requires=cascades-sidecar.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cascades
+Group=cascades
+WorkingDirectory=/opt/cascades
+
+# Where the binary expects to find templates/, fonts/, config/. Keeping the
+# working directory at the install root means relative paths "just work" the
+# same way they do during `cargo run` from the repo root.
+Environment=SIDECAR_URL=http://127.0.0.1:3001
+# Tune verbosity here without rebuilding. `cascades=info` is plenty for
+# steady-state operation; bump to `debug` while diagnosing.
+Environment=RUST_LOG=cascades=info,info
+ExecStart=/opt/cascades/cascades
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening. ProtectSystem=strict makes /usr, /etc, /boot, /var read-only
+# from the service's perspective; ReadWritePaths punches the data + config
+# directories back out so SQLite writes and secrets.toml auto-generation
+# still work. PrivateTmp gives the process its own /tmp namespace — cheap
+# isolation and the Rust server doesn't need a shared /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/cascades/data /opt/cascades/config
+
+[Install]
+WantedBy=multi-user.target
