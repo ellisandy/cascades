@@ -4810,6 +4810,48 @@ mod tests {
                 "itemsToPayload missing style_overrides emission for Groups");
     }
 
+    /// Phase 8b smoke test — asserts the inspector badge, banner, Reset
+    /// button, and confirmation flow are all wired into the bundled admin
+    /// template. Same partial-revert-catches philosophy as 5b/6b/7b.
+    ///
+    /// Carried into the 9a PR because the 8b branch was never merged into
+    /// main (PR #11 merged into the 8a feature branch instead). This commit
+    /// is a forward-port of d4481db so the work isn't lost.
+    #[test]
+    fn admin_html_contains_phase8b_markers() {
+        // Inspector banner + section.
+        assert!(ADMIN_HTML.contains("function pluginDefaultsSection"),
+                "missing pluginDefaultsSection builder");
+        assert!(ADMIN_HTML.contains("Plugin defaults updated."),
+                "missing stale-banner copy");
+        assert!(ADMIN_HTML.contains("Reset to plugin defaults"),
+                "missing Reset button label");
+
+        // Reset action + confirmation dialog.
+        assert!(ADMIN_HTML.contains("async function onResetGroup"),
+                "missing onResetGroup handler");
+        assert!(ADMIN_HTML.contains("if (!confirm("),
+                "missing confirm() dialog gate on destructive reset");
+        assert!(ADMIN_HTML.contains("Resize the group"),
+                "confirmation must mention the resize side-effect");
+        assert!(ADMIN_HTML.contains("/groups/' + encodeURIComponent(item.id) + '/reset"),
+                "missing POST URL for /groups/{{id}}/reset");
+
+        // Focused-scope safety: clear focusedGroupId before re-rendering.
+        assert!(ADMIN_HTML.contains("state.focusedGroupId = null"),
+                "onResetGroup must drop focus when wipe targets the focused group");
+
+        // Outliner badge.
+        assert!(ADMIN_HTML.contains("it.defaults_stale"),
+                "outliner missing defaults_stale check for badge");
+        assert!(ADMIN_HTML.contains(">UPDATED</span>"),
+                "outliner missing UPDATED badge markup");
+
+        // Reset is gated to plugin-bound groups in renderProps.
+        assert!(ADMIN_HTML.contains("item.type === 'group' && item.plugin_id"),
+                "renderProps missing plugin-bound-group gate for defaults section");
+    }
+
     /// Phase 8a smoke test — asserts the bundled admin template's data-flow
     /// changes for the new `/default_elements` wire shape and the
     /// `default_elements_hash` round-trip. Inspector UI (badge + Reset
