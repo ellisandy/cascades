@@ -829,10 +829,23 @@ struct ItemPayload {
     parent_id: Option<String>,
     #[serde(default)]
     background: Option<String>,
+    /// Phase 7: optional conditional-rendering clause (`{path, op, value}`).
+    /// Skipped on Group items.
+    #[serde(default)]
+    visible_when: Option<crate::visible_when::VisibleWhen>,
+    /// Phase 7: value → asset_id map for `LayoutItem::DataIcon`. Required
+    /// for that variant; ignored on others.
+    #[serde(default)]
+    icon_map: Option<std::collections::HashMap<String, String>>,
 }
 
 impl ItemPayload {
     fn into_layout_item(self) -> Result<LayoutItem, String> {
+        // Phase 7: per design-doc decision, Group items don't carry visible_when.
+        // We accept (and ignore) the field on Group payloads rather than reject
+        // them — admin UI sends a uniform shape, and rejecting would force the
+        // client to special-case Group serialization.
+        let visible_when = self.visible_when;
         match self.item_type.as_str() {
             "plugin_slot" => Ok(LayoutItem::PluginSlot {
                 id: self.id,
@@ -844,6 +857,7 @@ impl ItemPayload {
                 plugin_instance_id: self.plugin_instance_id.unwrap_or_default(),
                 layout_variant: self.layout_variant.unwrap_or_else(|| "full".to_string()),
                 parent_id: self.parent_id,
+                visible_when,
             }),
             "static_text" => Ok(LayoutItem::StaticText {
                 id: self.id,
@@ -861,6 +875,7 @@ impl ItemPayload {
                 font_family: self.font_family,
                 color: self.color,
                 parent_id: self.parent_id,
+                visible_when,
             }),
             "static_datetime" => Ok(LayoutItem::StaticDateTime {
                 id: self.id,
@@ -878,6 +893,7 @@ impl ItemPayload {
                 font_family: self.font_family,
                 color: self.color,
                 parent_id: self.parent_id,
+                visible_when,
             }),
             "static_divider" => Ok(LayoutItem::StaticDivider {
                 id: self.id,
@@ -888,6 +904,7 @@ impl ItemPayload {
                 height: self.height,
                 orientation: self.orientation,
                 parent_id: self.parent_id,
+                visible_when,
             }),
             "data_field" => Ok(LayoutItem::DataField {
                 id: self.id,
@@ -909,6 +926,7 @@ impl ItemPayload {
                 font_family: self.font_family,
                 color: self.color,
                 parent_id: self.parent_id,
+                visible_when,
             }),
             "group" => Ok(LayoutItem::Group {
                 id: self.id,
@@ -933,6 +951,24 @@ impl ItemPayload {
                     "image item requires asset_id".to_string()
                 })?,
                 parent_id: self.parent_id,
+                visible_when,
+            }),
+            "data_icon" => Ok(LayoutItem::DataIcon {
+                id: self.id,
+                z_index: self.z_index,
+                x: self.x,
+                y: self.y,
+                width: self.width,
+                height: self.height,
+                field_mapping_id: self.field_mapping_id.ok_or_else(|| {
+                    "data_icon item requires field_mapping_id".to_string()
+                })?,
+                // Default empty map = always-blank rendering until the user
+                // populates entries via the inspector. Same forgiving default
+                // as missing-asset on Image.
+                icon_map: self.icon_map.unwrap_or_default(),
+                parent_id: self.parent_id,
+                visible_when,
             }),
             other => Err(format!("unknown item_type '{other}'")),
         }
@@ -2947,6 +2983,7 @@ mod tests {
                 z_index: 0, x: 0, y: 240, width: 800, height: 2,
                 orientation: None,
                 parent_id: None,
+                visible_when: None,
             }],
             updated_at: 0,
         }).unwrap();
@@ -2997,6 +3034,7 @@ mod tests {
                 font_family: None,
                 color: None,
                 parent_id: None,
+                visible_when: None,
             }],
             updated_at: 0,
         }).unwrap();

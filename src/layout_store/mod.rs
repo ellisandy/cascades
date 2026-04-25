@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::DisplayLayoutsConfig;
+use crate::visible_when::VisibleWhen;
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -76,6 +77,9 @@ pub enum LayoutItem {
         layout_variant: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
     },
     /// A static text element rendered directly.
     StaticText {
@@ -101,6 +105,9 @@ pub enum LayoutItem {
         color: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
     },
     /// A static date/time element rendered via the sidecar.
     #[serde(rename = "static_datetime")]
@@ -127,6 +134,9 @@ pub enum LayoutItem {
         color: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
     },
     /// A horizontal or vertical divider line.
     StaticDivider {
@@ -139,6 +149,9 @@ pub enum LayoutItem {
         orientation: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
     },
     /// A data field that extracts a value from cached source data via JSONPath.
     DataField {
@@ -169,6 +182,9 @@ pub enum LayoutItem {
         color: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
     },
     /// A user-uploaded image asset placed at a fixed rectangle. The asset's
     /// raw bytes live in the [AssetStore](crate::asset_store::AssetStore);
@@ -185,6 +201,35 @@ pub enum LayoutItem {
         asset_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
+    },
+    /// A data-driven icon: extracts a string value from cached source data via
+    /// a [`FieldMapping`], then looks that value up in `icon_map` to choose
+    /// which [`Asset`](crate::asset_store::Asset) to render. Used for
+    /// weather-condition icons, route badges, etc.
+    ///
+    /// Falls back to a blank rectangle if the extracted value isn't a key in
+    /// `icon_map` or the chosen asset is missing — same defensive contract as
+    /// [`LayoutItem::Image`].
+    DataIcon {
+        id: String,
+        z_index: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        /// References data_source_fields.id (same as DataField).
+        field_mapping_id: String,
+        /// Map of extracted value → asset id. Stored as JSON in
+        /// `icon_map_json` column.
+        icon_map: std::collections::HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        /// Phase 7: optional conditional-rendering clause. `None` → always render.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_when: Option<VisibleWhen>,
     },
     /// A container item whose children's `parent_id` points at its `id`.
     ///
@@ -222,6 +267,7 @@ impl LayoutItem {
             Self::StaticDivider { id, .. } => id,
             Self::DataField { id, .. } => id,
             Self::Image { id, .. } => id,
+            Self::DataIcon { id, .. } => id,
             Self::Group { id, .. } => id,
         }
     }
@@ -234,6 +280,7 @@ impl LayoutItem {
             Self::StaticDivider { z_index, .. } => *z_index,
             Self::DataField { z_index, .. } => *z_index,
             Self::Image { z_index, .. } => *z_index,
+            Self::DataIcon { z_index, .. } => *z_index,
             Self::Group { z_index, .. } => *z_index,
         }
     }
@@ -247,7 +294,24 @@ impl LayoutItem {
             Self::StaticDivider { parent_id, .. } => parent_id.as_deref(),
             Self::DataField { parent_id, .. } => parent_id.as_deref(),
             Self::Image { parent_id, .. } => parent_id.as_deref(),
+            Self::DataIcon { parent_id, .. } => parent_id.as_deref(),
             Self::Group { parent_id, .. } => parent_id.as_deref(),
+        }
+    }
+
+    /// Phase 7: optional conditional-rendering clause. `Group` items don't
+    /// carry one — hiding a group separately from its children is a different
+    /// (cascading) feature deliberately deferred from v1 scope.
+    pub fn visible_when(&self) -> Option<&VisibleWhen> {
+        match self {
+            Self::PluginSlot { visible_when, .. } => visible_when.as_ref(),
+            Self::StaticText { visible_when, .. } => visible_when.as_ref(),
+            Self::StaticDateTime { visible_when, .. } => visible_when.as_ref(),
+            Self::StaticDivider { visible_when, .. } => visible_when.as_ref(),
+            Self::DataField { visible_when, .. } => visible_when.as_ref(),
+            Self::Image { visible_when, .. } => visible_when.as_ref(),
+            Self::DataIcon { visible_when, .. } => visible_when.as_ref(),
+            Self::Group { .. } => None,
         }
     }
 }
@@ -335,6 +399,12 @@ impl LayoutStore {
             ("color", "TEXT"),
             // Phase 6: foreign key into assets.id for LayoutItem::Image.
             ("asset_id", "TEXT"),
+            // Phase 7: serialized VisibleWhen clause (`{path, op, value}`)
+            // or NULL when the item has no condition.
+            ("visible_when_json", "TEXT"),
+            // Phase 7: serialized HashMap<String,String> of value → asset_id
+            // for LayoutItem::DataIcon.
+            ("icon_map_json", "TEXT"),
         ];
         for (col, typ) in &columns {
             let sql = format!("ALTER TABLE layout_items ADD COLUMN {col} {typ}");
@@ -399,7 +469,8 @@ impl LayoutStore {
                     plugin_instance_id, layout_variant, text_content, font_size, orientation,
                     field_mapping_id, format_string, label,
                     bold, italic, underline, font_family,
-                    parent_id, background, color, asset_id
+                    parent_id, background, color, asset_id,
+                    visible_when_json, icon_map_json
              FROM layout_items
              WHERE layout_id = ?1
              ORDER BY z_index, id",
@@ -430,6 +501,8 @@ impl LayoutStore {
                 row.get::<_, Option<String>>(20)?,
                 row.get::<_, Option<String>>(21)?,
                 row.get::<_, Option<String>>(22)?,
+                row.get::<_, Option<String>>(23)?,
+                row.get::<_, Option<String>>(24)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -439,11 +512,23 @@ impl LayoutStore {
              plugin_instance_id, layout_variant, text_content, font_size, orientation,
              field_mapping_id, format_string, label,
              bold, italic, underline, font_family,
-             parent_id, background, color, asset_id) in rows
+             parent_id, background, color, asset_id,
+             visible_when_json, icon_map_json) in rows
         {
             let bold = bold.map(|v| v != 0);
             let italic = italic.map(|v| v != 0);
             let underline = underline.map(|v| v != 0);
+            // Parse visible_when JSON; treat malformed as None and log so the
+            // compositor doesn't panic on a hand-edited DB row. The item then
+            // renders unconditionally (treating "nothing" as "always show").
+            let visible_when: Option<VisibleWhen> = visible_when_json.as_deref()
+                .and_then(|s| match serde_json::from_str::<VisibleWhen>(s) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!("layout '{layout_id}' item '{item_id}': bad visible_when_json: {e}");
+                        None
+                    }
+                });
             let item = match item_type.as_str() {
                 "plugin_slot" => LayoutItem::PluginSlot {
                     id: item_id,
@@ -456,6 +541,7 @@ impl LayoutStore {
                     layout_variant: layout_variant
                         .unwrap_or_else(|| "full".to_string()),
                     parent_id,
+                    visible_when,
                 },
                 "static_text" => LayoutItem::StaticText {
                     id: item_id,
@@ -473,6 +559,7 @@ impl LayoutStore {
                     font_family,
                     color: color.clone(),
                     parent_id,
+                    visible_when,
                 },
                 "static_datetime" => LayoutItem::StaticDateTime {
                     id: item_id,
@@ -490,6 +577,7 @@ impl LayoutStore {
                     font_family,
                     color: color.clone(),
                     parent_id,
+                    visible_when,
                 },
                 "static_divider" => LayoutItem::StaticDivider {
                     id: item_id,
@@ -500,6 +588,7 @@ impl LayoutStore {
                     height,
                     orientation,
                     parent_id,
+                    visible_when,
                 },
                 "data_field" => LayoutItem::DataField {
                     id: item_id,
@@ -520,6 +609,7 @@ impl LayoutStore {
                     font_family,
                     color,
                     parent_id,
+                    visible_when,
                 },
                 "image" => LayoutItem::Image {
                     id: item_id,
@@ -533,7 +623,37 @@ impl LayoutStore {
                     // doesn't panic.
                     asset_id: asset_id.unwrap_or_default(),
                     parent_id,
+                    visible_when,
                 },
+                "data_icon" => {
+                    // icon_map_json missing or malformed → empty map (renders
+                    // as blank rect for any value, same defensive contract as
+                    // missing-asset). Logs but doesn't fail the read.
+                    let icon_map = icon_map_json
+                        .as_deref()
+                        .and_then(|s| match serde_json::from_str::<std::collections::HashMap<String, String>>(s) {
+                            Ok(m) => Some(m),
+                            Err(e) => {
+                                log::warn!(
+                                    "layout '{layout_id}' item '{item_id}': bad icon_map_json: {e}",
+                                );
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    LayoutItem::DataIcon {
+                        id: item_id,
+                        z_index,
+                        x,
+                        y,
+                        width,
+                        height,
+                        field_mapping_id: field_mapping_id.unwrap_or_default(),
+                        icon_map,
+                        parent_id,
+                        visible_when,
+                    }
+                }
                 "group" => LayoutItem::Group {
                     id: item_id,
                     z_index,
@@ -573,33 +693,39 @@ impl LayoutStore {
         )?;
 
         for item in &layout.items {
+            // Phase 7: serialize the optional VisibleWhen clause once per
+            // item and reuse on every INSERT branch. None → NULL column.
+            let vw_json: Option<String> = item
+                .visible_when()
+                .map(|v| serde_json::to_string(v).expect("VisibleWhen always serialises"));
             match item {
                 LayoutItem::PluginSlot {
                     id, z_index, x, y, width, height, plugin_instance_id, layout_variant,
-                    parent_id,
+                    parent_id, visible_when: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          plugin_instance_id, layout_variant, parent_id)
-                         VALUES (?1, ?2, 'plugin_slot', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                          plugin_instance_id, layout_variant, parent_id, visible_when_json)
+                         VALUES (?1, ?2, 'plugin_slot', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
-                            plugin_instance_id, layout_variant, parent_id
+                            plugin_instance_id, layout_variant, parent_id, vw_json
                         ],
                     )?;
                 }
                 LayoutItem::StaticText {
                     id, z_index, x, y, width, height, text_content, font_size, orientation,
-                    bold, italic, underline, font_family, color, parent_id,
+                    bold, italic, underline, font_family, color, parent_id, visible_when: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           text_content, font_size, orientation,
-                          bold, italic, underline, font_family, color, parent_id)
+                          bold, italic, underline, font_family, color, parent_id,
+                          visible_when_json)
                          VALUES (?1, ?2, 'static_text', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                 ?11, ?12, ?13, ?14, ?15, ?16)",
+                                 ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             text_content, font_size, orientation,
@@ -609,20 +735,22 @@ impl LayoutStore {
                             font_family,
                             color,
                             parent_id,
+                            vw_json,
                         ],
                     )?;
                 }
                 LayoutItem::StaticDateTime {
                     id, z_index, x, y, width, height, font_size, format, orientation,
-                    bold, italic, underline, font_family, color, parent_id,
+                    bold, italic, underline, font_family, color, parent_id, visible_when: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           text_content, font_size, orientation,
-                          bold, italic, underline, font_family, color, parent_id)
+                          bold, italic, underline, font_family, color, parent_id,
+                          visible_when_json)
                          VALUES (?1, ?2, 'static_datetime', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                 ?11, ?12, ?13, ?14, ?15, ?16)",
+                                 ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             format, font_size, orientation,
@@ -632,33 +760,35 @@ impl LayoutStore {
                             font_family,
                             color,
                             parent_id,
+                            vw_json,
                         ],
                     )?;
                 }
                 LayoutItem::StaticDivider {
-                    id, z_index, x, y, width, height, orientation, parent_id,
+                    id, z_index, x, y, width, height, orientation, parent_id, visible_when: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          orientation, parent_id)
-                         VALUES (?1, ?2, 'static_divider', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                          orientation, parent_id, visible_when_json)
+                         VALUES (?1, ?2, 'static_divider', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![id, layout.id, z_index, x, y, width, height,
-                                orientation, parent_id],
+                                orientation, parent_id, vw_json],
                     )?;
                 }
                 LayoutItem::DataField {
                     id, z_index, x, y, width, height,
                     field_mapping_id, font_size, format_string, label, orientation,
-                    bold, italic, underline, font_family, color, parent_id,
+                    bold, italic, underline, font_family, color, parent_id, visible_when: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
                           field_mapping_id, font_size, format_string, label, orientation,
-                          bold, italic, underline, font_family, color, parent_id)
+                          bold, italic, underline, font_family, color, parent_id,
+                          visible_when_json)
                          VALUES (?1, ?2, 'data_field', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                                 ?13, ?14, ?15, ?16, ?17, ?18)",
+                                 ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
                             field_mapping_id, font_size, format_string, label, orientation,
@@ -668,20 +798,38 @@ impl LayoutStore {
                             font_family,
                             color,
                             parent_id,
+                            vw_json,
                         ],
                     )?;
                 }
                 LayoutItem::Image {
-                    id, z_index, x, y, width, height, asset_id, parent_id,
+                    id, z_index, x, y, width, height, asset_id, parent_id, visible_when: _,
                 } => {
                     tx.execute(
                         "INSERT INTO layout_items
                          (id, layout_id, item_type, z_index, x, y, width, height,
-                          asset_id, parent_id)
-                         VALUES (?1, ?2, 'image', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                          asset_id, parent_id, visible_when_json)
+                         VALUES (?1, ?2, 'image', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             id, layout.id, z_index, x, y, width, height,
-                            asset_id, parent_id,
+                            asset_id, parent_id, vw_json,
+                        ],
+                    )?;
+                }
+                LayoutItem::DataIcon {
+                    id, z_index, x, y, width, height,
+                    field_mapping_id, icon_map, parent_id, visible_when: _,
+                } => {
+                    let icon_map_json = serde_json::to_string(icon_map)
+                        .expect("HashMap<String,String> always serialises");
+                    tx.execute(
+                        "INSERT INTO layout_items
+                         (id, layout_id, item_type, z_index, x, y, width, height,
+                          field_mapping_id, icon_map_json, parent_id, visible_when_json)
+                         VALUES (?1, ?2, 'data_icon', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            id, layout.id, z_index, x, y, width, height,
+                            field_mapping_id, icon_map_json, parent_id, vw_json,
                         ],
                     )?;
                 }
@@ -777,6 +925,7 @@ impl LayoutStore {
                     plugin_instance_id: slot.plugin.clone(),
                     layout_variant: slot.variant.clone(),
                     parent_id: None,
+                    visible_when: None,
                 });
             }
             let layout = LayoutConfig {
@@ -1016,6 +1165,7 @@ mod tests {
             plugin_instance_id: plugin.to_string(),
             layout_variant: "full".to_string(),
             parent_id: None,
+            visible_when: None,
         }
     }
 
@@ -1212,6 +1362,7 @@ mod tests {
                     font_family: None,
                     color: None,
                     parent_id: None,
+                    visible_when: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
@@ -1219,6 +1370,7 @@ mod tests {
                     x: 0, y: 240, width: 800, height: 2,
                     orientation: Some("horizontal".to_string()),
                     parent_id: None,
+                    visible_when: None,
                 },
             ],
             updated_at: 0,
@@ -1239,6 +1391,7 @@ mod tests {
             plugin_instance_id: "river".to_string(),
             layout_variant: "full".to_string(),
             parent_id: None,
+            visible_when: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
@@ -1291,6 +1444,7 @@ mod tests {
                     font_family: None,
                     color: None,
                     parent_id: None,
+                    visible_when: None,
                 },
                 LayoutItem::DataField {
                     id: "df1".to_string(),
@@ -1310,6 +1464,7 @@ mod tests {
                     font_family: None,
                     color: None,
                     parent_id: None,
+                    visible_when: None,
                 },
             ],
             updated_at: 0,
@@ -1365,6 +1520,7 @@ mod tests {
             font_family: None,
             color: None,
             parent_id: None,
+            visible_when: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let decoded: LayoutItem = serde_json::from_str(&json).unwrap();
@@ -1394,6 +1550,7 @@ mod tests {
                     font_family: Some("Georgia, serif".to_string()),
                     color: None,
                     parent_id: None,
+                    visible_when: None,
                 },
                 LayoutItem::DataField {
                     id: "df0".to_string(),
@@ -1410,6 +1567,7 @@ mod tests {
                     font_family: Some("monospace".to_string()),
                     color: None,
                     parent_id: None,
+                    visible_when: None,
                 },
             ],
             updated_at: 0,
@@ -1505,6 +1663,7 @@ mod tests {
                     orientation: None,
                     bold: None, italic: None, underline: None, font_family: None, color: None,
                     parent_id: Some("g0".to_string()),
+                    visible_when: None,
                 },
             ],
             updated_at: 0,
@@ -1575,6 +1734,7 @@ mod tests {
                     x: 0, y: 100, width: 200, height: 2,
                     orientation: Some("horizontal".to_string()),
                     parent_id: Some("g".to_string()),
+                    visible_when: None,
                 },
             ],
             updated_at: 0,

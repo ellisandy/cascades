@@ -163,6 +163,7 @@ impl DisplayConfiguration {
                     plugin_instance_id: s.plugin.clone(),
                     layout_variant: s.variant.clone(),
                     parent_id: None,
+                    visible_when: None,
                 })
             })
             .collect::<Result<Vec<_>, CompositorError>>()?;
@@ -299,17 +300,47 @@ impl Compositor {
         config: &DisplayConfiguration,
         render_mode: &str,
     ) -> Result<Vec<u8>, CompositorError> {
+        // Phase 7: build the eval snapshot once per render — a single JSON
+        // object keyed by plugin_instance_id containing each instance's
+        // cached_data. visible_when paths like `$.weather.precip_chance_pct`
+        // resolve against this. Built up-front so it's both consistent across
+        // all items and reusable for DataIcon resolution below.
+        let eval_snapshot = build_eval_snapshot(&self.instance_store).await;
+
+        // Phase 7: filter items whose visible_when clause evaluates false.
+        // visible[i] mirrors config.items; we track in parallel rather than
+        // shrinking the items vec so we can use the existing item-index
+        // relationship for task_for_item / png_results without remapping.
+        let visible: Vec<bool> = config
+            .items
+            .iter()
+            .map(|it| {
+                it.visible_when()
+                    .map(|vw| vw.evaluate(&eval_snapshot))
+                    .unwrap_or(true)
+            })
+            .collect();
+
         // For each item, we either spawn an async render task or handle it inline.
         // task_for_item[i] = Some(handle_index) if item i has an async task, else None.
         let mut task_for_item: Vec<Option<usize>> = Vec::with_capacity(config.items.len());
         let mut handles: Vec<task::JoinHandle<Result<Vec<u8>, CompositorError>>> = Vec::new();
 
-        for item in &config.items {
+        for (idx, item) in config.items.iter().enumerate() {
+            // Phase 7: hidden items don't render. Push None so indices line up
+            // for the post-join loop, but skip the work.
+            if !visible[idx] {
+                task_for_item.push(None);
+                continue;
+            }
             let maybe_task = match item {
                 // Phase 6: image rendering is synchronous (decode + alpha blit
                 // on the compositor thread), so it never spawns a sidecar
                 // task. The actual paint happens in the post-join loop below.
                 LayoutItem::Image { .. } => None,
+                // Phase 7: DataIcon also renders synchronously after the join
+                // (resolves value → asset_id → bytes from the asset store).
+                LayoutItem::DataIcon { .. } => None,
                 LayoutItem::PluginSlot {
                     plugin_instance_id,
                     layout_variant,
@@ -482,36 +513,149 @@ impl Compositor {
         // invalid bytes) are logged but never fail the whole render — a
         // missing asset becomes a blank rectangle, which is far less
         // surprising than a 500 from /image.png.
+        // Phase 6: pre-fetch Image bytes (keyed by asset_id, dedup-friendly).
+        // Phase 7: pre-resolve DataIcon items — extract value via field
+        // mapping, look up in icon_map, fetch bytes — and stash in
+        // data_icon_bytes keyed by item id (each DataIcon may resolve to a
+        // different asset based on data, so item id is the natural key).
         let mut image_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut data_icon_bytes: HashMap<String, Vec<u8>> = HashMap::new();
         if let Some(store) = &self.asset_store {
-            for item in &config.items {
-                if let LayoutItem::Image { asset_id, .. } = item {
-                    if image_bytes.contains_key(asset_id) {
-                        continue;
-                    }
-                    let store = Arc::clone(store);
-                    let aid = asset_id.clone();
-                    let result = task::spawn_blocking(move || store.get(&aid)).await?;
-                    match result {
-                        Ok(Some(asset)) => {
-                            image_bytes.insert(asset_id.clone(), asset.bytes);
+            for (idx, item) in config.items.iter().enumerate() {
+                if !visible[idx] {
+                    continue;
+                }
+                match item {
+                    LayoutItem::Image { asset_id, .. } => {
+                        if image_bytes.contains_key(asset_id) {
+                            continue;
                         }
-                        Ok(None) => {
-                            log::warn!(
-                                "compose: asset '{asset_id}' referenced by Image not found",
-                            );
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "compose: failed to load asset '{asset_id}': {e}",
-                            );
+                        if let Some(bytes) = fetch_asset_bytes(store, asset_id).await? {
+                            image_bytes.insert(asset_id.clone(), bytes);
                         }
                     }
+                    LayoutItem::DataIcon { id, field_mapping_id, icon_map, .. } => {
+                        // Resolve value via field mapping; missing → no icon.
+                        let extracted = resolve_data_icon_value(
+                            &self.layout_store,
+                            &eval_snapshot,
+                            field_mapping_id,
+                        )
+                        .await;
+                        let Some(value_str) = extracted else { continue };
+                        let Some(asset_id) = icon_map.get(&value_str) else {
+                            log::warn!(
+                                "compose: DataIcon '{id}' value '{value_str}' not in icon_map; rendering blank",
+                            );
+                            continue;
+                        };
+                        if let Some(bytes) = fetch_asset_bytes(store, asset_id).await? {
+                            data_icon_bytes.insert(id.clone(), bytes);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        composite_to_png(&config.items, &task_for_item, &png_results, &image_bytes)
+        composite_to_png(
+            &config.items,
+            &visible,
+            &task_for_item,
+            &png_results,
+            &image_bytes,
+            &data_icon_bytes,
+        )
+    }
+}
+
+/// Build a JSON snapshot of all plugin instances' cached data, keyed by
+/// instance id. Used by [`VisibleWhen::evaluate`] and DataIcon resolution.
+/// Errors fetching individual instances log + omit so a flaky read doesn't
+/// hide every conditional item.
+async fn build_eval_snapshot(instance_store: &Arc<InstanceStore>) -> serde_json::Value {
+    let store = Arc::clone(instance_store);
+    let instances = match task::spawn_blocking(move || store.list_instances()).await {
+        Ok(Ok(list)) => list,
+        Ok(Err(e)) => {
+            log::warn!("compose: failed to list instances for eval snapshot: {e}");
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+        Err(e) => {
+            log::warn!("compose: instance list task panicked: {e}");
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+    };
+    let mut root = serde_json::Map::with_capacity(instances.len());
+    for inst in instances {
+        root.insert(
+            inst.id,
+            inst.cached_data.unwrap_or(serde_json::Value::Null),
+        );
+    }
+    serde_json::Value::Object(root)
+}
+
+/// Resolve a DataIcon's `field_mapping_id` against the eval snapshot. Returns
+/// the extracted value as a string (so it matches against `icon_map` keys).
+/// Logs + returns None on any failure path (missing mapping, missing path,
+/// non-string-coercible value); compositor renders a blank rectangle.
+async fn resolve_data_icon_value(
+    layout_store: &Arc<LayoutStore>,
+    snapshot: &serde_json::Value,
+    field_mapping_id: &str,
+) -> Option<String> {
+    let ls = Arc::clone(layout_store);
+    let fmid = field_mapping_id.to_string();
+    let mapping = task::spawn_blocking(move || ls.get_field_mapping(&fmid))
+        .await
+        .ok()?
+        .ok()?;
+    let mapping = mapping?;
+    // Build "$.<source_id>.<rest_of_path>" so the path resolves against the
+    // unified snapshot. `mapping.json_path` is anchored at the instance's own
+    // data; our snapshot is `{instance_id: data}` so we prepend.
+    //
+    // The trim/branch dance handles three input shapes:
+    //   "$.water_level"      → "$.<src>.water_level"   (dot prefix, key root)
+    //   "$.values[0]"        → "$.<src>.values[0]"     (dot prefix, key root)
+    //   "$.[0]"              → "$.<src>[0]"            (dot prefix, array root —
+    //                                                   strip the dot to avoid
+    //                                                   "$.<src>.[0]" which is
+    //                                                   ill-formed)
+    let trimmed = mapping
+        .json_path
+        .strip_prefix('$')
+        .unwrap_or(mapping.json_path.as_str())
+        .trim_start_matches('.');
+    let path = if trimmed.starts_with('[') {
+        format!("$.{}{}", mapping.data_source_id, trimmed)
+    } else {
+        format!("$.{}.{}", mapping.data_source_id, trimmed)
+    };
+    let extracted = crate::jsonpath::jsonpath_extract(snapshot, &path).ok()?;
+    Some(crate::jsonpath::value_to_string(extracted))
+}
+
+/// Helper: fetch asset bytes off-thread, mapping all errors to a logged
+/// `None` so the compositor never fails the whole render on one bad asset.
+async fn fetch_asset_bytes(
+    store: &Arc<AssetStore>,
+    asset_id: &str,
+) -> Result<Option<Vec<u8>>, CompositorError> {
+    let store = Arc::clone(store);
+    let aid = asset_id.to_string();
+    let result = task::spawn_blocking(move || store.get(&aid)).await?;
+    match result {
+        Ok(Some(asset)) => Ok(Some(asset.bytes)),
+        Ok(None) => {
+            log::warn!("compose: asset '{asset_id}' not found");
+            Ok(None)
+        }
+        Err(e) => {
+            log::warn!("compose: failed to load asset '{asset_id}': {e}");
+            Ok(None)
+        }
     }
 }
 
@@ -896,11 +1040,20 @@ async fn call_sidecar(
 ///
 /// Items whose `task_for_item` entry is `None` (skipped during rendering) are
 /// omitted silently.
+/// Helper: treat an empty `visible` vec as "all items visible". Lets unit
+/// tests of `composite_to_png` keep passing `&[]` for tests that don't care
+/// about Phase 7 visibility filtering.
+fn is_visible(visible: &[bool], idx: usize) -> bool {
+    visible.get(idx).copied().unwrap_or(true)
+}
+
 fn composite_to_png(
     items: &[LayoutItem],
+    visible: &[bool],
     task_for_item: &[Option<usize>],
     png_results: &[Vec<u8>],
     image_bytes: &HashMap<String, Vec<u8>>,
+    data_icon_bytes: &HashMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, CompositorError> {
     // Allocate white frame.
     let pixels = vec![255u8; (FRAME_WIDTH * FRAME_HEIGHT) as usize];
@@ -908,7 +1061,14 @@ fn composite_to_png(
         GrayImage::from_raw(FRAME_WIDTH, FRAME_HEIGHT, pixels)
             .expect("buffer size matches dimensions");
 
-    for (item, maybe_task) in items.iter().zip(task_for_item.iter()) {
+    for (idx, (item, maybe_task)) in items.iter().zip(task_for_item.iter()).enumerate() {
+        // Phase 7: visible_when=false items are omitted entirely. The
+        // visibility vec parallels items (no shrinking) so this index lookup
+        // is cheap and tests that pass an empty `visible` vec still work
+        // (treat as all-visible — see helper below).
+        if !is_visible(visible, idx) {
+            continue;
+        }
         match item {
             LayoutItem::PluginSlot { x, y, width, height, plugin_instance_id, .. } => {
                 if let Some(idx) = maybe_task {
@@ -1008,6 +1168,25 @@ fn composite_to_png(
                 // Else: bytes were absent (missing asset or no asset_store
                 // wired); already logged in compose(). Render as no-op so the
                 // user sees an empty box where the image was.
+            }
+            LayoutItem::DataIcon { id, x, y, width, height, .. } => {
+                // Bytes were resolved upstream in compose() (value lookup →
+                // icon_map → asset bytes). Missing entries here are logged
+                // already; we just paint what's there. Same defensive
+                // contract as Image.
+                if let Some(bytes) = data_icon_bytes.get(id)
+                    && let Err(e) = blit_asset_image(
+                        &mut frame,
+                        bytes,
+                        (*x).max(0) as u32,
+                        (*y).max(0) as u32,
+                        (*width).max(0) as u32,
+                        (*height).max(0) as u32,
+                        id,
+                    )
+                {
+                    log::warn!("compose: skipping data_icon '{id}': {e}");
+                }
             }
         }
     }
@@ -1295,6 +1474,7 @@ mod tests {
                     plugin_instance_id: "river".to_string(),
                     layout_variant: "quadrant".to_string(),
                     parent_id: None,
+                    visible_when: None,
                 },
                 LayoutItem::StaticText {
                     id: "t0".to_string(),
@@ -1309,6 +1489,7 @@ mod tests {
                     font_family: None,
                     color: None,
                     parent_id: None,
+                    visible_when: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
@@ -1316,6 +1497,7 @@ mod tests {
                     x: 0, y: 240, width: 800, height: 2,
                     orientation: Some("horizontal".to_string()),
                     parent_id: None,
+                    visible_when: None,
                 },
             ],
         };
@@ -1340,6 +1522,7 @@ mod tests {
                     plugin_instance_id: "river".to_string(),
                     layout_variant: "bogus_variant".to_string(),
                     parent_id: None,
+                    visible_when: None,
                 },
                 LayoutItem::StaticDivider {
                     id: "d0".to_string(),
@@ -1347,6 +1530,7 @@ mod tests {
                     x: 0, y: 240, width: 800, height: 2,
                     orientation: None,
                     parent_id: None,
+                    visible_when: None,
                 },
             ],
         };
@@ -1373,7 +1557,7 @@ mod tests {
     #[test]
     fn composite_to_png_white_frame() {
         // No items → pure white 800×480 frame.
-        let png = composite_to_png(&[], &[], &[], &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[], &[], &[], &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(img.width(), FRAME_WIDTH);
@@ -1403,12 +1587,13 @@ mod tests {
             plugin_instance_id: "test".to_string(),
             layout_variant: "quadrant".to_string(),
             parent_id: None,
+            visible_when: None,
         };
 
         let task_for_item = vec![Some(0usize)];
         let png_results = vec![slot_png];
 
-        let png = composite_to_png(&[item], &task_for_item, &png_results, &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[item], &[], &task_for_item, &png_results, &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         assert_eq!(frame.get_pixel(100, 50).0[0], 0);
@@ -1426,10 +1611,11 @@ mod tests {
             width: 800, height: 2,
             orientation: Some("horizontal".to_string()),
             parent_id: None,
+            visible_when: None,
         };
 
         let task_for_item = vec![None];
-        let png = composite_to_png(&[item], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Row 200 and 201 should be all black.
@@ -1468,12 +1654,13 @@ mod tests {
             font_family: None,
             color: None,
             parent_id: None,
+            visible_when: None,
         };
 
         let task_for_item = vec![Some(0usize)];
         let png_results = vec![text_png];
 
-        let png = composite_to_png(&[item], &task_for_item, &png_results, &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[item], &[], &task_for_item, &png_results, &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Inside the text area should be grey.
@@ -1517,6 +1704,7 @@ mod tests {
                 plugin_instance_id: "white".to_string(),
                 layout_variant: "quadrant".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::PluginSlot {
                 id: "s1".to_string(), z_index: 1,
@@ -1524,12 +1712,13 @@ mod tests {
                 plugin_instance_id: "black".to_string(),
                 layout_variant: "quadrant".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
         ];
         let task_for_item = vec![Some(0usize), Some(1usize)];
         let png_results = vec![white_png, black_png];
 
-        let png = composite_to_png(&items, &task_for_item, &png_results, &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&items, &[], &task_for_item, &png_results, &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Black (z=1) overwrote white (z=0).
@@ -1550,7 +1739,7 @@ mod tests {
             parent_id: None,
         };
         let task_for_item = vec![None];
-        let png = composite_to_png(&[item], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Border pixels are black.
@@ -1585,7 +1774,7 @@ mod tests {
             parent_id: None,
         };
         let task_for_item = vec![None];
-        let png = composite_to_png(&[item], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[item], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Frame is still pure white.
@@ -1614,9 +1803,10 @@ mod tests {
             x: 110, y: 120, width: 20, height: 10,
             orientation: None,
             parent_id: Some("g".to_string()),
+            visible_when: None,
         };
         let task_for_item = vec![None, None];
-        let png = composite_to_png(&[group, child], &task_for_item, &[], &std::collections::HashMap::new()).unwrap();
+        let png = composite_to_png(&[group, child], &[], &task_for_item, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&png).unwrap().to_luma8();
 
         // Inside the child rectangle — should be black (child painted on top).
@@ -1658,11 +1848,12 @@ mod tests {
             x: 50, y: 60, width: 30, height: 20,
             asset_id: "asset-x".to_string(),
             parent_id: None,
+            visible_when: None,
         };
         let mut bytes = std::collections::HashMap::new();
         bytes.insert("asset-x".to_string(), png);
         let task_for_item = vec![None];
-        let composed = composite_to_png(&[item], &task_for_item, &[], &bytes).unwrap();
+        let composed = composite_to_png(&[item], &[], &task_for_item, &[], &bytes, &std::collections::HashMap::new()).unwrap();
         let frame = image::load_from_memory(&composed).unwrap().to_luma8();
 
         // Inside the image rectangle: black (the asset is fully black).
@@ -1670,6 +1861,96 @@ mod tests {
         // Outside the rectangle: untouched white background.
         assert_eq!(frame.get_pixel(10, 10).0[0], 255, "outside the image stays white");
         assert_eq!(frame.get_pixel(85, 85).0[0], 255, "outside the image stays white");
+    }
+
+    /// Phase 7: items with `visible[i] = false` must not paint. A black
+    /// image item that *would* paint at (50,60)→(80,80) stays unpainted
+    /// when its visibility flag is false.
+    #[test]
+    fn composite_to_png_skips_invisible_items() {
+        let png = black_4x4_png();
+        let item = LayoutItem::Image {
+            id: "img1".to_string(),
+            z_index: 0,
+            x: 50, y: 60, width: 30, height: 20,
+            asset_id: "asset-x".to_string(),
+            parent_id: None,
+            visible_when: None,
+        };
+        let mut bytes = std::collections::HashMap::new();
+        bytes.insert("asset-x".to_string(), png);
+        let task_for_item = vec![None];
+        let composed = composite_to_png(
+            &[item],
+            &[false],
+            &task_for_item,
+            &[],
+            &bytes,
+            &std::collections::HashMap::new(),
+        ).unwrap();
+        let frame = image::load_from_memory(&composed).unwrap().to_luma8();
+        assert_eq!(frame.get_pixel(60, 70).0[0], 255, "hidden image must not paint");
+    }
+
+    /// `composite_to_png` with an empty `visible` slice treats every item as
+    /// visible — needed so legacy callers / tests that don't care about
+    /// Phase 7 don't have to construct a parallel boolean vec.
+    #[test]
+    fn composite_to_png_empty_visible_means_all_visible() {
+        let png = black_4x4_png();
+        let item = LayoutItem::Image {
+            id: "img1".to_string(),
+            z_index: 0,
+            x: 50, y: 60, width: 30, height: 20,
+            asset_id: "asset-x".to_string(),
+            parent_id: None,
+            visible_when: None,
+        };
+        let mut bytes = std::collections::HashMap::new();
+        bytes.insert("asset-x".to_string(), png);
+        let task_for_item = vec![None];
+        let composed = composite_to_png(
+            &[item],
+            &[],
+            &task_for_item,
+            &[],
+            &bytes,
+            &std::collections::HashMap::new(),
+        ).unwrap();
+        let frame = image::load_from_memory(&composed).unwrap().to_luma8();
+        assert_eq!(frame.get_pixel(60, 70).0[0], 0, "empty `visible` should mean fully visible");
+    }
+
+    /// Phase 7: `LayoutItem::DataIcon` shares `blit_asset_image` with
+    /// Image, so the bytes-blit path is well-tested already. This test
+    /// proves the post-join handler correctly looks bytes up by *item id*
+    /// (not asset_id) — the keying detail that's specific to DataIcon.
+    #[test]
+    fn composite_to_png_data_icon_renders_via_item_id_keyed_bytes() {
+        let png = black_4x4_png();
+        let item = LayoutItem::DataIcon {
+            id: "icon-1".to_string(),
+            z_index: 0,
+            x: 100, y: 100, width: 20, height: 20,
+            field_mapping_id: "fm-weather-cond".to_string(),
+            icon_map: std::collections::HashMap::new(),
+            parent_id: None,
+            visible_when: None,
+        };
+        let mut data_icon_bytes = std::collections::HashMap::new();
+        data_icon_bytes.insert("icon-1".to_string(), png);
+        let task_for_item = vec![None];
+        let composed = composite_to_png(
+            &[item],
+            &[],
+            &task_for_item,
+            &[],
+            &std::collections::HashMap::new(),
+            &data_icon_bytes,
+        ).unwrap();
+        let frame = image::load_from_memory(&composed).unwrap().to_luma8();
+        assert_eq!(frame.get_pixel(110, 110).0[0], 0, "data icon must paint at item rect");
+        assert_eq!(frame.get_pixel(50, 50).0[0], 255);
     }
 
     /// A missing asset (id present in the item but not in the bytes map) must
@@ -1682,12 +1963,15 @@ mod tests {
             x: 100, y: 100, width: 50, height: 50,
             asset_id: "ghost".to_string(),
             parent_id: None,
+            visible_when: None,
         };
         let task_for_item = vec![None];
         let composed = composite_to_png(
             &[item],
+            &[],
             &task_for_item,
             &[],
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
         .unwrap();

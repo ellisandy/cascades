@@ -152,6 +152,7 @@ async fn default_config_composite_returns_800x480_png() {
             plugin_instance_id: "river".to_string(),
             layout_variant: "full".to_string(),
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -192,6 +193,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
                 plugin_instance_id: "weather".to_string(),
                 layout_variant: "half_horizontal".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::PluginSlot {
                 id: "s1".to_string(),
@@ -200,6 +202,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
                 plugin_instance_id: "river".to_string(),
                 layout_variant: "quadrant".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::PluginSlot {
                 id: "s2".to_string(),
@@ -208,6 +211,7 @@ async fn trip_planner_config_composite_returns_800x480_png() {
                 plugin_instance_id: "ferry".to_string(),
                 layout_variant: "quadrant".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
         ],
     };
@@ -298,6 +302,7 @@ async fn compositor_runs_slots_concurrently_and_joins() {
                 plugin_instance_id: "weather".to_string(),
                 layout_variant: "half_horizontal".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::PluginSlot {
                 id: "s1".to_string(), z_index: 1,
@@ -305,6 +310,7 @@ async fn compositor_runs_slots_concurrently_and_joins() {
                 plugin_instance_id: "river".to_string(),
                 layout_variant: "quadrant".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::PluginSlot {
                 id: "s2".to_string(), z_index: 2,
@@ -312,6 +318,7 @@ async fn compositor_runs_slots_concurrently_and_joins() {
                 plugin_instance_id: "ferry".to_string(),
                 layout_variant: "quadrant".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
         ],
     };
@@ -370,6 +377,7 @@ async fn static_divider_composited_without_sidecar() {
             width: 800, height: 2,
             orientation: Some("horizontal".to_string()),
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -413,6 +421,7 @@ async fn static_text_renders_via_sidecar() {
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None, color: None,
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -449,6 +458,7 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
                 plugin_instance_id: "weather".to_string(),
                 layout_variant: "half_horizontal".to_string(),
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::StaticText {
                 id: "t0".to_string(), z_index: 1,
@@ -458,12 +468,14 @@ async fn mixed_layout_plugin_text_divider_composited_correctly() {
                 orientation: None,
                 bold: None, italic: None, underline: None, font_family: None, color: None,
                 parent_id: None,
+                visible_when: None,
             },
             LayoutItem::StaticDivider {
                 id: "d0".to_string(), z_index: 2,
                 x: 0, y: 240, width: 800, height: 2,
                 orientation: Some("horizontal".to_string()),
                 parent_id: None,
+                visible_when: None,
             },
         ],
     };
@@ -538,6 +550,7 @@ async fn data_field_renders_extracted_value_via_sidecar() {
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None, color: None,
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -587,6 +600,7 @@ async fn data_field_missing_mapping_renders_placeholder() {
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None, color: None,
             parent_id: None,
+            visible_when: None,
         }],
     };
 
@@ -652,6 +666,7 @@ async fn data_field_with_label_renders_successfully() {
             orientation: None,
             bold: None, italic: None, underline: None, font_family: None, color: None,
             parent_id: None,
+            visible_when: None,
         }],
     };
 

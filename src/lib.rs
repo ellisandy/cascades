@@ -14,6 +14,7 @@ pub mod presentation;
 pub mod source_store;
 pub mod sources;
 pub mod template;
+pub mod visible_when;
 
 use config::Config;
 use sources::Source;
