@@ -19,6 +19,14 @@ Environment=RENDER_PORT=3001
 # Where the install.sh script puts Bun. Could also be /usr/local/bin/bun if
 # bun was installed system-wide.
 Environment=PATH=/home/cascades/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Tell Puppeteer to use the system Chromium (apt-installed by install.sh)
+# instead of its own bundled binary. Puppeteer 22.x only ships a Linux-x64
+# Chrome download — running it on aarch64 fails posix_spawn with ENOEXEC.
+# The apt package is built for the host arch, so this works on Pi (arm64)
+# and NUCs/VMs (x86_64) alike. install.sh sets PUPPETEER_SKIP_DOWNLOAD
+# during `bun install` to skip the ~150MB download Puppeteer would
+# otherwise do.
+Environment=PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ExecStart=/home/cascades/.bun/bin/bun server.ts
 
 # Chromium spawns a few subprocesses per render; let it.
