@@ -68,7 +68,11 @@ impl NowContext {
 }
 
 /// The `trip_decision` sub-object injected when the plugin has evaluation criteria.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// `Deserialize` is implemented so the admin template-preview endpoint can
+/// accept a user-supplied trip-decision shape verbatim — production code
+/// only ever serializes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TripDecisionContext {
     pub go: bool,
     pub destination: Option<String>,
@@ -76,7 +80,7 @@ pub struct TripDecisionContext {
 }
 
 /// One evaluated criterion result.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CriterionResult {
     pub key: String,
     pub pass: bool,
@@ -204,6 +208,42 @@ impl TemplateEngine {
     /// Returns `true` if the named template was loaded.
     pub fn has_template(&self, name: &str) -> bool {
         self.names.contains(name)
+    }
+
+    /// Render a Jinja template provided as a raw source string against `ctx`.
+    ///
+    /// Used by the admin "preview a template edit" path: a fresh, isolated
+    /// `Environment` is built per call (same custom filters and undefined
+    /// behaviour as the loaded engine), so concurrent previews never see
+    /// partial state and the on-disk template set is untouched.
+    ///
+    /// Returns `TemplateError::RenderError { name: "<inline>", source }` for
+    /// both syntax errors (caught at `add_template_owned`) and runtime errors
+    /// (caught at `render`). The caller can downcast `source` into
+    /// `minijinja::Error` for `.line()` / `.range()` line/column diagnostics.
+    pub fn render_source(
+        template_source: &str,
+        ctx: &RenderContext,
+    ) -> Result<String, TemplateError> {
+        const NAME: &str = "<inline>";
+        let mut env = build_env();
+        env.add_template_owned(NAME.to_owned(), template_source.to_owned())
+            .map_err(|e| TemplateError::RenderError {
+                name: NAME.to_owned(),
+                source: e,
+            })?;
+        let tmpl = env
+            .get_template(NAME)
+            .map_err(|e| TemplateError::RenderError {
+                name: NAME.to_owned(),
+                source: e,
+            })?;
+        let ctx_value = Value::from_serialize(ctx);
+        tmpl.render(ctx_value)
+            .map_err(|e| TemplateError::RenderError {
+                name: NAME.to_owned(),
+                source: e,
+            })
     }
 }
 
@@ -785,6 +825,77 @@ mod tests {
         assert!(!html.contains("NO GO"), "should not show NO GO: {html}");
         assert!(html.contains("2026-04-05"), "date missing: {html}");
         assert!(!html.contains(r#"class="error""#), "unexpected error element: {html}");
+    }
+
+    // ── render_source: one-off transient renders ─────────────────────────────
+
+    #[test]
+    fn render_source_happy_path() {
+        let ctx = make_ctx(serde_json::json!({ "name": "Skagit" }));
+        let html = TemplateEngine::render_source(
+            r#"<h1>{{ data.name | default("River") }}</h1>"#,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(html.trim(), "<h1>Skagit</h1>");
+    }
+
+    #[test]
+    fn render_source_uses_custom_filters() {
+        // Confirms the transient env wires the same filter set as production —
+        // a regression here would mean previews silently disagree with /image.png.
+        let ctx = make_ctx(serde_json::json!({ "n": 12345 }));
+        let html = TemplateEngine::render_source(
+            r#"{{ data.n | number_with_delimiter }}"#,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(html.trim(), "12,345");
+    }
+
+    #[test]
+    fn render_source_syntax_error_reports_inline_name() {
+        let ctx = make_ctx(JsonValue::Null);
+        // Unclosed `{%` triggers a parse error during add_template_owned.
+        let err = TemplateEngine::render_source(r#"{% if true %"#, &ctx).unwrap_err();
+        match err {
+            TemplateError::RenderError { name, source } => {
+                assert_eq!(name, "<inline>");
+                // Source must carry line info we can surface to the editor.
+                assert!(source.line().is_some(), "expected minijinja line info");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_source_runtime_error_is_caught() {
+        let ctx = make_ctx(JsonValue::Null);
+        // `strict` filter doesn't exist; runtime lookup fails.
+        let err =
+            TemplateEngine::render_source(r#"{{ data.x | nonexistent_filter }}"#, &ctx)
+                .unwrap_err();
+        assert!(matches!(err, TemplateError::RenderError { .. }));
+    }
+
+    #[test]
+    fn render_source_does_not_leak_into_engine() {
+        // Building a transient engine for an inline render must not affect a
+        // production-style TemplateEngine that's been constructed alongside.
+        let dir = TempDir::new().unwrap();
+        write_template(&dir, "loaded.html.jinja", r#"<p>loaded</p>"#);
+        let engine = TemplateEngine::new(dir.path()).unwrap();
+
+        let _ = TemplateEngine::render_source(
+            r#"<span>{{ data.x }}</span>"#,
+            &make_ctx(JsonValue::Null),
+        )
+        .unwrap();
+
+        // Loaded engine still has its template; "<inline>" is not registered.
+        assert!(engine.has_template("loaded"));
+        assert!(!engine.has_template("<inline>"));
+        assert_eq!(engine.template_count(), 1);
     }
 
     // ── Unit tests for helpers ────────────────────────────────────────────────

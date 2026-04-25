@@ -296,6 +296,59 @@ impl Compositor {
         self
     }
 
+    /// Render arbitrary pre-rendered HTML to PNG via the sidecar.
+    ///
+    /// Used by the admin "preview a template edit" path
+    /// (`POST /api/admin/preview/template`). Takes an HTML fragment that
+    /// already had its Jinja resolved by the caller, wraps it with the same
+    /// curated + uploaded `@font-face` block that production renders use, and
+    /// POSTs to the sidecar's `/render` endpoint at the requested dimensions.
+    ///
+    /// The uploaded-font list is refreshed from the attached `AssetStore` on
+    /// every call (mirroring `compose()`), so a preview taken right after a
+    /// font upload sees the new font without restart.
+    ///
+    /// `render_mode` is forwarded to the sidecar verbatim — preview callers
+    /// should pass `"einkPreview"` to get the dithered-but-not-negated output
+    /// the admin UI displays.
+    pub async fn render_html_to_png(
+        &self,
+        inner_html: String,
+        width: u32,
+        height: u32,
+        render_mode: &str,
+    ) -> Result<Vec<u8>, CompositorError> {
+        let fonts = if let Some(asset_store) = self.asset_store.as_ref() {
+            let summaries = asset_store.list_fonts().unwrap_or_default();
+            let uploaded: Vec<crate::fonts::UploadedFont> = summaries
+                .into_iter()
+                .map(|s| crate::fonts::UploadedFont {
+                    id: s.id,
+                    filename: s.filename,
+                    mime: s.mime,
+                })
+                .collect();
+            FontsWrap {
+                manifest: Arc::clone(&self.fonts.manifest),
+                base_url: self.fonts.base_url.clone(),
+                uploaded_fonts: Arc::new(uploaded),
+            }
+        } else {
+            self.fonts.clone()
+        };
+
+        call_sidecar(
+            &self.sidecar_url,
+            inner_html,
+            width,
+            height,
+            "<preview>",
+            render_mode,
+            &fonts,
+        )
+        .await
+    }
+
     /// Render all items in `config` and composite them into a final 800×480 PNG.
     ///
     /// - `PluginSlot` and `StaticText` items are rendered concurrently via the
