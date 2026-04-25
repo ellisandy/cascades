@@ -103,4 +103,52 @@ describe("render sidecar", () => {
       expect(height).toBe(240);
     });
   });
+
+  // Issue #23 regression: with the old `networkidle0` strategy, parallel
+  // renders raced on per-render font/image fetches and any one of them
+  // could push past the (default) 30s setContent timeout, returning 500
+  // to the upstream cascades server. Reproduced in the wild on a Pi Zero
+  // 2 W with 5 parallel /image.png requests (2 of 5 timed out at 42s).
+  //
+  // The fix (domcontentloaded + bounded fonts.ready wait) means parallel
+  // renders no longer block on whole-page network quiescence. This test
+  // exercises the same parallel pattern. Loose timeout (45s) keeps it
+  // green on a slow CI runner; pre-fix, all 4 would fail under load.
+  describe("parallel renders (issue #23 regression)", () => {
+    it(
+      "completes 4 concurrent renders without timing out",
+      async () => {
+        const results = await Promise.all(
+          Array.from({ length: 4 }, () =>
+            render({ html: FIXTURE_HTML, width: 800, height: 480, mode: "device" }),
+          ),
+        );
+        for (const png of results) {
+          expect(png).toBeInstanceOf(Buffer);
+          expect(png.byteLength).toBeGreaterThan(0);
+        }
+      },
+      45_000,
+    );
+
+    it(
+      "tolerates a never-resolving subresource (e.g. dead font CDN) without hanging the render",
+      async () => {
+        // A reference to a host that should never connect within the
+        // bounded `domcontentloaded` window. Pre-fix, `networkidle0`
+        // would wait the full 30s for this to drain; post-fix, we paint
+        // and screenshot whatever's available without blocking.
+        const html = `<!DOCTYPE html><html><head><style>
+          @font-face { font-family: "Hangs"; src: url("http://10.255.255.1/never.woff2"); }
+          body { font-family: "Hangs", sans-serif; }
+        </style></head><body><h1>OK</h1></body></html>`;
+        const png = await render({ html, width: 400, height: 240, mode: "preview" });
+        expect(png).toBeInstanceOf(Buffer);
+        expect(png.byteLength).toBeGreaterThan(0);
+      },
+      // Tight timeout: if this exceeds 20s, the fix isn't actually
+      // bounding the wait and we've regressed to issue #23 behaviour.
+      20_000,
+    );
+  });
 });
