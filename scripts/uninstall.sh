@@ -34,6 +34,9 @@ log() { printf '\e[1;36m[uninstall]\e[0m %s\n' "$*"; }
 
 # Stop + disable in reverse-dependency order. Don't fail on
 # "unit not loaded" — that's the expected state on a partial install.
+# `cascades-display.service` is in the loop too: it doesn't ship anymore
+# (PR #20 removed it), but leftover installs from PR #19 may still have
+# it enabled. Cleaning it up here keeps uninstalls fully convergent.
 for unit in cascades-display.service cascades.service cascades-sidecar.service; do
     if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q "$unit"; then
         systemctl disable --now "$unit" 2>/dev/null || true
@@ -60,8 +63,9 @@ if [[ "${PURGE}" -eq 1 ]]; then
     fi
     log "Purged"
 else
-    # Preserve data + config. Remove only the binary, sidecar/, display/,
-    # templates/, fonts/ — everything that install.sh would re-create.
+    # Preserve data + config. Remove only the things install.sh re-creates.
+    # `display/` is in the list because PR #19 used to install it; if it's
+    # left over from an old install, this is the right place to clean up.
     for sub in cascades sidecar display templates fonts; do
         rm -rf "${INSTALL_DIR}/${sub:?}"
     done
