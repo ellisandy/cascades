@@ -1,0 +1,99 @@
+/* Cascades base CSS — hand-rolled utility classes used by every plugin
+ * template. Inlined into every sidecar render via fonts::wrap_html, so
+ * Puppeteer applies them before screenshotting.
+ *
+ * Modeled loosely on TRMNL's utility framework but self-contained — no
+ * upstream dependency. Change here, change in every render.
+ *
+ * Sizing target: 800x480 e-ink display rendered at 1x. Type sizes assume
+ * the viewer is ~3 ft from the panel.
+ */
+
+/* Reset + page */
+html, body {
+  margin: 0;
+  padding: 0;
+}
+body {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  padding: 12px;
+  box-sizing: border-box;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #000;
+  background: #fff;
+  font-size: 18px;
+  line-height: 1.25;
+}
+/* The plugin template is the body's only child; let it fill. */
+body > * {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: inherit;
+}
+
+/* ── Layout / flex utilities ────────────────────────────────────────────── */
+.flex--col {
+  display: flex;
+  flex-direction: column;
+}
+.flex--row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: center;
+}
+/* Stretch fills the cross-axis. In flex--col that's horizontal stretch
+ * (children fill the width); in flex--row that's vertical stretch. */
+.layout--stretch {
+  align-items: stretch;
+}
+/* "Center along the X axis" — the meaning depends on flex direction. */
+.flex--col.layout--center-x { align-items: center; }
+.flex--row.layout--center-x { justify-content: center; }
+/* Space-between always means the main axis. */
+.layout--space-between { justify-content: space-between; }
+
+/* ── Typographic scale ──────────────────────────────────────────────────── */
+.title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.label {
+  font-size: 16px;
+  font-weight: 400;
+}
+.value {
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.value--large      { font-size: 56px; font-weight: 700; }
+.value--xlarge     { font-size: 80px; font-weight: 700; }
+.value--xxxlarge   { font-size: 120px; font-weight: 700; line-height: 1; }
+
+/* Gray dithers to a stippled pattern on the 1-bit e-ink output, which is
+ * exactly the visual effect we want for de-emphasised text. */
+.text--gray-50 { color: #888; }
+
+/* ── Structural blocks ──────────────────────────────────────────────────── */
+.title_bar {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 6px;
+  border-bottom: 2px solid #000;
+  margin-bottom: 8px;
+  flex: 0 0 auto;
+}
+.divider {
+  height: 1px;
+  background: #000;
+  margin: 8px 0;
+  flex: 0 0 auto;
+}

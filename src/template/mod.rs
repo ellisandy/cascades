@@ -1,10 +1,19 @@
-//! Template engine — Liquid rendering via minijinja with TRMNL-compatible custom filters.
+//! Template engine — Jinja rendering via minijinja with custom filters.
 //!
-//! Loads `.html.liquid` files from a `templates/` directory at the path supplied
-//! to [`TemplateEngine::new`].  Assembles the standard Liquid context
+//! Loads `.html.jinja` files from a `templates/` directory at the path supplied
+//! to [`TemplateEngine::new`].  Assembles the render context
 //! `{ data, settings, trip_decision, now, error }` defined in
 //! `docs/research/target-architecture.md §5c` and renders the template to an
 //! HTML string.  No sidecar integration — callers receive raw HTML.
+//!
+//! # On the file extension
+//!
+//! Templates use Jinja2 syntax (filter calls with parens — `default("x")` —
+//! and `{# ... #}` comments) implemented by the [`minijinja`] crate. Earlier
+//! revisions of this codebase named the files `.html.liquid` despite parsing
+//! them with minijinja; that misnomer was cleaned up in the
+//! "template-pipeline cleanup" PR. If you find a stale "Liquid" reference in
+//! a doc or comment, treat it as a bug and submit a fix.
 
 use minijinja::value::Rest;
 use minijinja::{Environment, Error, Value};
@@ -74,7 +83,7 @@ pub struct CriterionResult {
     pub reason: String,
 }
 
-/// Full render context passed to every Liquid template (target-architecture.md §5c).
+/// Full render context passed to every Jinja template (target-architecture.md §5c).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RenderContext {
     /// The plugin's own fetch result as an open JSON value.
@@ -99,7 +108,7 @@ pub struct RenderContext {
 
 // ─── Engine ──────────────────────────────────────────────────────────────────
 
-/// Liquid template engine backed by minijinja.
+/// Jinja template engine backed by minijinja.
 ///
 /// Call [`TemplateEngine::new`] once at startup, then [`TemplateEngine::render`]
 /// for every display cycle.  Templates are parsed once at construction time;
@@ -112,7 +121,7 @@ pub struct TemplateEngine {
 }
 
 impl TemplateEngine {
-    /// Load all `.html.liquid` files from `templates_dir`.
+    /// Load all `.html.jinja` files from `templates_dir`.
     ///
     /// Returns `Err(TemplateError::DirectoryNotFound)` if the directory does
     /// not exist.  Individual file-read errors are returned individually.
@@ -129,8 +138,8 @@ impl TemplateEngine {
         let mut raw: Vec<(String, String)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("liquid") {
-                // Strip the .liquid extension, then the inner .html suffix if present.
+            if path.extension().and_then(|s| s.to_str()) == Some("jinja") {
+                // Strip the .jinja extension, then the inner .html suffix if present.
                 let stem = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -162,7 +171,7 @@ impl TemplateEngine {
         Ok(TemplateEngine { env, names })
     }
 
-    /// Render `template_name` (the stem, without `.html.liquid`) with `ctx`.
+    /// Render `template_name` (the stem, without `.html.jinja`) with `ctx`.
     ///
     /// Returns the rendered HTML string.
     pub fn render(&self, template_name: &str, ctx: &RenderContext) -> Result<String, TemplateError> {
@@ -316,7 +325,7 @@ fn filter_round(value: Value, precision: Option<i64>) -> Result<Value, Error> {
 /// Used as: `{{ settings.site_name | default("River") }}`
 ///
 /// Unlike minijinja's built-in, also treats empty strings and `null` as falsy —
-/// matching Liquid / TRMNL behaviour.
+/// matching Liquid / TRMNL behaviour (the filter shape is the same in both).
 fn filter_default(value: Value, args: Rest<Value>) -> Result<Value, Error> {
     let fallback = args.first().cloned().unwrap_or_else(|| Value::from(""));
 
@@ -468,8 +477,8 @@ mod tests {
     #[test]
     fn loads_liquid_templates_from_directory() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "river.html.liquid", "<p>hello</p>");
-        write_template(&dir, "weather.html.liquid", "<p>world</p>");
+        write_template(&dir, "river.html.jinja", "<p>hello</p>");
+        write_template(&dir, "weather.html.jinja", "<p>world</p>");
         write_template(&dir, "ignored.txt", "not loaded");
 
         let engine = TemplateEngine::new(dir.path()).unwrap();
@@ -499,7 +508,7 @@ mod tests {
     #[test]
     fn renders_data_fields() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "river.html.liquid", r#"<span>{{ data.water_level_ft }} ft</span>"#);
+        write_template(&dir, "river.html.jinja", r#"<span>{{ data.water_level_ft }} ft</span>"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "water_level_ft": 4.2 }));
         let html = engine.render("river", &ctx).unwrap();
@@ -509,7 +518,7 @@ mod tests {
     #[test]
     fn renders_settings_fields() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "river.html.liquid", r#"<title>{{ settings.site_name }}</title>"#);
+        write_template(&dir, "river.html.jinja", r#"<title>{{ settings.site_name }}</title>"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(JsonValue::Null);
         let html = engine.render("river", &ctx).unwrap();
@@ -519,7 +528,7 @@ mod tests {
     #[test]
     fn renders_now_fields() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ now.unix }} {{ now.iso }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ now.unix }} {{ now.iso }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(JsonValue::Null);
         let html = engine.render("t", &ctx).unwrap();
@@ -532,7 +541,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_template(
             &dir,
-            "t.html.liquid",
+            "t.html.jinja",
             r#"{% if error %}<span class="stale">{{ error }}</span>{% endif %}"#,
         );
         let engine = TemplateEngine::new(dir.path()).unwrap();
@@ -548,7 +557,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_template(
             &dir,
-            "t.html.liquid",
+            "t.html.jinja",
             r#"{% if trip_decision %}{% if trip_decision.go %}GO{% else %}NO GO{% endif %}{% endif %}"#,
         );
         let engine = TemplateEngine::new(dir.path()).unwrap();
@@ -568,7 +577,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_template(
             &dir,
-            "t.html.liquid",
+            "t.html.jinja",
             r#"{% if trip_decision %}<b>eval</b>{% endif %}none"#,
         );
         let engine = TemplateEngine::new(dir.path()).unwrap();
@@ -583,7 +592,7 @@ mod tests {
     #[test]
     fn filter_number_with_delimiter_basic() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.n | number_with_delimiter }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.n | number_with_delimiter }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "n": 12345 }));
         let html = engine.render("t", &ctx).unwrap();
@@ -593,7 +602,7 @@ mod tests {
     #[test]
     fn filter_number_with_delimiter_large() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.flow | number_with_delimiter }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.flow | number_with_delimiter }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "flow": 1234567 }));
         let html = engine.render("t", &ctx).unwrap();
@@ -603,7 +612,7 @@ mod tests {
     #[test]
     fn filter_number_with_delimiter_small() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.n | number_with_delimiter }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.n | number_with_delimiter }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "n": 999 }));
         let html = engine.render("t", &ctx).unwrap();
@@ -615,7 +624,7 @@ mod tests {
     #[test]
     fn filter_round_one_decimal() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.v | round(1) }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.v | round(1) }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "v": 4.567 }));
         let html = engine.render("t", &ctx).unwrap();
@@ -625,7 +634,7 @@ mod tests {
     #[test]
     fn filter_round_zero_decimals() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.v | round(0) }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.v | round(0) }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "v": 4.5 }));
         let html = engine.render("t", &ctx).unwrap();
@@ -639,7 +648,7 @@ mod tests {
     #[test]
     fn filter_default_passes_through_present_value() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.name | default("Unknown") }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.name | default("Unknown") }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({ "name": "Skagit" }));
         let html = engine.render("t", &ctx).unwrap();
@@ -649,7 +658,7 @@ mod tests {
     #[test]
     fn filter_default_returns_fallback_for_missing() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.missing | default("N/A") }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.missing | default("N/A") }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let ctx = make_ctx(serde_json::json!({}));
         let html = engine.render("t", &ctx).unwrap();
@@ -663,7 +672,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_template(
             &dir,
-            "t.html.liquid",
+            "t.html.jinja",
             r#"{{ data.count }} {{ data.count | pluralize("day", "days") }}"#,
         );
         let engine = TemplateEngine::new(dir.path()).unwrap();
@@ -678,7 +687,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_template(
             &dir,
-            "t.html.liquid",
+            "t.html.jinja",
             r#"{{ data.count }} {{ data.count | pluralize("day", "days") }}"#,
         );
         let engine = TemplateEngine::new(dir.path()).unwrap();
@@ -692,7 +701,7 @@ mod tests {
     #[test]
     fn filter_days_ago_same_day() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.ts | days_ago }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.ts | days_ago }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -706,7 +715,7 @@ mod tests {
     #[test]
     fn filter_days_ago_two_days() {
         let dir = TempDir::new().unwrap();
-        write_template(&dir, "t.html.liquid", r#"{{ data.ts | days_ago }}"#);
+        write_template(&dir, "t.html.jinja", r#"{{ data.ts | days_ago }}"#);
         let engine = TemplateEngine::new(dir.path()).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -725,7 +734,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_template(
             &dir,
-            "river.html.liquid",
+            "river.html.jinja",
             r#"<!DOCTYPE html>
 <html>
 <body>

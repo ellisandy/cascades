@@ -16,7 +16,7 @@ Two processes run together:
    display layouts, serves API endpoints.
 
 The compositor resolves templates by convention:
-`templates/{plugin_id}_{variant}.html.liquid`.
+`templates/{plugin_id}_{variant}.html.jinja`.
 
 ---
 
@@ -242,7 +242,7 @@ slots = [
 See `docs/plugin-authoring.md` for a complete walkthrough. In brief:
 
 1. Create `config/plugins.d/myplugin.toml` with a `[[plugin]]` entry.
-2. Create `templates/myplugin_full.html.liquid` (and other variant templates as needed).
+2. Create `templates/myplugin_full.html.jinja` (and other variant templates as needed).
 3. Restart the server — or send `SIGHUP` to hot-reload `plugins.d/`.
 
 ---

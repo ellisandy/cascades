@@ -5,7 +5,7 @@
 Cascades is a trip-condition rendering pipeline for e-ink displays. It polls
 outdoor data sources (NOAA weather, USGS river gauges, WSDOT ferries, NPS
 trail conditions, WSDOT road alerts), runs the data through a criteria-based
-evaluation engine, renders Liquid HTML templates to PNGs via a headless Chrome
+evaluation engine, renders Jinja HTML templates to PNGs via a headless Chrome
 sidecar, dithers them for e-ink, and serves the composited frame to wall-
 mounted devices on a configurable refresh cycle.
 
@@ -32,7 +32,7 @@ small and restart cheaply.
 - `axum` 0.8 — async HTTP framework
 - `tokio` 1 — async runtime
 - `rusqlite` 0.31 (bundled) — local persistence
-- `minijinja` 2 — Liquid-compatible template engine
+- `minijinja` 2 — Jinja2-compatible template engine
 - `image` 0.24 — PNG compositing
 - `ureq` 2 — blocking HTTP client (run on blocking thread pool)
 - `notify` 6 — filesystem watcher for plugin hot-reload
@@ -72,7 +72,7 @@ cascades/
 │   │   ├── road_closures.rs     WSDOT highway alerts
 │   │   ├── presets.rs           Preset definitions for common APIs
 │   │   └── fixtures/            Canned data for offline/test mode
-│   ├── template/                Liquid engine wrapper + render context + filters
+│   ├── template/                Jinja engine wrapper + render context + filters
 │   └── sidecar/                 Bun render server
 │       ├── server.ts            POST /render → PNG
 │       └── render.test.ts
@@ -84,7 +84,7 @@ cascades/
 │   ├── plugins.d/               Drop-in plugin definitions
 │   └── secrets.toml             Auto-generated device API key (gitignored)
 │
-├── templates/                   Liquid HTML templates per plugin variant
+├── templates/                   Jinja HTML templates per plugin variant
 ├── tests/                       Integration tests (acceptance, compositor, visual)
 ├── docs/                        Design docs + research
 ├── scripts/dev-server.sh        Start in fixture mode
@@ -120,7 +120,7 @@ cascades/
 | `layout_store/`               | Tables `display_layouts` + `layout_items`; persists `LayoutItem` enum; seeded from `display.toml`                                                                    |
 | `source_store/`               | Table `data_sources` for user-defined generic HTTP sources; enforces `MIN_REFRESH_INTERVAL_SECS` and `MAX_CACHED_RESPONSE_BYTES`                                     |
 | `sources/`                    | `Source` trait + built-in implementations; fixture data embedded in module for offline runs                                                                          |
-| `template/`                   | `TemplateEngine` wrapping minijinja; `RenderContext` (`data`, `settings`, `trip_decision`, `now`, `error`); custom Liquid filters                                    |
+| `template/`                   | `TemplateEngine` wrapping minijinja; `RenderContext` (`data`, `settings`, `trip_decision`, `now`, `error`); custom Jinja filters                                    |
 | `format.rs`                   | Format-string evaluation for `DataField` items. Filters: `round(N)`, `number_with_delimiter`, `uppercase`, `lowercase`                                               |
 | `jsonpath.rs`                 | Minimal JSONPath supporting `$.a.b`, `$.a[0]`, `$.a[0].b`                                                                                                            |
 
@@ -131,7 +131,7 @@ INIT
   load config.toml + display.toml + plugins.d/*.toml
   open SQLite (instance_store, layout_store, source_store)
   load plugin registry + seed default field mappings
-  load Liquid templates
+  load Jinja templates
   spawn background tasks for built-in sources (weather / river / ferry / trail / road)
   spawn SourceScheduler for user-defined HTTP sources
   start Axum on config.server.port
@@ -227,7 +227,7 @@ concurrently; the compositor blits results into a single frame.
 trait. Criteria produce pass/fail plus near-miss margins (e.g. "within 5 °F"
 or "within 10 % of target flow"). Stale data trips a separate status.
 
-**Template context.** Every Liquid template receives:
+**Template context.** Every Jinja template receives:
 - `data` — cached source JSON
 - `settings` — the instance's user-configured settings
 - `trip_decision` — go / no-go plus per-criterion results

@@ -6,8 +6,6 @@ source = "usgs"
 refresh_interval_secs = 300
 data_strategy = "polling"
 
-template_full = "templates/river_full.html.jinja"
-template_half_horizontal = "templates/river_half.html.jinja"
 
 [[plugin.criteria]]
 key = "water_level_ft"
@@ -46,7 +44,7 @@ x = 10
 y = 10
 width = 180
 height = 24
-font_size = 16
+font_size = 32
 
 [[plugin.default_elements]]
 kind = "data_field"
@@ -68,7 +66,7 @@ x = 10
 y = 104
 width = 180
 height = 24
-font_size = 16
+font_size = 32
 
 [[plugin.default_elements]]
 kind = "static_divider"

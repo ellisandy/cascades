@@ -2,18 +2,24 @@
 
 A plugin binds a data source to one or more display templates. This guide covers
 everything needed to write a plugin from scratch: the TOML definition format,
-Liquid template context variables, available CSS utility classes, and a complete
+Jinja template context variables, available CSS utility classes, and a complete
 end-to-end example.
+
+> **Templates use Jinja2 syntax**, parsed by [minijinja](https://docs.rs/minijinja).
+> The file extension is `.html.jinja`. Filter calls use parens
+> (`{{ value | default("x") }}`); comments use `{# ... #}`. If you see Liquid
+> documentation referenced anywhere, it's a stale leftover from when the
+> codebase was named after Liquid syntax — Jinja is the actual format.
 
 ---
 
 ## How plugins work
 
 1. A TOML file in `config/plugins.d/` defines the plugin: its ID, data source,
-   polling interval, template names, evaluation criteria, and settings schema.
-2. Liquid template files in `templates/` render the plugin's data as HTML.
+   polling interval, evaluation criteria, and settings schema.
+2. Jinja template files in `templates/` render the plugin's data as HTML.
 3. The compositor looks up the template by convention:
-   `{plugin_id}_{variant}` → `templates/{plugin_id}_{variant}.html.liquid`.
+   `{plugin_id}_{variant}` → `templates/{plugin_id}_{variant}.html.jinja`.
 4. The render sidecar (Bun + Puppeteer) screenshots the HTML and returns a PNG.
 5. `config/plugins.d/` is hot-reloaded: drop a new `.toml` file and send `SIGHUP`
    — no restart needed. Template files require a restart to reload.
@@ -34,9 +40,10 @@ description = "Current tide level from a NOAA CO-OPS station."
 source = "noaa_tides"
 refresh_interval_secs = 600
 data_strategy = "polling"
-
-template_full = "templates/tide_full.html.liquid"
 ```
+
+That's all the manifest needs — the matching template file
+`templates/tide_full.html.jinja` is found by naming convention.
 
 ### Full field reference
 
@@ -58,13 +65,12 @@ data_strategy = "polling"       # One of: "polling", "webhook", "static".
                                 # "static"  — no fetch; data set once at startup.
 
 # ── Templates ────────────────────────────────────────────────────────────────
-# Each variant maps to a template file. The compositor builds the template name
-# as "{id}_{variant}" so these fields are for documentation only — the actual
-# lookup uses the naming convention.
-template_full             = "templates/tide_full.html.liquid"             # 800×480
-template_half_horizontal  = "templates/tide_half_horizontal.html.liquid"  # 800×240
-template_half_vertical    = "templates/tide_half_vertical.html.liquid"    # 400×480
-template_quadrant         = "templates/tide_quadrant.html.liquid"         # 400×240
+# Templates are resolved by naming convention, not declared here:
+#   templates/{id}_full.html.jinja             # 800×480
+#   templates/{id}_half_horizontal.html.jinja  # 800×240
+#   templates/{id}_half_vertical.html.jinja    # 400×480
+#   templates/{id}_quadrant.html.jinja         # 400×240
+# Drop the file in templates/ and it'll be picked up at startup.
 
 # ── Trip evaluation criteria ─────────────────────────────────────────────────
 # Each [[plugin.criteria]] entry declares one evaluable metric. Empty means the
@@ -112,7 +118,7 @@ stored differently from data settings:**
 | Aspect | Data settings (`text`/`number`/...) | Theming knobs (`text_style`/`color`/`toggle`) |
 |---|---|---|
 | Storage | `instance_store.settings` (per-instance) | `Group.style_overrides` (**per-layout**) |
-| Liquid binding | `{{ settings.foo }}` | `{{ style.foo }}` |
+| Template binding | `{{ settings.foo }}` | `{{ style.foo }}` |
 | Use for | Data fetch parameters, identity | Visual customization |
 
 ### Theming field types
@@ -151,9 +157,9 @@ label = "Accent colour"
 type = "color"
 ```
 
-`templates/weather_full.html.liquid`:
+`templates/weather_full.html.jinja`:
 
-```liquid
+```jinja
 <style>
   .weather-root {
     --temp-color: {{ style.temp_style.color | default("#000000") }};
@@ -193,15 +199,15 @@ orientation = "full"   # selects the template variant
 The compositor resolves templates by plugin instance ID and layout variant:
 
 ```
-{plugin_id}_{variant}  →  templates/{plugin_id}_{variant}.html.liquid
+{plugin_id}_{variant}  →  templates/{plugin_id}_{variant}.html.jinja
 ```
 
 | Variant | File suffix | Dimensions |
 |---|---|---|
-| `full` | `_full.html.liquid` | 800×480 |
-| `half_horizontal` | `_half_horizontal.html.liquid` | 800×240 |
-| `half_vertical` | `_half_vertical.html.liquid` | 400×480 |
-| `quadrant` | `_quadrant.html.liquid` | 400×240 |
+| `full` | `_full.html.jinja` | 800×480 |
+| `half_horizontal` | `_half_horizontal.html.jinja` | 800×240 |
+| `half_vertical` | `_half_vertical.html.jinja` | 400×480 |
+| `quadrant` | `_quadrant.html.jinja` | 400×240 |
 
 You only need to provide the variants your plugin actually uses. If a display
 config requests a variant with no matching template, the compositor returns an
@@ -209,13 +215,13 @@ error for that slot.
 
 ---
 
-## Liquid template context
+## Jinja template context
 
 Every template receives these top-level variables:
 
 ### `data`
 
-The plugin's most recently fetched JSON, deserialized as a Liquid object. The
+The plugin's most recently fetched JSON, deserialized as a Jinja object. The
 shape depends on what the source returned.
 
 ```liquid
@@ -308,7 +314,7 @@ single declaration of your visual default.
 
 ---
 
-## Custom Liquid filters
+## Custom Jinja filters
 
 Cascades registers these filters via minijinja:
 
@@ -381,8 +387,6 @@ source = "noaa_tides"
 refresh_interval_secs = 600
 data_strategy = "polling"
 
-template_full = "templates/tide_full.html.liquid"
-
 [[plugin.criteria]]
 key          = "level_ft"
 label        = "Tide level"
@@ -408,7 +412,7 @@ default     = "Tide"
 
 ### 2. Create the template
 
-`templates/tide_full.html.liquid`:
+`templates/tide_full.html.jinja`:
 
 ```html
 <div class="layout--stretch flex--col">

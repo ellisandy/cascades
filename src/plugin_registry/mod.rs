@@ -162,17 +162,13 @@ pub struct PluginDefinition {
     #[serde(default)]
     pub data_strategy: DataStrategy,
 
-    // ── Template paths ──────────────────────────────────────────────────────
-    // At least `template_full` should be provided. Absent variants fall back
-    // to `template_full` at render time.
-    /// Template for the full 800×480 layout.
-    pub template_full: Option<String>,
-    /// Template for the half-horizontal (800×240) layout.
-    pub template_half_horizontal: Option<String>,
-    /// Template for the half-vertical (400×480) layout.
-    pub template_half_vertical: Option<String>,
-    /// Template for the quadrant (400×240) layout.
-    pub template_quadrant: Option<String>,
+    // Note: there is no `template_full` / `template_half_*` / `template_quadrant`
+    // field. Templates are resolved by naming convention:
+    //   `{plugin_id}_{variant}.html.jinja` in the templates/ directory.
+    // The compositor builds the name from `(plugin_instance_id, layout_variant)`
+    // — see src/compositor.rs::render_slot. If a manifest needs a non-default
+    // path it'd require a real plumbing change; the previous "documentation
+    // only" `template_*` fields were dead code and have been removed.
 
     // ── Trip evaluation criteria ────────────────────────────────────────────
     /// Criteria registered at load time. Empty means the plugin never produces
@@ -553,7 +549,6 @@ description = "A test plugin."
 source = "{source}"
 refresh_interval_secs = 300
 data_strategy = "polling"
-template_full = "templates/{id}_full.html.jinja"
 "#
         )
     }
@@ -678,7 +673,6 @@ source = "usgs_v2"
 id = "river"
 name = "River"
 source = "usgs"
-template_full = "templates/river_full.html.jinja"
 
 [[plugin.criteria]]
 key = "water_level_ft"
@@ -799,7 +793,6 @@ source = "src"
 id = "weather"
 name = "Weather"
 source = "noaa"
-template_full = "templates/weather_full.html.jinja"
 
 [[plugin.default_elements]]
 kind = "data_field"
